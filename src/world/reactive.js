@@ -105,6 +105,101 @@ function put(parent, geometry, material, pos = [0, 0, 0], rot = [0, 0, 0], scale
 export const PENTATONIC = Object.freeze([0, 2, 4, 7, 9, 12, 14, 16]);
 const semitone = (n) => Math.pow(2, n / 12);
 
+/**
+ * 每一種反應物**自己**的觸發半徑（公尺）。WORLD.md §3.2 那一列寫的「1.75–4.4（自動）」
+ * 就是這六個數字的區間 —— 它們**本來就不一樣**：風鈴要走到手邊才晃得起來，
+ * 光菇圈是一整圈依序亮起來的連續回應，音石列的每一顆各自是一個觸發點。
+ *
+ * v1.2 · P16b 把它抽出來的理由：中觀層的淨空規則（`scripts/lib/screen-rules.mjs`）
+ * 以前對整個反應層套用**最大的那一個（4.4）**，等於拿光菇圈的尺寸去量風鈴 ——
+ * 這正是 P06c 記下的那條教訓（「淨空半徑要跟著**那一層自己的互動半徑**走，
+ * 把別層的保守值整批套過來會把小東西擠出地圖」）在同一層裡又犯了一次。
+ * 建造器與淨空規則從此讀**同一份**。
+ *
+ * 靜水盤（ripple）是唯一跟著參數走的：它的觸發半徑是「水盤半徑 ＋ 1.5」，
+ * 所以放在 `reactiveTriggerR()` 裡算，不是常數。
+ */
+export const REACT_TRIGGER_R = Object.freeze({
+  chime: 3.2,
+  glowcap: 4.4,
+  songstone: 1.75,
+  ripple: 3.2, // ＝ 預設水盤半徑 1.7 ＋ 1.5（有 `opts.radius` 時以那個為準）
+  spirit: 4.2,
+  moths: 3.0,
+});
+
+/** 靜水盤的水盤半徑（公尺）—— 觸發半徑是它 ＋1.5。 */
+const RIPPLE_R = 1.7;
+
+/**
+ * 一個反應物的觸發半徑（公尺）。`opts` 會影響的只有靜水盤。
+ * @param {string} kind
+ * @param {object} [opts]
+ */
+export function reactiveTriggerR(kind, opts = {}) {
+  if (kind === 'ripple') return (opts.radius || RIPPLE_R) + 1.5;
+  return REACT_TRIGGER_R[kind];
+}
+
+/**
+ * 音石列每一顆石頭相對於落點的位移（公尺）—— 一排 5 顆、間距 2.3，散開 ±4.6 公尺。
+ *
+ * 抽出來是因為「一個 id 對應一排東西」這件事會被**別人**問到（P06c 的教訓：
+ * 中心合法不代表整排合法）。目前的呼叫者是建造器與 `test:rubric` 的逐顆斷言；
+ * 中觀層的淨空刻意不逐顆問（理由在 `SONGSTONE_ROW_CLEAR`）。
+ * @param {object} [opts] `{ stones, gap, dir }`
+ * @returns {number[][]} `[[dx, dz], …]`
+ */
+export function songStoneOffsets(opts = {}) {
+  const n = opts.stones || 5;
+  const gap = opts.gap || 2.3;
+  const dir = Number.isFinite(opts.dir) ? opts.dir : 0;
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const off = (i - (n - 1) / 2) * gap;
+    out.push([Math.cos(dir) * off, Math.sin(dir) * off]);
+  }
+  return out;
+}
+
+/**
+ * 音石列在**中觀層淨空**這件事上算幾公尺（公尺）——**不是** `REACT_TRIGGER_R.songstone`。
+ *
+ * 1.75 是每一顆石頭自己的觸發半徑；一排 5 顆散開 ±4.6 公尺，
+ * 照理該攤成 5 個各自 1.75 的目標。v1.2 · P16b 真的攤過一次，量到的是：
+ * **那條規則問錯了問題**。音石列是「沿著走」的東西 —— 它的保證是「整排走得完、
+ * 每一顆都踩得到」（P06c 已經有逐顆 `isWalkable` 的硬斷言在守），
+ * 而不是「每一顆四周整圈都走得到」。整圈那條線攤下去的後果實測是：
+ * `frugality-emptied-step` 離 `frg-song-eastedge` 最東那一顆 3.30 公尺、差 0.47 公尺不合格，
+ * 而減法之庭**再也找不到第二個落點**（0.25 公尺格點掃過 66,049 格，合法候選 0）——
+ * 被擋掉的那一側玩家本來就還是從其餘 15 個方向走得進 1.75 的觸發圈，那一顆照響。
+ *
+ * **上面那三個數字是 P16b 當時、v1.2 · P22c 把地圖 ×1.3 之前量的**（院子那時候半徑 32，
+ * 現在 41.6；格點數與「合法候選 0」都會跟著變）。留著它們是因為**結論不靠絕對值成立**：
+ * 音石列的保證是「整排走得完」，不是「每一顆四周整圈都走得到」——
+ * 那是問錯問題，地圖再大一倍也還是問錯。要重新開這個題目就得重量一次，不要引用這三個數字。
+ *
+ * 所以這一層維持「整排一個目標、半徑 4.4」（＝反應層的預設值，涵蓋到路過的人一定踩得到），
+ * 並且把量到的數字留在這裡：要動那座高台或這一排音石之前，先讀這一段。
+ */
+export const SONGSTONE_ROW_CLEAR = 4.4;
+
+/**
+ * 把 `REACTIVE_SPOTS` 攤成中觀層擺位規則吃的淨空目標：**每一個各自帶自己的半徑**。
+ * 除了音石列（見 `SONGSTONE_ROW_CLEAR`）之外，一個落點就是一個目標。
+ * @param {Array} [spots]
+ * @returns {Array<{id:string, region:string, at:number[], r:number}>}
+ */
+export function reactiveTargets(spots = REACTIVE_SPOTS) {
+  const out = [];
+  for (const s of spots) {
+    const opts = s.opts || {};
+    const r = s.kind === 'songstone' ? SONGSTONE_ROW_CLEAR : reactiveTriggerR(s.kind, opts);
+    out.push({ id: s.id, region: s.region, at: s.at, r });
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------ *
  * 六種反應
  * ------------------------------------------------------------------ */
@@ -133,7 +228,7 @@ function buildChime(kit, opts = {}) {
     tubes,
     spark,
     swing: 0,
-    triggers: [{ dx: 0, dz: 0, enter: 3.2, note: 0 }],
+    triggers: [{ dx: 0, dz: 0, enter: REACT_TRIGGER_R.chime, note: 0 }],
     onEnter() {
       this.swing = 1;
       // varied：這個音是隨機挑的 → 交給環狀緩衝把「剛剛才響過的那幾個」擋掉，
@@ -174,7 +269,7 @@ function buildGlowCaps(kit, opts = {}) {
   return {
     group: grp,
     caps,
-    triggers: [{ dx: 0, dz: 0, enter: 4.4, note: 0 }],
+    triggers: [{ dx: 0, dz: 0, enter: REACT_TRIGGER_R.glowcap, note: 0 }],
     onEnter() {
       return { sound: 'bloom', note: 7 };
     },
@@ -198,15 +293,14 @@ function buildGlowCaps(kit, opts = {}) {
  */
 function buildSongStones(kit, opts = {}) {
   const grp = new THREE.Group();
-  const n = opts.stones || 5;
-  const gap = opts.gap || 2.3;
-  const dir = Number.isFinite(opts.dir) ? opts.dir : 0;
+  // 位移與淨空規則共用同一支（`songStoneOffsets`）——一排 5 顆的兩端不會再被漏掉
+  const offsets = songStoneOffsets(opts);
+  const n = offsets.length;
   const stones = [];
   const triggers = [];
   for (let i = 0; i < n; i += 1) {
-    const off = (i - (n - 1) / 2) * gap;
-    const x = Math.cos(dir) * off;
-    const z = Math.sin(dir) * off;
+    const x = offsets[i][0];
+    const z = offsets[i][1];
     const holder = new THREE.Object3D();
     holder.position.set(x, 0, z);
     const mat = emissive(kit.light, 0.16);
@@ -214,7 +308,7 @@ function buildSongStones(kit, opts = {}) {
     const vein = put(holder, torus(0.3, 0.03, 4, 14), mat, [0, 0.46, 0], [-Math.PI / 2, 0, 0]);
     grp.add(holder);
     stones.push({ holder, body, vein, mat, ring: 0 });
-    triggers.push({ dx: x, dz: z, enter: 1.75, note: PENTATONIC[i % PENTATONIC.length] });
+    triggers.push({ dx: x, dz: z, enter: REACT_TRIGGER_R.songstone, note: PENTATONIC[i % PENTATONIC.length] });
   }
   return {
     group: grp,
@@ -239,7 +333,7 @@ function buildSongStones(kit, opts = {}) {
 /** ④ 靜水盤（ripple）：踏近水邊 → 一圈水紋盪開。 */
 function buildRipplePool(kit, opts = {}) {
   const grp = new THREE.Group();
-  const r = opts.radius || 1.7;
+  const r = opts.radius || RIPPLE_R;
   put(grp, torus(r, 0.16, 4, 18), stone(kit.dark), [0, 0.14, 0], [-Math.PI / 2, 0, 0]);
   put(
     grp,
@@ -268,7 +362,7 @@ function buildRipplePool(kit, opts = {}) {
     group: grp,
     rings,
     r,
-    triggers: [{ dx: 0, dz: 0, enter: r + 1.5, note: 0 }],
+    triggers: [{ dx: 0, dz: 0, enter: reactiveTriggerR('ripple', opts), note: 0 }],
     onEnter() {
       const slot = this.rings.find((x) => x.life <= 0) || this.rings[0];
       slot.life = 1;
@@ -313,7 +407,7 @@ function buildSpirit(kit) {
     away: 0, // 0 = 在原地，1 = 竄開了
     hop: 0,
     facing: 0,
-    triggers: [{ dx: 0, dz: 0, enter: 4.2, note: 0 }],
+    triggers: [{ dx: 0, dz: 0, enter: REACT_TRIGGER_R.spirit, note: 0 }],
     onEnter() {
       if (this.away > 0.2) return null;
       this.away = 1;
@@ -343,6 +437,29 @@ function buildSpirit(kit) {
     },
   };
 }
+
+/* ------------------------------------------------------------------ *
+ * 外交式導向（v1.2 · P19）
+ * ------------------------------------------------------------------ *
+ *
+ * 世界一直有一個「下一個建議去處」（指南針的針、守望石的光、HUD 的那一行），
+ * 可是**站在世界裡的東西**從來沒有指過路。這一格讓已經到處都是的螢火群
+ * 整體偏向那個方向 —— 不是箭頭，是一群東西剛好都往那邊飄。
+ *
+ * 兩段疊起來，而且**分得開**：
+ *   · `MOTH_GUIDE_LEAN`  **靜態的那一段**：整團的家往目標側挪這麼多公尺。
+ *     `prefers-reduced-motion` 留的就是它 —— 拿掉的是動，不是資訊（§2.4）。
+ *   · `MOTH_GUIDE_SPAN`  **會動的那一段**：一批螢火沿著同一個方向前後流，
+ *     平均值是 0（所以它改變的是「看起來在流」，不是重心），而且乘上 `kinetic`。
+ *
+ * 關掉導向（設定頁）→ 偏向量是 0 → 每一幀與 P19 之前**逐值相同**。
+ */
+/** 整團往目標側挪幾公尺（螢火群的散佈半徑是 2.2，所以這是看得出來的一段）。 */
+export const MOTH_GUIDE_LEAN = 0.9;
+/** 沿著同一個方向前後流的幅度（公尺）。 */
+export const MOTH_GUIDE_SPAN = 1.5;
+/** 流一圈要幾秒的倒數（每秒走完幾圈）。 */
+export const MOTH_GUIDE_RATE = 0.22;
 
 /** ⑥ 螢火群（moths）：走進去 → 往外散開，站著不動 → 慢慢又聚回來。 */
 function buildMoths(kit, opts = {}) {
@@ -382,22 +499,37 @@ function buildMoths(kit, opts = {}) {
     home,
     vel,
     scatter: 0,
-    triggers: [{ dx: 0, dz: 0, enter: 3.0, note: 0 }],
+    triggers: [{ dx: 0, dz: 0, enter: REACT_TRIGGER_R.moths, note: 0 }],
     onEnter() {
       this.scatter = 1;
       return { sound: 'flutter', note: 19 };
     },
-    update(dt, t, kinetic, near, toPlayerX, toPlayerZ) {
+    /**
+     * @param {number} [gx] 導向的單位向量（v1.2 · P19；`0, 0` ＝ 沒有導向，
+     *   走的就是 P19 之前那一條路）
+     * @param {number} [gz]
+     */
+    update(dt, t, kinetic, near, toPlayerX, toPlayerZ, gx = 0, gz = 0) {
       this.scatter = Math.max(0, this.scatter - dt * 0.5);
       const arr = this.points.geometry.attributes.position.array;
       const push = this.scatter * 2.6 * kinetic;
       const len = Math.hypot(toPlayerX, toPlayerZ) || 1;
       const ax = -toPlayerX / len;
       const az = -toPlayerZ / len;
+      const guided = gx !== 0 || gz !== 0;
       for (let i = 0; i < this.n; i += 1) {
-        const hx = this.home[i * 3] + ax * push * (0.5 + (i % 4) * 0.2);
+        /*
+         * 導向：靜態的一段（`LEAN`）＋ 平均值為 0 的一段（`SPAN`，吃 `kinetic`）。
+         * 沒有導向時 `lean` 是 0，下面三行與 P19 之前逐值相同。
+         */
+        let lean = 0;
+        if (guided) {
+          const phase = (t * MOTH_GUIDE_RATE + i / this.n) % 1;
+          lean = MOTH_GUIDE_LEAN + kinetic * (phase - 0.5) * MOTH_GUIDE_SPAN;
+        }
+        const hx = this.home[i * 3] + gx * lean + ax * push * (0.5 + (i % 4) * 0.2);
         const hy = this.home[i * 3 + 1] + this.scatter * 0.7 * kinetic;
-        const hz = this.home[i * 3 + 2] + az * push * (0.5 + (i % 4) * 0.2);
+        const hz = this.home[i * 3 + 2] + gz * lean + az * push * (0.5 + (i % 4) * 0.2);
         const k = Math.min(1, dt * 2.4);
         arr[i * 3] += (hx - arr[i * 3]) * k;
         arr[i * 3 + 1] += (hy + Math.sin(t * 0.9 + i * 1.3) * 0.14 * kinetic - arr[i * 3 + 1]) * k;
@@ -437,36 +569,79 @@ export const REACTION_KINDS = Object.freeze({
  */
 export const REACTIVE_SPOTS = Object.freeze([
   /* --- foundations：路旁的第一批「它注意到你了」 --- */
-  { id: 'hub-chime-pool', kind: 'chime', region: 'foundations', at: [-39, 16] },
-  { id: 'hub-caps-carve', kind: 'glowcap', region: 'foundations', at: [-15, -34] },
-  { id: 'hub-song-tea', kind: 'songstone', region: 'foundations', at: [27, 44], opts: { dir: 0.8 } },
-  { id: 'hub-spirit-camp', kind: 'spirit', region: 'foundations', at: [40, 11] },
-  { id: 'hub-moths-west', kind: 'moths', region: 'foundations', at: [-31, 5] },
-  { id: 'hub-ripple-south', kind: 'ripple', region: 'foundations', at: [-6, -44] },
+  { id: 'hub-chime-pool', kind: 'chime', region: 'foundations', at: [-50.7, 20.8] },
+  { id: 'hub-caps-carve', kind: 'glowcap', region: 'foundations', at: [-19.5, -44.2] },
+  { id: 'hub-song-tea', kind: 'songstone', region: 'foundations', at: [35.1, 57.2], opts: { dir: 0.8 } },
+  { id: 'hub-spirit-camp', kind: 'spirit', region: 'foundations', at: [52, 14.3] },
+  { id: 'hub-moths-west', kind: 'moths', region: 'foundations', at: [-40.3, 6.5] },
+  { id: 'hub-ripple-south', kind: 'ripple', region: 'foundations', at: [-7.8, -57.2] },
 
   /* --- reasoning：階梯迴廊 --- */
-  { id: 'rsn-song-stair', kind: 'songstone', region: 'reasoning', at: [-77, -92], opts: { dir: 1.2, stones: 6 } },
-  { id: 'rsn-caps-thinker', kind: 'glowcap', region: 'reasoning', at: [-105, -110] },
-  { id: 'rsn-chime-examples', kind: 'chime', region: 'reasoning', at: [-108, -82] },
-  { id: 'rsn-moths-north', kind: 'moths', region: 'reasoning', at: [-104, -123] },
+  { id: 'rsn-song-stair', kind: 'songstone', region: 'reasoning', at: [-101.1, -119.6], opts: { dir: 1.2, stones: 6 } },
+  { id: 'rsn-caps-thinker', kind: 'glowcap', region: 'reasoning', at: [-136.5, -143] },
+  { id: 'rsn-chime-examples', kind: 'chime', region: 'reasoning', at: [-140.4, -106.6] },
+  { id: 'rsn-moths-north', kind: 'moths', region: 'reasoning', at: [-135.2, -159.9] },
 
   /* --- grounding：沉書檔案庫 --- */
-  { id: 'gnd-ripple-desk', kind: 'ripple', region: 'grounding', at: [92, -74] },
-  { id: 'gnd-chime-nook', kind: 'chime', region: 'grounding', at: [104, -117] },
-  { id: 'gnd-caps-well', kind: 'glowcap', region: 'grounding', at: [87, -117] },
-  { id: 'gnd-spirit-east', kind: 'spirit', region: 'grounding', at: [107, -81] },
+  { id: 'gnd-ripple-desk', kind: 'ripple', region: 'grounding', at: [119.6, -96.2] },
+  { id: 'gnd-chime-nook', kind: 'chime', region: 'grounding', at: [135.2, -152.1] },
+  { id: 'gnd-caps-well', kind: 'glowcap', region: 'grounding', at: [113.1, -152.1] },
+  { id: 'gnd-spirit-east', kind: 'spirit', region: 'grounding', at: [139.1, -105.3] },
 
   /* --- orchestration：齒輪工坊 --- */
-  { id: 'orc-chime-draft', kind: 'chime', region: 'orchestration', at: [-93.5, 80.5] },
-  { id: 'orc-song-engine', kind: 'songstone', region: 'orchestration', at: [-108, 109], opts: { dir: -0.6 } },
-  { id: 'orc-caps-west', kind: 'glowcap', region: 'orchestration', at: [-113, 97] },
-  { id: 'orc-moths-yard', kind: 'moths', region: 'orchestration', at: [-76, 115] },
+  { id: 'orc-chime-draft', kind: 'chime', region: 'orchestration', at: [-121.55, 104.65] },
+  { id: 'orc-song-engine', kind: 'songstone', region: 'orchestration', at: [-140.4, 141.7], opts: { dir: -0.6 } },
+  { id: 'orc-caps-west', kind: 'glowcap', region: 'orchestration', at: [-146.9, 126.1] },
+  { id: 'orc-moths-yard', kind: 'moths', region: 'orchestration', at: [-98.8, 149.5] },
 
   /* --- config：面具劇場 --- */
-  { id: 'cfg-caps-stage', kind: 'glowcap', region: 'config', at: [95, 123] },
-  { id: 'cfg-ripple-mirror', kind: 'ripple', region: 'config', at: [103, 112] },
-  { id: 'cfg-spirit-dressing', kind: 'spirit', region: 'config', at: [76, 96] },
-  { id: 'cfg-song-east', kind: 'songstone', region: 'config', at: [123, 113], opts: { dir: 1.9 } },
+  { id: 'cfg-caps-stage', kind: 'glowcap', region: 'config', at: [123.5, 159.9] },
+  { id: 'cfg-ripple-mirror', kind: 'ripple', region: 'config', at: [133.9, 145.6] },
+  { id: 'cfg-spirit-dressing', kind: 'spirit', region: 'config', at: [98.8, 124.8] },
+  { id: 'cfg-song-east', kind: 'songstone', region: 'config', at: [160.5, 142.75], opts: { dir: 1.9 } },
+
+  /*
+   * v1.2 · P06c：課程 v2 之後才蓋起來的七片土地本來一件都沒有 ——
+   * 「區域顏色看不出來」與「路上沒東西」其實是同一件事（區域色是靠物件顯的）。
+   * 這一批的落點全部先用 `scripts/pacing-audit.mjs` 量過（先量再放，WORLD §4.4），
+   * 種類挑的是那一片土地的調性（WORLD §1.4），不新增種類、不新增光源。
+   */
+
+  /* --- forms：量器坊（熄了火、冷錫色、最安靜 —— 只有一列音石與一架風鈴） --- */
+  { id: 'frm-song-westterrace', kind: 'songstone', region: 'forms', at: [-24.7, 198.25], opts: { dir: 0.4 } },
+  { id: 'frm-chime-measurebench', kind: 'chime', region: 'forms', at: [34.45, 140.4] },
+  { id: 'frm-caps-northstep', kind: 'glowcap', region: 'forms', at: [-9.1, 118.3] },
+  { id: 'frm-spirit-halfmould', kind: 'spirit', region: 'forms', at: [-42.9, 149.5] },
+
+  /* --- toolcraft：契約鍛冶場（爐子還溫著、火星最多） --- */
+  { id: 'tlc-chime-westgroove', kind: 'chime', region: 'toolcraft', at: [-185.25, 13.65] },
+  { id: 'tlc-caps-southgroove', kind: 'glowcap', region: 'toolcraft', at: [-165.75, -27.95] },
+  { id: 'tlc-moths-toolditch', kind: 'moths', region: 'toolcraft', at: [-127.4, -28.6] },
+  { id: 'tlc-song-anvil', kind: 'songstone', region: 'toolcraft', at: [-138.45, -18.85], opts: { dir: 0.4 } },
+
+  /* --- sight：觀象臺（不只讀字：看與聽 —— 水面、光、翅膀） --- */
+  { id: 'sgt-ripple-eastrim', kind: 'ripple', region: 'sight', at: [192.4, -17.55] },
+  { id: 'sgt-caps-northridge', kind: 'glowcap', region: 'sight', at: [181.35, 12.35] },
+  { id: 'sgt-moths-upperslope', kind: 'moths', region: 'sight', at: [168.35, -7.15] },
+  { id: 'sgt-chime-bridgehead', kind: 'chime', region: 'sight', at: [137.8, -28.6] },
+
+  /* --- refinery：校驗場（光被折過一次 —— 水紋、回音、一朵一朵亮） --- */
+  { id: 'rfn-ripple-northyard', kind: 'ripple', region: 'refinery', at: [-187.85, 206.05] },
+  { id: 'rfn-song-valley', kind: 'songstone', region: 'refinery', at: [-146.9, 184.6], opts: { dir: -0.7 } },
+  { id: 'rfn-caps-southrim', kind: 'glowcap', region: 'refinery', at: [-192.4, 135.85] },
+
+  /* --- divergence：分歧之廳（兩面刻著相反神諭的柱） --- */
+  { id: 'dvg-song-eastpillar', kind: 'songstone', region: 'divergence', at: [125.45, 7.15], opts: { dir: 1.3 } },
+  { id: 'dvg-chime-westmouth', kind: 'chime', region: 'divergence', at: [87.1, 0.65] },
+  { id: 'dvg-caps-middle', kind: 'glowcap', region: 'divergence', at: [100.1, 9.75] },
+
+  /* --- wards：護欄崗（最冷、螢火最少 —— 只有一架風鈴與一隻小獸） --- */
+  { id: 'wrd-chime-post', kind: 'chime', region: 'wards', at: [155.35, -192.4] },
+  { id: 'wrd-spirit-outerrim', kind: 'spirit', region: 'wards', at: [152.1, -209.95] },
+
+  /* --- frugality：減法之庭（最空最平、螢火最少 —— 全場最稀，這是設計不是遺漏） --- */
+  { id: 'frg-caps-plinth', kind: 'glowcap', region: 'frugality', at: [7.8, -128.7] },
+  { id: 'frg-song-eastedge', kind: 'songstone', region: 'frugality', at: [20.15, -92.95], opts: { dir: 2.4 } },
 ]);
 
 /* ------------------------------------------------------------------ *
@@ -570,38 +745,157 @@ function secretHush(kit) {
   return { group: grp, spin: pool, stars: null };
 }
 
+/**
+ * 高處的記號（v1.2 · P15）：**躺在高台頂面上的那一件東西**。
+ *
+ * 它刻意是**平的**：一片很淺的刻板、幾顆小石籤、一圈光。
+ * 從地上看不到（頂面比 `EYE_HEIGHT` 1.6 公尺還高 —— 平躺的東西從下面只看得到石鼓的側面），
+ * 也搆不到（`SECRET_HIGH_REACH`）。**跳上去才換得到。**
+ */
+function secretTopMark(kit) {
+  const grp = new THREE.Group();
+  // 刻板：躺平的一小塊，邊緣一圈光
+  put(grp, boxg(1.25, 0.06, 0.9), stone(kit.mid), [0, 0.04, 0]);
+  const halo = put(grp, disc(0.78, 18), auraMaterial(kit.light, 0.2), [0, 0.09, 0], [-Math.PI / 2, 0, 0]);
+  // 三枚小石籤：站上去才看得到它們排成一列
+  for (let i = 0; i < 3; i += 1) {
+    put(grp, boxg(0.16, 0.2, 0.16), stone(kit.dark), [-0.36 + i * 0.36, 0.14, 0.52], [0, 0.2 * i, 0]);
+  }
+  const mark = put(grp, ico(0.13, 0), emissive(kit.accent, 2.2), [0, 0.2, -0.34]);
+  return { group: grp, spin: halo, stars: mark };
+}
+
+/** 顏色不對的那一小塊（v1.2 · P15 · tell「odd」的專用造型）：一排刻度石裡混進來的那一片。 */
+function secretOddShard(kit) {
+  const grp = new THREE.Group();
+  for (let i = 0; i < 5; i += 1) {
+    put(grp, boxg(0.42, 1.1 + (i % 3) * 0.24, 0.34), stone(kit.mid), [-1.6 + i * 0.8, 0.6, 0], [0, 0.12 * i, 0.04 * (i - 2)]);
+  }
+  put(grp, cyl(0.9, 1.1, 0.34, 7), stone(kit.dark), [0, 0.17, 0.9]);
+  const lifted = put(grp, boxg(0.46, 1.0, 0.3), stone(kit.light), [0.4, 0.62, 0.95], [0.1, 0.5, -0.18]);
+  return { group: grp, spin: null, stars: lifted };
+}
+
+/** 走近才聽得到的那幾片薄石（v1.2 · P15 · tell「sound」的專用造型）。 */
+function secretWhisper(kit) {
+  const grp = new THREE.Group();
+  put(grp, cyl(0.34, 0.42, 2.3, 6), stone(kit.dark), [0, 1.15, 0], [0.14, 0.3, 0.24]);
+  const chimes = new THREE.Group();
+  for (let i = 0; i < 3; i += 1) {
+    const a = (i / 3) * Math.PI * 2;
+    put(chimes, boxg(0.2, 0.72, 0.05), stone(kit.light), [Math.cos(a) * 0.34, -0.42, Math.sin(a) * 0.34], [0, -a, 0.06]);
+  }
+  chimes.position.set(0.32, 1.9, 0.42);
+  grp.add(chimes);
+  const halo = put(grp, torus(0.66, 0.035, 4, 18), auraMaterial(kit.light, 0.18), [0.32, 1.5, 0.42], [-Math.PI / 2, 0, 0]);
+  return { group: grp, spin: halo, stars: chimes };
+}
+
 const SECRET_BUILDERS = {
   stargrove: secretStarGrove,
   jokestele: secretJokeStele,
   echoshrine: secretEchoShrine,
   hush: secretHush,
+  topmark: secretTopMark,
+  oddshard: secretOddShard,
+  whisper: secretWhisper,
 };
 
-/** 蓋出一個祕密。 */
-export function buildSecret(spec, kit, terrainHeight) {
+/**
+ * 三種 tell（v1.2 · P15）：找到它之前，世界先給的那一點提示。
+ *
+ * 這三種**不是三套程式**，是同一件事的三個入口：
+ *   · `odd`   **不對的東西**：一小塊顏色與這片土地格格不入的碎片（`oddAccent`）。
+ *             眼角先看到它 —— 純視覺，不吃任何每幀工作。
+ *   · `sound` **聲音先到**：外圈再套一個半徑（`SECRET_TELL_RATIO` 倍），
+ *             走進去先響一聲很細的音，看到它之前就先聽到。
+ *   · `high`  **高處**：它躺在高台的頂面上；腳離地不到 `SECRET_HIGH_REACH` 就搆不到
+ *             （站在地上、蹲在旁邊都一樣）——**跳上去才換得到**。
+ */
+export const SECRET_TELLS = Object.freeze(['odd', 'sound', 'high']);
+/** 「聲音先到」的外圈是發現半徑的幾倍。 */
+export const SECRET_TELL_RATIO = 1.8;
+/**
+ * 「聲音先到」放的是哪一支音（風鈴那一支很細的合成音）。
+ *
+ * **一定要是 `audio.js` 的音效表裡真的有的名字。** `audio.cue()` 對不認得的名字是
+ * 「靜靜地回 false」——不報錯、不丟例外，所以打錯字的後果是「這個 tell 永遠沒有聲音」，
+ * 而其他每一條斷言都照樣綠（P15 第一版寫成 `chime`，世界上根本沒有這一支）。
+ * `test:rubric` 因此逐處比對這個名字真的在音效表裡。
+ */
+export const SECRET_TELL_SOUND = 'chimeSoft';
+/**
+ * 「高處」搆得到的門檻：腳離自己腳下的地至少這麼高（公尺）。
+ *
+ * **刻意是一個固定的常數，不是「那座高台的頂面」**：門檻若跟著高台走，
+ * 把高台壓矮之後「站上去搆得到」照樣成立 —— 那條斷言就永遠不會紅（findings：
+ * 「寫得出來的斷言不等於抓得到東西」）。1.4 公尺低於現行每一座高台（1.6／1.7），
+ * 高於任何一階地形起伏與 `STAND_MIN_H`（0.6）—— 走路的人永遠搆不到。
+ */
+export const SECRET_HIGH_REACH = 1.4;
+
+/**
+ * 蓋出一個祕密。
+ *
+ * @param {object} spec `secrets.json` 的一筆
+ * @param {object} kit 這一區的四階色
+ * @param {(x:number,z:number)=>number} terrainHeight
+ * @param {number} [lift] **頂面加高**（公尺）—— `tell: "high"` 的祕密躺在高台的頂面上，
+ *   所以它的整組幾何要往上搬那一座高台的高度（`screens.js` 的 `PLATFORMS`）。
+ *   0 ＝ 站在地上（其餘每一處都是 0，行為與 P15 之前逐值相同）。
+ */
+export function buildSecret(spec, kit, terrainHeight, lift = 0) {
   const make = SECRET_BUILDERS[spec.prop] || secretJokeStele;
   const built = make(kit);
   const grp = new THREE.Group();
   const [x, z] = spec.at;
-  const y = terrainHeight(x, z);
+  const y = terrainHeight(x, z) + (lift > 0 ? lift : 0);
   grp.position.set(x, y, z);
   grp.rotation.y = Number.isFinite(spec.rot) ? spec.rot : 0;
   grp.name = `secret:${spec.id}`;
   grp.add(built.group);
+  // 記下「起伏之前」的高度：每一種造型的那一件東西各自被擺在不同的地方
+  if (built.stars && !built.stars.isPoints) built.stars.userData.baseY = built.stars.position.y;
+  /*
+   * tell「不對的東西」：一小塊顏色與這片土地格格不入的碎片（`oddAccent`）。
+   * 它是**加在造型之外**的一件東西 —— 三種 tell 於是可以套在任何一種造型上，
+   * 不必為了換 tell 重寫一個 prop（`test:rubric` 逐處驗它真的存在、而且顏色真的不對）。
+   */
+  if (spec.tell === 'odd' && spec.oddAccent) {
+    const shard = put(grp, ico(0.34, 0), emissive(spec.oddAccent, 2.4), [1.15, 0.42, -0.9], [0.4, 0.7, 0.2], [1, 1.5, 0.7]);
+    shard.name = `secret-odd:${spec.id}`;
+    shard.userData.noCollide = true;
+  }
   return {
     id: spec.id,
     spec,
     group: grp,
+    /** 這一處的 tell（`null` ＝ 沒登記；資料層一律要有，測試在守）。 */
+    tell: spec.tell || null,
+    /** 腳要離地多高才搆得到（`tell: "high"` 才 > 0）。 */
+    reach: spec.tell === 'high' ? SECRET_HIGH_REACH : 0,
+    /** 「聲音先到」的外圈半徑（0 ＝ 這一處沒有聲音 tell）。 */
+    tellRadius: spec.tell === 'sound' ? (spec.radius || SECRET_RADIUS) * SECRET_TELL_RATIO : 0,
+    /** 腳下地形的高度（`reach` 是**離地**多高，不是世界高度）。 */
+    groundY: terrainHeight(x, z),
+    told: false,
     position: new THREE.Vector3(x, y, z),
     found: false,
     setFound(v) {
       this.found = Boolean(v);
     },
     update(dt, t, kinetic) {
-      if (built.spin) built.spin.rotation.z = t * 0.08;
+      // v1.2 · P25a：自轉吃 kinetic（reduce 之下停住；亮度與被找到的回應照舊）
+      if (built.spin) built.spin.rotation.z = t * 0.08 * kinetic;
       if (built.stars) {
-        if (built.stars.isPoints) built.stars.rotation.y = t * 0.045;
-        else built.stars.position.y = 0.62 + Math.sin(t * 1.4) * 0.05 * kinetic;
+        if (built.stars.isPoints) built.stars.rotation.y = t * 0.045 * kinetic;
+        /*
+         * 起伏要繞著**它自己被擺在哪裡**擺，不是繞著一個寫死的 0.62 ——
+         * 那會把掛在柱子頂端的風片（y=1.9）整組拉到柱腳、
+         * 把刻意平躺在石鼓面上的記號抬到 2.27 公尺（高處的 tell 就從地上看得到了）。
+         * 基準在蓋出來的那一刻就記在 `userData.baseY` 上（P15 審查 · 第 2／3 條）。
+         */
+        else built.stars.position.y = built.stars.userData.baseY + Math.sin(t * 1.4) * 0.05 * kinetic;
       }
     },
   };
@@ -657,12 +951,29 @@ export const RECENT_SIZE = 4;
 export function createReactiveField({
   spots = REACTIVE_SPOTS,
   secrets = [],
+  /**
+   * v1.2 · P15：高台（`screens.js` 的 `PLATFORMS`）—— `tell: "high"` 的祕密
+   * 躺在 `onPlatform` 指的那一座的頂面上，所以這裡要查得到它有多高。
+   * 沒給就當作沒有高台（那幾處會退回站在地上，測試會抓到「搆得到卻不必跳」）。
+   */
+  platforms = [],
   kitOf,
   terrainHeight,
   onReact = null,
   onSecret = null,
   isBusy = null,
   reducedMotion = false,
+  /**
+   * v1.2 · P19：外交式導向的單位向量 `{ on, x, z }`。
+   * **同一個物件**每幀被讀（不重建 → 零配置）；`on` 為假就整層當作沒有導向，
+   * 螢火群走的是 P19 之前那一條路。沒給就等於「這個世界沒有導向」。
+   */
+  guide = null,
+  /**
+   * 現在是什麼畫質（**當下**問的，玩家在設定裡切畫質不必重建世界）。
+   * 低畫質整層關掉導向 —— 同石座演出（`rubric-fx.js`）的作法。
+   */
+  qualityOf = null,
 } = {}) {
   const group = new THREE.Group();
   group.name = 'reactive';
@@ -675,9 +986,11 @@ export function createReactiveField({
     objects.push(built);
   }
 
+  const platformById = new Map((platforms || []).map((pf) => [pf.id, pf]));
   const secretObjs = [];
   for (const spec of secrets) {
-    const built = buildSecret(spec, kitOf(spec.region), terrainHeight);
+    const pf = spec.onPlatform ? platformById.get(spec.onPlatform) : null;
+    const built = buildSecret(spec, kitOf(spec.region), terrainHeight, pf ? pf.height : 0);
     group.add(built.group);
     secretObjs.push(built);
   }
@@ -763,7 +1076,15 @@ export function createReactiveField({
       return objects.find((o) => o.id === id) || null;
     },
 
-    update(dt, t, px, pz) {
+    /**
+     * @param {number} dt
+     * @param {number} t
+     * @param {number} px 玩家 x
+     * @param {number} pz 玩家 z
+     * @param {number} [py] **玩家腳的世界高度**（v1.2 · P15：`tell: "high"` 的祕密要問它）。
+     *   沒給就當作站在地上 —— 那幾處於是永遠搆不到（保守：寧可拿不到，不要白給）。
+     */
+    update(dt, t, px, pz, py = -Infinity) {
       clock = t;
       frame += 1;
       const busy = isBusy ? isBusy() : false;
@@ -817,6 +1138,18 @@ export function createReactiveField({
         }
       }
 
+      /*
+       * v1.2 · P19：這一幀的導向向量。**一幀只問一次**（不是每一團問一次），
+       * 而且是兩個純量 —— tick 裡不配置任何東西。
+       * 低畫質整層關掉；`guide.on` 為假時是 0，螢火群走 P19 之前那一條路。
+       */
+      let gx = 0;
+      let gz = 0;
+      if (guide && guide.on && (!qualityOf || qualityOf() !== 'low')) {
+        gx = guide.x;
+        gz = guide.z;
+      }
+
       /* --- 動畫層：只更新玩家附近的（遠的東西動不動沒人看得到） --- */
       for (let i = 0; i < objects.length; i += 1) {
         const o = objects[i];
@@ -827,7 +1160,7 @@ export function createReactiveField({
         if (d2 > NEAR_SQ && (i + frame) % 3 !== 0) continue;
         const reach = o.triggers[0].enter * 2.2;
         const near = Math.max(0, 1 - Math.sqrt(d2) / reach);
-        o.update(dt, t, kinetic, near, dx, dz);
+        o.update(dt, t, kinetic, near, dx, dz, gx, gz);
       }
 
       /* --- 祕密：走進去就算找到（不用按 E） --- */
@@ -839,8 +1172,32 @@ export function createReactiveField({
         if (d2 > FAR_SQ) continue;
         s.update(dt, t, kinetic);
         if (busy || s.found) continue;
+        /*
+         * tell「聲音先到」（v1.2 · P15）：外圈先響一聲很細的音 ——
+         * **看到它之前就先聽到**。一處只響一次（`told`），而且與所有反應物共用
+         * 同一條全域聲音冷卻，不會跟旁邊的風鈴糊在一起。
+         */
+        if (s.tellRadius > 0 && !s.told && d2 <= s.tellRadius * s.tellRadius) {
+          /*
+           * **響了才算說過**（P15 審查 · 第 5 條）：`told` 原本在冷卻判斷之前就記上，
+           * 所以只要進圈的那一刻剛好撞上別的反應音的 90 毫秒冷卻，這一聲就被丟掉、
+           * 而且這一處**整場再也不會響**。冷卻中就先不記，下一幀還在圈裡會再試一次。
+           */
+          if (onReact && clock - lastSoundAt >= SOUND_COOLDOWN) {
+            s.told = true;
+            lastSoundAt = clock;
+            onReact({ id: s.id, kind: 'secret-tell', sound: SECRET_TELL_SOUND, note: PENTATONIC[0], baseScale: semitone(19) });
+          } else if (!onReact) {
+            s.told = true; // 沒有接聲音的呼叫端（測試替身）：照舊只算一次
+          }
+        }
         const r = (s.spec.radius || SECRET_RADIUS) ** 2;
         if (d2 > r) continue;
+        /*
+         * tell「高處」：腳離地不到 `SECRET_HIGH_REACH` 就搆不到。
+         * 走路的人腳永遠在地形高度上（`py === s.groundY`）—— 只有站上高台才過得了這一關。
+         */
+        if (s.reach > 0 && !(py >= s.groundY + s.reach)) continue;
         s.setFound(true);
         onSecret?.(s.id);
       }
@@ -851,9 +1208,18 @@ export function createReactiveField({
 
 export default {
   REACTIVE_SPOTS,
+  REACT_TRIGGER_R,
+  SONGSTONE_ROW_CLEAR,
+  reactiveTriggerR,
+  songStoneOffsets,
+  reactiveTargets,
   REACTION_KINDS,
   SECRET_XP,
   SECRET_RADIUS,
+  SECRET_TELLS,
+  SECRET_TELL_RATIO,
+  SECRET_TELL_SOUND,
+  SECRET_HIGH_REACH,
   buildReaction,
   buildSecret,
   createReactiveField,

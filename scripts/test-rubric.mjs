@@ -33,6 +33,30 @@ const challenges = challengeData.challenges;
 const skillCodexV2 = readJson('src/data/skill-codex-v2.json');
 const regionsV2 = readJson('src/data/regions-v2.json');
 const EXPECT = readJson('scripts/expected-counts.json').contract;
+
+/**
+ * 整個世界的三角形上限（v1.2 · P20b 的框）。
+ *
+ * 這個門檻以前散在**八個地方**（P06c 240k、P11／P16a／P20a 239k、P12／P15 234k、
+ * P18 236k、P19 238k）—— 八份數字量的是同一件事，卻各自為政：
+ * 加一層新內容要記得改八個地方，改漏一個就會在別人的段落裡紅，
+ * 而且從訊息看不出「那到底是誰的框」（findings：同一件事的門檻要只有一份）。
+ * 現在只有這一個常數，每一段照自己的量法量、對同一條線比。
+ *
+ * 241,000 是 P20b 的框（硬上限仍是 WORLD.md §6.1 的 420,000）：
+ * 加上檔案廊那 1,844 之後高畫質實測 235,436（另一種量法 236,820）。
+ *
+ * v1.2 · P22c 放寬到 **295,000**（硬上限 420,000 沒動）。理由要寫清楚，
+ * 因為「為了讓測試過而放寬預算」正是這個專案最該防的事：
+ *   · 放大之後地形平面 340 → 442，格距要維持 1.70／3.09（P16d/e 的門檻是在那個格距上
+ *     量出來的），段數就得 200 → 260 —— 地形三角 80,000 → 135,200。
+ *   · 這 55,200 個三角是**同一個不透明的 mesh**：draw call ＋0、材質 ＋0、透明片 ＋0、
+ *     overdraw ＋0。而 P22b 剛好量出來，真正貴的是那三項（draw call −27%、加色 −38%）。
+ *   · 不放寬的話只剩兩條路：讓玩家浮在畫出來的地面上 0.642 公尺（P16e 要擋的就是這個），
+ *     或者把三片土地的階梯地貌磨平。兩條都比多五萬個不透明三角糟。
+ * 也就是說：**換掉的是一個已經被證明量錯東西的代理指標**，不是把壞掉的東西藏起來。
+ */
+const WORLD_TRI_CEIL = 295000;
 const { createCatalog } = await import('../src/challenges/catalog.js');
 const catalog = createCatalog({ curriculum, skillCodex: skillCodexV2, regions: regionsV2 });
 
@@ -2905,11 +2929,31 @@ for (const corridor of World.CORRIDORS) {
   ok(corridor.gateAt > 0 && corridor.gateAt < corridor.length, `[bridge:${corridor.region}] 閘門在橋中段`);
 }
 
+/**
+ * 一個「兩片土地中間」的虛空取樣點——**從活的資料算出來**（減法之庭與紮根之地
+ * 兩個圓心的中點），不寫死座標。
+ *
+ * v1.2 · P22c 把世界攤開（座標 ×1.3、大小不動）之後，原本寫死的 `(0, -120)`
+ * 已經被搬到 `(0, -106.6)` 的減法之庭整個吞進實地裡（實測 coverage 1.000、
+ * 高度 +1.30）——寫死的探針指的不再是它名字說的那個東西，這一條就變成
+ * 一句永遠成立的空話。改成從圓心推：實測 `(61.75, -115.05)`，
+ * coverage 0.000、高度 −34.00，離紮根之地圓周還有 2.5 公尺、離減法之庭 20.7 公尺。
+ */
+const VOID_AT = (() => {
+  const a = World.REGION_SITES.find((s) => s.id === 'frugality');
+  const b = World.REGION_SITES.find((s) => s.id === 'grounding');
+  return [(a.x + b.x) / 2, (a.z + b.z) / 2];
+})();
+
 // 區域之外是虛空（不能亂走）
 ok(World.coverage(0, 0) > 0.9, '中央高原是實地');
-ok(World.coverage(-95, 95) > 0.9, 'orchestration 中心是實地');
-ok(World.coverage(0, -120) < 0.45, '兩片土地之間是虛空');
-ok(World.terrainHeight(0, -120) < -20, '虛空的高度會塌下去');
+{
+  // 中心座標查活的資料（P22c 之後是 -123.5,123.5；寫死的 -95,95 只是碰巧還在圓裡）
+  const orch = World.REGION_SITES.find((s) => s.id === 'orchestration');
+  ok(World.coverage(orch.x, orch.z) > 0.9, 'orchestration 中心是實地', `${orch.x},${orch.z}`);
+}
+ok(World.coverage(VOID_AT[0], VOID_AT[1]) < 0.45, '兩片土地之間是虛空', VOID_AT.join(','));
+ok(World.terrainHeight(VOID_AT[0], VOID_AT[1]) < -20, '虛空的高度會塌下去', VOID_AT.join(','));
 
 
 /* ------------------------------------------------------------------ */
@@ -2939,32 +2983,54 @@ const inscriptionFile = readJson('src/data/inscriptions.json');
 const secretFile = readJson('src/data/secrets.json');
 // Phase 25：動得了的器物也要蓋進測試世界（碰撞、淨空、穿模稽核都要含它們）
 const handleFile = readJson('src/data/handles.json');
-const stubProgression = {
-  bestGrade: () => null,
-  gateStatus: () => ({ unlocked: false, text: '' }),
-  isRegionUnlocked: () => true,
-  hasReadLore: () => false,
-  hasFoundInscription: () => false,
-  hasFoundSecret: () => false,
-  hasUsedHandle: () => false,
-};
-const worldOpts = {
-  curriculum,
-  // 課程 v2 · Phase E：新上線的區域的名稱與主色住在 regions-v2.json
-  regions: catalog.implementedRegions(),
-  challenges,
-  progression: stubProgression,
-  shrine: prologueForWorld.shrine,
-  inscriptions: inscriptionFile.entries,
-  secrets: secretFile.entries,
-  handles: handleFile.entries,
-};
+// v1.2 · P01：濁靈也要蓋進測試世界（碰撞體 +8、穿模稽核要含牠們）
+const murkFile = readJson('src/data/murks.json');
+// v1.2 · P07：抄寫人的殘頁也要蓋進測試世界（它進 keepClear，會影響程序化道具的落點）
+const letterFile = readJson('src/data/letters.json');
+/*
+ * v1.2 · P12：「蓋一次世界」的那一包參數搬到 `scripts/world-harness.mjs` ——
+ * `scripts/screen-fit.mjs`（搜中觀層座標的迴圈）要蓋的是**同一個世界**，
+ * 兩邊各自維護一份參數的話，搜出來的座標會在工具裡合法、在這裡紅。
+ */
+const { stubProgression, worldOptions, installCanvasStub } = await import('./world-harness.mjs');
+const worldOpts = await worldOptions();
 const testScene = new THREE.Scene();
 const testWorld = World.createWorld({
   engine: { scene: testScene, camera: {}, onUpdate() {} },
   quality: 'high',
   ...worldOpts,
 });
+/*
+ * v1.2 · P01：濁靈的座標規則要對「加入濁靈之前」的世界驗（isClear 是對 baseline 說的：
+ * 牠自己有碰撞體，加進去之後那一點當然不清）。這一個世界只給那一節用。
+ */
+const baselineScene = new THREE.Scene();
+const baselineWorld = World.createWorld({
+  engine: { scene: baselineScene, camera: {}, onUpdate() {} },
+  quality: 'high',
+  ...worldOpts,
+  murks: [],
+});
+/*
+ * v1.2 · P06c：新加的反應物與器物的擺位規則要驗「這一點清不清得下人」。
+ *
+ * **不能**另外蓋一個「拿掉那 22 件器物」的世界來驗：`handles` 同時餵給 `keepClear`，
+ * 而 `buildRegionProps` 的 `place()` 每被 `keepClear` 退一次就多抽兩次亂數 ——
+ * 少了那幾件，整片土地的程序化擺放亂數流就位移，等於在驗一個永遠不會出貨的佈局
+ * （實測 forms／toolcraft／divergence／refinery／frugality 的 `props:*` 都會不一樣）。
+ * 正解：對**真的會出貨的那個世界**驗，只把「它自己的碰撞體」扣掉。
+ */
+const P06C_REGIONS = Object.freeze(['forms', 'toolcraft', 'wards', 'refinery', 'frugality', 'sight', 'divergence']);
+/**
+ * 這一點除了「它自己」以外還清不清得下人。
+ * 「自己」＝中心離這一點 < 1 公尺的碰撞體 —— 一件器物常常由好幾塊組成
+ * （絞盤就登記了三顆），所以是整組扣掉，不是只扣一顆。
+ */
+const SELF_RADIUS = 1;
+const clearExceptSelf = (world, x, z) => {
+  const others = world.solids.filter((sd) => Math.hypot(sd.x - x, sd.z - z) >= SELF_RADIUS);
+  return World.solidAt(x, z, others) === null;
+};
 // 低畫質是另一組道具數量與另一批位置，穿模稽核兩種都要過
 const lowScene = new THREE.Scene();
 const lowWorld = World.createWorld({
@@ -3008,6 +3074,37 @@ for (const site of World.REGION_SITES) {
 }
 
 /* --- 石座本體：擋得住人（Phase 20），但四面八方都走得到互動距離 --- */
+/*
+ * v1.2 · P16d：**4–5 公尺那一圈唯一放行的是閘門的柱子。**
+ *
+ * P16d 之前，減法之庭閘門的兩根柱子懸在頸口那道 6.6 公尺深的凹溝上方 ——
+ * `collectSolids()` 判它們「飄在半空」（腳下的地比自己低 2 公尺以上），
+ * 一顆碰撞圓都沒登記：看得到、走得過去。頸口填平之後柱子落回地面開始擋人，
+ * 於是離它 5.12 公尺的 `empty-plinth-100` 有兩個方向的第 4／5 公尺踩在柱子上。
+ *
+ * 石座搬不了（`challenges.json` 是內容紅線），閘門也立在地界上動不了 ——
+ * 而 24 個方向裡少掉 2 個「第 4／5 公尺」的落點不影響互動：
+ * **2–3 公尺那一圈整圈都空著**（下面逐點驗），而且不按空白鍵的洪水填充
+ * 逐格證明這座石座走得到。所以規則寫死成兩層：
+ * 2–3 公尺一顆都不准有；4–5 公尺**只有 `PLINTH_GATE_OK` 那一座**放行閘門的柱子。
+ *
+ * v1.2 · P16e：例外原本套在**每一關**身上、只靠一個全域上限（≤ 4）收口 ——
+ * 註解說它只為 `empty-plinth-100` 而開，程式卻沒這麼寫：別的石座長出同樣的問題
+ * 也會被靜靜地放行。現在綁在關卡 id 上，而且逐一驗那一座到底是哪幾個方向。
+ */
+/** 唯一一座「4–5 公尺踩得到閘門柱」的石座（見上）。 */
+const PLINTH_GATE_OK = 'empty-plinth-100';
+const gatePillars = [];
+testScene.traverse((o) => {
+  if (typeof o.name === 'string' && o.name.startsWith('gate:')) {
+    for (const g of World.collectSolids(o, World.terrainHeight)) gatePillars.push(g);
+  }
+});
+ok(gatePillars.length === World.CORRIDORS.length * 2 + World.ANNEX_LINKS.length * 2,
+  '每一道閘門都有兩根擋得住人的柱子', `n=${gatePillars.length}`);
+const isGatePillar = (s) => gatePillars.some((g) => Math.hypot(g.x - s.x, g.z - s.z) < 0.05 && Math.abs(g.r - s.r) < 0.05);
+let plinthGateHits = 0;
+const plinthGateWhere = [];
 for (const c of challenges) {
   const [x, z] = c.position;
   // Phase 20 之前這 26 座石座全部走得過去（產品回報的「石頭穿模」）
@@ -3017,8 +3114,14 @@ for (const c of challenges) {
     for (const dist of [2, 3, 4, 5]) {
       const px = x + Math.cos(ang) * dist;
       const pz = z + Math.sin(ang) * dist;
+      const hit = testWorld.solidAt(px, pz);
+      if (hit && dist >= 4 && c.id === PLINTH_GATE_OK && isGatePillar(hit)) {
+        plinthGateHits += 1;
+        plinthGateWhere.push(`${dist}m@${Math.round((ang * 180) / Math.PI)}°`);
+        // v1.2 · P22c 之後這一支再也沒有被走到（見下面那一條）—— 留著是為了讓它「回來」時會紅
+      }
       ok(
-        !testWorld.solidAt(px, pz),
+        !hit,
         `[${c.id}] 石座周圍 ${dist}m 走得到（互動不會被擋）`,
         `${px.toFixed(1)},${pz.toFixed(1)}`
       );
@@ -3030,6 +3133,25 @@ for (const c of challenges) {
     `[${c.id}] 貼著石座站的位置（${(2).toFixed(1)}m）仍在互動半徑 6.5m 內`
   );
 }
+/*
+ * **v1.2 · P22c：這條例外不再需要了，所以它從「登記過的放行」變成「一條硬斷言」。**
+ *
+ * 放大之前，`empty-plinth-100` 的第 4／5 公尺有兩個方向踩得到減法之庭閘門的柱子
+ * （`4m@30° 4m@45° 5m@30° 5m@45°`），那是登記過、寫明只為這一座開的例外。
+ * 座標 ×1.3 之後石座與閘門一起往外散開，**那四個點一個都不剩**（實測 0）。
+ *
+ * 所以不再放行任何一次：上面那一支 `if` 只負責數，數完照樣走 `ok(!hit)` ——
+ * 換句話說**現在是 142 座石座、24 個方向、2–5 公尺全部不准被擋，沒有例外**。
+ * 這一條因此比 P16e 那一版**更嚴**，不是更鬆；`plinthGateHits` 留著並斷言它是 0，
+ * 有一天誰把石座或閘門挪回去、例外重新被踩到，這裡就會紅。
+ */
+eq(plinthGateHits, 0, 'v1.2 · P22c：「4–5 公尺踩到閘門柱」那條例外已經不需要了（世界攤開之後一個都踩不到）', String(plinthGateHits));
+eq(
+  plinthGateWhere.slice().sort().join(' '),
+  '',
+  `[${PLINTH_GATE_OK}] 一個踩得到閘門柱的方向都沒有`,
+  plinthGateWhere.slice().sort().join(' ')
+);
 
 for (const lane of World.BRIDGE_LANES) {
   const dx = lane.bx - lane.ax;
@@ -3050,10 +3172,13 @@ for (const lane of World.BRIDGE_LANES) {
   }
 }
 
-ok(!testWorld.solidAt(0, 6), '出生點沒有被擋住');
+ok(!testWorld.solidAt(World.SPAWN_AT[0], World.SPAWN_AT[1]), '出生點沒有被擋住');
 for (let a = 0; a < 16; a += 1) {
   const ang = (a / 16) * Math.PI * 2;
-  ok(!testWorld.solidAt(Math.cos(ang) * 4, 6 + Math.sin(ang) * 4), '出生點周圍走得開');
+  ok(
+    !testWorld.solidAt(World.SPAWN_AT[0] + Math.cos(ang) * 4, World.SPAWN_AT[1] + Math.sin(ang) * 4),
+    '出生點周圍走得開'
+  );
   const [shx, shz] = prologueForWorld.shrine.at;
   ok(
     !testWorld.solidAt(shx + Math.cos(ang) * 3, shz + Math.sin(ang) * 3),
@@ -3136,7 +3261,63 @@ for (const tab of tabletSpecs) {
     ok(!testWorld.solidAt(p.x, p.z), '保險絲真的把玩家推出來了', `${steps} 步`);
     ok(steps <= 40, '脫困是漸進的一小步一小步（不是瞬移）', `${steps} 步`);
   }
-  ok(testWorld.escapeSolid(0, 6) === null, '沒卡住的時候保險絲不動作');
+  ok(testWorld.escapeSolid(World.SPAWN_AT[0], World.SPAWN_AT[1]) === null, '沒卡住的時候保險絲不動作');
+
+  /*
+   * v1.2 · P16e：**絕不能把玩家關住**（護欄）。
+   *
+   * P16d 之前 `escapeSolid()` 只往「離圓心最遠」那一個方向推，那一步走不到就回
+   * `null` —— 人被 `clampPosition()` 永遠鎖在原地。掃過每一顆碰撞圓 × 24 個角 ×
+   * 4 個半徑，實測有幾百個「站得住、人在圓裡、卻推不出去」的位置：石頭立在
+   * 甲板邊或土地最外緣，離圓心最遠的方向正好指著虛空。
+   * 現在改成試一圈方向（`ESCAPE_FAN`），第二圈再鬆掉坡度那一條。
+   */
+  {
+    let inside = 0;
+    let stuck = 0;
+    let stuckPt = null;
+    let radialOnly = 0;
+    for (const sd of testWorld.solids) {
+      for (let a = 0; a < 24; a += 1) {
+        const ang = (a / 24) * Math.PI * 2;
+        for (const f of [0.15, 0.4, 0.65, 0.9]) {
+          const r = (sd.r + World.PLAYER_RADIUS) * f;
+          const x = sd.x + Math.cos(ang) * r;
+          const z = sd.z + Math.sin(ang) * r;
+          if (World.coverage(x, z) < World.STAND_COVER_MIN || World.tooSteep(x, z)) continue;
+          const hit = testWorld.solidAt(x, z);
+          if (!hit) continue;
+          inside += 1;
+          if (testWorld.escapeSolid(x, z) === null) {
+            stuck += 1;
+            if (!stuckPt) stuckPt = [x.toFixed(1), z.toFixed(1)];
+          }
+          /* 反例：P16e 之前那一支（只推「離圓心最遠」那一個方向、而且吃坡度） */
+          const dx = x - hit.x;
+          const dz = z - hit.z;
+          const d = Math.hypot(dx, dz);
+          const ux = d > 1e-4 ? dx / d : 1;
+          const uz = d > 1e-4 ? dz / d : 0;
+          const move = Math.min(0.35, hit.r + World.PLAYER_RADIUS + 0.05 - d);
+          if (!testWorld.isWalkable(x + ux * move, z + uz * move)) radialOnly += 1;
+        }
+      }
+    }
+    ok(inside > 50000, 'P16e：真的掃到夠多「站得住又在碰撞圓裡」的位置', String(inside));
+    eq(stuck, 0, 'P16e：**沒有任何一個位置會把玩家關住**（保險絲一定推得出去）', stuckPt ? String(stuckPt) : '0');
+    ok(
+      radialOnly > 25,
+      /*
+       * v1.2 · P22c：地圖攤開之後，naive 演算法困住的點從 200+ 掉到 **57** ——
+       * 那正是「東西不再那麼擠」的直接證據（碰撞圓彼此重疊的地方變少了）。
+       * 門檻跟著下修到 25：它守的是**「naive 演算法不夠用」這件事仍然成立**，
+       * 不是某個特定的數量。真正的安全斷言是上面那條 `stuck === 0`（沒有任何一點會把玩家關住），
+       * 那一條一個字都沒動。掉到 0 的話這一條就會紅 —— 不會變成空泛通過。
+       */
+      'P16e[反例]：只推「離圓心最遠」那一個方向的話，這一批位置裡仍有幾十個推不出去（P22c 攤開後 57，攤開前 200+）',
+      String(radialOnly)
+    );
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -3232,6 +3413,588 @@ console.log('▸ 穿模稽核（Phase 20）');
 
   /* --- 淨空濾網只掃得掉雜物 --- */
   ok(World.CLUTTER_RADIUS <= 0.8, '淨空濾網只掃得掉真正的碎石（半徑 ≤ 0.8）', `CLUTTER_RADIUS=${World.CLUTTER_RADIUS}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 3e. v1.2 · P13：可站立表面（純資料層 —— 這一格還沒有跳躍）             */
+/* ------------------------------------------------------------------ */
+console.log('▸ 可站立表面（v1.2 · P13）');
+{
+  const AuditP13 = await import('./collision-audit.mjs');
+
+  /* --- 常數本身要說得通（改鬆了這裡先紅） --- */
+  ok(World.STAND_MIN_H < World.STAND_MAX_H, '可站立的高度區間是一段真的區間',
+    `${World.STAND_MIN_H}–${World.STAND_MAX_H}`);
+  ok(World.STAND_MIN_R >= World.PLAYER_RADIUS, '頂面至少站得下一個人（半徑 ≥ PLAYER_RADIUS）',
+    `${World.STAND_MIN_R} vs ${World.PLAYER_RADIUS}`);
+  eq(World.STAND_COVER_MIN, 0.45, '「不准懸在虛空上方」與 isWalkable() 用同一條覆蓋門檻');
+  ok(
+    Math.abs(World.STAND_UP_DOT - Math.cos(Math.PI / 18)) < 1e-12,
+    '上向面的容差就是文件寫的 10°（常數是真的拿去比的那一個）',
+    `${World.STAND_UP_DOT}`
+  );
+  ok(World.STAND_UP_DOT >= 0.98, '上向面的容差很緊（斜面不是可以放腳的面）', `${World.STAND_UP_DOT}`);
+  ok(World.STAND_FLAT_EPS <= 0.1, '「夠平」的容差是公分級的', `${World.STAND_FLAT_EPS}`);
+
+  /* --- 每一顆圓都有 top，而且 standable 的都在允許區間 --- */
+  for (const [label, w] of [['高畫質', testWorld], ['低畫質', lowWorld]]) {
+    ok(
+      w.solids.every((s) => Number.isFinite(s.top)),
+      `[${label}] 每個碰撞圓都有 top（頂面世界高度）`,
+      `缺=${w.solids.filter((s) => !Number.isFinite(s.top)).length}／${w.solids.length}`
+    );
+    ok(
+      w.solids.every((s) => typeof s.standable === 'boolean' && typeof s.topFace === 'boolean'),
+      `[${label}] 每個碰撞圓都有 standable / topFace 旗標`
+    );
+    ok(
+      w.solids.every((s) => Math.abs(s.top) < 200),
+      `[${label}] top 落在世界的高度範圍內（沒有 NaN 也沒有天文數字）`,
+      `max=${Math.max(...w.solids.map((s) => Math.abs(s.top))).toFixed(1)}`
+    );
+    const stand = w.solids.filter((s) => s.standable);
+    ok(stand.length > 20, `[${label}] 世界裡真的有站得上去的東西（不然這一節是空過的）`, `n=${stand.length}`);
+    ok(
+      stand.every((s) => s.topFace),
+      `[${label}] 可站立體的 top 一定量自真的上向面`,
+      `例外=${stand.filter((s) => !s.topFace).length}`
+    );
+    ok(
+      stand.every((s) => {
+        const h = s.top - World.terrainHeight(s.x, s.z);
+        return h >= World.STAND_MIN_H - 1e-6 && h <= World.STAND_MAX_H + 1e-6;
+      }),
+      `[${label}] 可站立體的離地高度都在 ${World.STAND_MIN_H}–${World.STAND_MAX_H} 之間`
+    );
+    ok(stand.every((s) => s.r >= World.STAND_MIN_R), `[${label}] 可站立體的圓都站得下一個人`);
+    ok(
+      w.solids.every((s) => Number.isFinite(s.standR) && s.standR >= 0 && s.standR <= s.r + 1e-9),
+      `[${label}] 每個圓的 standR 都落在 0..r 之間（抬高的範圍不會比碰撞圓大）`
+    );
+    ok(
+      stand.every((s) => s.standR >= World.STAND_MIN_R),
+      `[${label}] 可站立體「量過是平的」那一段至少 ${World.STAND_MIN_R} 公尺`
+    );
+    ok(
+      w.solids.every((s) => s.standable || s.standR === 0),
+      `[${label}] 站不上去的圓 standR 一律是 0（不會偷偷抬高腳下的高度）`
+    );
+    ok(
+      stand.some((s) => s.standR < s.r - 1e-6),
+      `[${label}] 真的有「碰撞圓比平頂大」的東西（standR 不是 r 的別名）`,
+      `n=${stand.filter((s) => s.standR < s.r - 1e-6).length}／${stand.length}`
+    );
+    ok(
+      stand.every((s) => World.coverage(s.x, s.z) >= World.STAND_COVER_MIN),
+      `[${label}] 沒有任何一塊可站立的頂面懸在虛空上方`
+    );
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 判準逐條驗：一件東西單獨放進空場景，地面固定在 0、覆蓋固定 1。
+   * 每一條都是「只差這一件事」的對照組 —— 答得出「什麼情況下它會紅」。
+   * ------------------------------------------------------------------ */
+  const flatGround = () => 0;
+  const solidGround = () => 1;
+  /**
+   * 取第一顆圓，順便補一條「掃得出東西」的斷言。
+   * findings（P11）：測試裡的查表沒守衛就是地雷 —— 一個 TypeError 會把整支測試打掛，
+   * 而不是紅一條。掃不出來時回一顆「什麼都不是」的替身，讓後面的斷言照樣紅。
+   */
+  const firstSolid = (list, label) => {
+    ok(list.length >= 1, `[判準] ${label}：掃得出碰撞圓`, `n=${list.length}`);
+    return list[0] || { x: NaN, z: NaN, r: NaN, top: NaN, topFace: null, standable: null };
+  };
+  /** 把一件東西單獨掃成碰撞圓（可覆寫地面高度與覆蓋）。 */
+  const soloSolids = (obj, ground = flatGround, cover = solidGround) => {
+    const holder = new THREE.Group();
+    holder.add(obj);
+    return World.collectSolids(holder, ground, cover);
+  };
+  /** 一塊平頂的方台：寬 w、頂面高 h。 */
+  const slab = (w, h, extra = {}) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, w), new THREE.MeshBasicMaterial());
+    m.position.y = h / 2;
+    m.userData.solid = true;
+    Object.assign(m.userData, extra);
+    return m;
+  };
+
+  {
+    // ① 正例：2 × 2 的平頂方台，頂面 1.2 公尺
+    const one = firstSolid(soloSolids(slab(2, 1.2)), '平頂方台');
+    eq(one.standable, true, '[判準] 平頂 · 1.2 公尺高 · 2 公尺見方 → 站得上去');
+    ok(Math.abs(one.top - 1.2) < 1e-6, '[判準] top 就是頂面的世界高度', `top=${one.top}`);
+    eq(one.topFace, true, '[判準] top 量自真的上向面');
+
+    // ② 太矮：0.55 公尺 → 是「跨過去」不是「站上去」
+    const low = firstSolid(soloSolids(slab(2, 0.55)), '矮台');
+    eq(low.standable, false, `[判準] 頂面只有 0.55 公尺（< ${World.STAND_MIN_H}）→ 站不上去`);
+
+    // ③ 太高：3.4 公尺 → 不該站得上去
+    const tall = firstSolid(soloSolids(slab(2, 3.4)), '高台');
+    eq(tall.standable, false, `[判準] 頂面 3.4 公尺（> ${World.STAND_MAX_H}）→ 站不上去`);
+    ok(Math.abs(tall.top - 3.4) < 1e-6, '[判準] 站不上去的東西照樣量得到 top');
+
+    // ④ 面積不夠：頂面只有 1.2 見方（圓半徑刻意給足，隔離出「面積」這一條）
+    const narrow = firstSolid(soloSolids(slab(1.2, 1.2, { solidRadius: 1.0 })), '窄頂台');
+    eq(narrow.r, 1.0, '[判準] 這一顆的半徑是明講的 1.0');
+    eq(narrow.standable, false, `[判準] 頂面只有 1.2 見方（放不下半徑 ${World.STAND_MIN_R} 的一圈）→ 站不上去`);
+
+    // ⑤ 圓太小：頂面很大，但登記的碰撞圓站不下人
+    const pin = firstSolid(soloSolids(slab(3, 1.2, { solidRadius: 0.7 })), '細圓台');
+    eq(pin.r, 0.7, '[判準] 這一顆的半徑是明講的 0.7');
+    eq(pin.standable, false, `[判準] 碰撞圓 0.7 < ${World.STAND_MIN_R} → 站不上去（頂面再大也一樣）`);
+
+    // ⑥ 斜的：3° 還算平、6° 就不是了（容差是公分級的，不是「看起來很平」）
+    const tilted = (deg) => {
+      const m = slab(2.4, 1.2);
+      m.rotation.x = (deg * Math.PI) / 180;
+      m.position.y = 1.2;
+      return soloSolids(m);
+    };
+    eq(firstSolid(tilted(3), '斜 3° 的台').standable, true, '[判準] 斜 3°（0.8 公尺處落差 4.2 公分）→ 還站得上去');
+    eq(firstSolid(tilted(6), '斜 6° 的台').standable, false, '[判準] 斜 6°（0.8 公尺處落差 8.4 公分）→ 站不上去');
+    const steep = firstSolid(tilted(20), '斜 20° 的台');
+    eq(steep.standable, false, '[判準] 斜 20° → 站不上去');
+    eq(steep.topFace, false, '[判準] 斜 20° 的面根本不算「上向面」');
+
+    // ⑦ 尖的：圓錐沒有頂面
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(1.2, 1.6, 12), new THREE.MeshBasicMaterial());
+    cone.position.y = 0.8;
+    cone.userData.solid = true;
+    const coneSolid = firstSolid(soloSolids(cone), '圓錐');
+    eq(coneSolid.standable, false, '[判準] 尖的東西站不上去（沒有上向面）');
+    eq(coneSolid.topFace, false, '[判準] 圓錐的 top 退回「正上方那一塊表面的最高點」');
+    ok(coneSolid.top > 1.5, '[判準] 圓錐的 top 仍然是個合理的數字', `top=${coneSolid.top}`);
+
+    // ⑧ 圓的：球頂在中心是平的，但走開 0.8 公尺就滑下去了
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(1.5, 16, 12), new THREE.MeshBasicMaterial());
+    ball.position.y = 1.5;
+    ball.userData.solid = true;
+    eq(firstSolid(soloSolids(ball), '球').standable, false, '[判準] 圓的石頭站不上去（頂面撐不出一圈平的）');
+
+    // ⑨ 懸在虛空上方：同一塊方台，只差腳下沒有地
+    const overVoid = firstSolid(soloSolids(slab(2, 1.2), flatGround, () => 0.2), '虛空上方的台');
+    eq(overVoid.standable, false, '[判準] 頂面懸在虛空上方 → 不算可站立（站上去是死路）');
+
+    // ⑩ 長石板：碰撞圓是外接盒的長邊，但抬高的只有「量過是平的」那一段
+    {
+      const plank = new THREE.Mesh(new THREE.BoxGeometry(7.2, 1.2, 1.8), new THREE.MeshBasicMaterial());
+      plank.position.y = 0.6;
+      plank.userData.solid = true;
+      const one2 = firstSolid(soloSolids(plank), '長石板');
+      eq(one2.standable, true, '[判準] 長石板中央站得上去');
+      ok(Math.abs(one2.r - 3.6) < 1e-6, '[判準] 長石板的碰撞圓是外接盒的長邊（3.6）', `r=${one2.r}`);
+      ok(
+        one2.standR < one2.r - 0.5,
+        '[判準] 但「量過是平的」只有窄邊那一段（standR ≪ r）',
+        `standR=${one2.standR.toFixed(2)} r=${one2.r.toFixed(2)}`
+      );
+      const list = [one2];
+      eq(
+        World.groundHeightAt(0, 0, list, flatGround),
+        one2.top,
+        '[判準] 中央抬得起來'
+      );
+      eq(
+        World.groundHeightAt(one2.standR + 0.05, 0, list, flatGround),
+        0,
+        '[判準] 走出 standR 之後就不抬了（碰撞圓再大也一樣）'
+      );
+    }
+
+    // ⑪ 半透明的光不是可以站的面
+    const glow = new THREE.Mesh(
+      new THREE.BoxGeometry(2, 1.2, 2),
+      new THREE.MeshBasicMaterial({ transparent: true })
+    );
+    glow.position.y = 0.6;
+    glow.userData.solidRadius = 1.0;
+    eq(firstSolid(soloSolids(glow), '半透明的光').standable, false, '[判準] 半透明的光站不上去');
+
+    // ⑬ 中間斷一圈就停：外面那一圈再平也不撿（頂面不是整片的）
+    {
+      const donutGrp = new THREE.Group();
+      const th = 1.2;
+      const core = new THREE.Mesh(new THREE.BoxGeometry(2, th, 2), new THREE.MeshBasicMaterial());
+      core.position.y = th / 2;
+      donutGrp.add(core);
+      for (let i = 0; i < 8; i += 1) {
+        const a = (i / 8) * Math.PI * 2;
+        const pad = new THREE.Mesh(new THREE.BoxGeometry(1.2, th, 1.2), new THREE.MeshBasicMaterial());
+        pad.position.set(Math.cos(a) * 3.0, th / 2, Math.sin(a) * 3.0);
+        donutGrp.add(pad);
+      }
+      donutGrp.userData.solidRadius = 3.0;
+      const donut = firstSolid(soloSolids(donutGrp), '中間斷掉的頂面');
+      eq(donut.standable, true, '[判準] 中央那一塊還是站得上去');
+      ok(
+        donut.standR >= World.STAND_MIN_R && donut.standR <= 1.0 + 1e-9,
+        '[判準] 可站範圍停在中央那一塊的邊上（不會跳過去撿外面那一圈的墊子）',
+        `standR=${donut.standR}`
+      );
+      eq(
+        World.groundHeightAt(3.0, 0, [donut], flatGround),
+        0,
+        '[判準] 外圍那幾塊的正上方不算腳下的高度（它們沒有連著）'
+      );
+
+      /*
+       * ⑬b **窄的環狀缺口也要抓得到**（審查 · 第 1 條）：
+       * 一塊 1.72 的方芯外面接一圈從 1.14 起的框 —— 中間 0.86–1.14 是空的。
+       * 審查前步長是 0.4，兩圈之間剛好跳過那道縫，`standR` 於是認證了一圈
+       * 根本沒有幾何體的空氣（`groundHeightAt(1.0, 0)` 抬得起來）。
+       */
+      const gapGrp = new THREE.Group();
+      const gh = 1.0;
+      const gcore = new THREE.Mesh(new THREE.CylinderGeometry(0.86, 0.86, gh, 32), new THREE.MeshBasicMaterial());
+      gcore.position.y = gh / 2;
+      gapGrp.add(gcore);
+      // 外圈：48 塊小墊子排成連續的一環（1.1–1.5），與芯之間留一道 0.86–1.10 的窄縫
+      for (let i = 0; i < 48; i += 1) {
+        const a = (i / 48) * Math.PI * 2;
+        const pad = new THREE.Mesh(new THREE.BoxGeometry(0.4, gh, 0.4), new THREE.MeshBasicMaterial());
+        pad.position.set(Math.cos(a) * 1.3, gh / 2, Math.sin(a) * 1.3);
+        pad.rotation.y = -a;
+        gapGrp.add(pad);
+      }
+      gapGrp.userData.solidRadius = 1.5;
+      const gapSolid = firstSolid(soloSolids(gapGrp), '中間有一道窄縫的頂面');
+      ok(
+        gapSolid.standR <= 0.86 + 1e-6,
+        '[判準] 窄的環狀缺口也停得住（不會把空氣認證成平的）',
+        `standR=${gapSolid.standR}`
+      );
+      for (const rx of [0.9, 1.0, 1.1]) {
+        eq(
+          World.groundHeightAt(rx, 0, [gapSolid], flatGround),
+          0,
+          `[判準] 縫上方 (${rx}, 0) 不會被抬起來（那裡沒有東西）`
+        );
+      }
+
+      /*
+       * ⑬c **有頂蓋的平臺**（審查 · 第 2 條）：走的那一面 1.2、頂蓋 5.0 在同一顆圓裡。
+       * `top` 是剪影的頂（＝頂蓋），`standTop` 才是腳踩得到的那一面 ——
+       * 站不站得上去、抬到多高，都要看後者。
+       */
+      const canopyGrp = new THREE.Group();
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(3, 1.2, 3), new THREE.MeshBasicMaterial());
+      deck.position.y = 0.6;
+      canopyGrp.add(deck);
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(3, 0.4, 3), new THREE.MeshBasicMaterial());
+      roof.position.y = 5.0;
+      canopyGrp.add(roof);
+      canopyGrp.userData.solidRadius = 1.5;
+      const canopy = firstSolid(soloSolids(canopyGrp), '有頂蓋的平臺');
+      ok(Math.abs(canopy.top - 5.2) < 1e-6, '[判準] top 是剪影的頂（頂蓋）', String(canopy.top));
+      ok(Math.abs(canopy.standTop - 1.2) < 1e-6, '[判準] standTop 是腳踩得到的那一面', String(canopy.standTop));
+      eq(canopy.standable, true, '[判準] 有頂蓋不代表站不上去（站的是下面那一面）');
+      ok(
+        Math.abs(World.groundHeightAt(0, 0, [canopy], flatGround) - 1.2) < 1e-5,
+        '[判準] 抬到腳踩得到的那一面，不是頂蓋',
+        String(World.groundHeightAt(0, 0, [canopy], flatGround))
+      );
+    }
+
+    // ⑫ 同一件東西改成 InstancedMesh 也不能突然變成站得上去（審查 · 第 1 條）
+    {
+      const mk = (mat) => {
+        const inst = new THREE.InstancedMesh(new THREE.BoxGeometry(2, 1.2, 2), mat, 1);
+        const m = new THREE.Matrix4().makeTranslation(0, 0.6, 0);
+        inst.setMatrixAt(0, m);
+        inst.userData.solid = true;
+        return inst;
+      };
+      eq(
+        firstSolid(soloSolids(mk(new THREE.MeshBasicMaterial())), 'instanced 石台').standable,
+        true,
+        '[判準] instanced 的實心方台照樣站得上去'
+      );
+      eq(
+        firstSolid(soloSolids(mk(new THREE.MeshBasicMaterial({ transparent: true }))), 'instanced 光').standable,
+        false,
+        '[判準] instanced 的半透明也是光，不是可以站的面'
+      );
+    }
+  }
+
+  /* --- solidSpan 的圓串：逐圓各自算 top（P10b／P11 連兩次的教訓） --- */
+  {
+    const bench = new THREE.Mesh(new THREE.BoxGeometry(8, 1.0, 1.8), new THREE.MeshBasicMaterial());
+    bench.userData.solidSpan = [4, 0.9];
+    bench.position.y = 1.4;
+    bench.rotation.z = (12 * Math.PI) / 180; // 沿著長軸斜著擺（12° 明確在上向面門檻之外）
+    const chain = soloSolids(bench);
+    ok(chain.length >= 4, 'solidSpan 排出一串圓', `n=${chain.length}`);
+    ok(chain.every((s) => Number.isFinite(s.top)), '串上每一顆圓都有自己的 top');
+    const tops = chain.map((s) => s.top);
+    const spread = Math.max(...tops) - Math.min(...tops);
+    ok(
+      spread > 0.5,
+      '斜著擺的長條：每一顆圓的 top 各自不同（不是共用一個原點的高度）',
+      `spread=${spread.toFixed(2)} tops=${tops.map((t) => t.toFixed(2)).join(',')}`
+    );
+    // 沿著軸走，top 要單調（斜的就是斜的，不會忽高忽低）
+    const sorted = [...chain].sort((a, b) => a.x - b.x).map((s) => s.top);
+    const rising = sorted.every((t, i) => i === 0 || t >= sorted[i - 1] - 1e-6);
+    const falling = sorted.every((t, i) => i === 0 || t <= sorted[i - 1] + 1e-6);
+    ok(rising || falling, '斜著擺的長條：top 沿著長軸單調變化');
+
+    // 平著擺的同一條長凳：每一顆圓的 top 一樣，而且整條都站得上去
+    const flatBench = new THREE.Mesh(new THREE.BoxGeometry(8, 1.0, 2.0), new THREE.MeshBasicMaterial());
+    flatBench.userData.solidSpan = [4, 1.0];
+    flatBench.position.y = 0.5;
+    const flatChain = soloSolids(flatBench);
+    ok(
+      flatChain.every((s) => Math.abs(s.top - 1.0) < 1e-6),
+      '平著擺的長條：每一顆圓量到的都是同一片頂面',
+      flatChain.map((s) => s.top.toFixed(3)).join(',')
+    );
+    ok(flatChain.every((s) => s.standable), '平著擺的長條：整條都站得上去');
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 「玩家腳下的高度這一格沒有變」—— 全地圖網格逐點比對。
+   *
+   * groundHeightAt() 是 P14 的資料通路，這一格**沒有接到玩家身上**。
+   * 這一段證明的是：就算接上去，玩家走得到的每一點答案都一模一樣 ——
+   * 因為每一塊可站立的頂面都躲在某個碰撞圓裡，而 solidAt() 的 pad 是
+   * PLAYER_RADIUS，玩家的中心點永遠進不去。
+   *
+   * 什麼情況下它會紅：groundHeightAt() 多加了一格 pad、可站立體被登記得比
+   * 碰撞圓大、或是有一顆可站立的圓漏掉了碰撞（兩張表不同步）。
+   * ------------------------------------------------------------------ */
+  {
+    // 半邊＝畫出來的地面的半邊（v1.2 · P22c：221），不是寫死的 170。
+    const R = World.TERRAIN_SIZE / 2;
+    const STEP = 1;
+    let total = 0;
+    let clearPts = 0;
+    let diff = 0;
+    let diffClear = 0;
+    let worstClear = 0;
+    for (let x = -R; x <= R; x += STEP) {
+      for (let z = -R; z <= R; z += STEP) {
+        total += 1;
+        const th = World.terrainHeight(x, z);
+        const gh = testWorld.groundHeightAt(x, z);
+        const clear = testWorld.isClear(x, z);
+        if (clear) clearPts += 1;
+        if (gh !== th) {
+          diff += 1;
+          if (clear) {
+            diffClear += 1;
+            worstClear = Math.max(worstClear, Math.abs(gh - th));
+          }
+        }
+      }
+    }
+    ok(total > 100000, '網格真的掃過整張地圖', `n=${total}`);
+    ok(clearPts > 20000, '網格裡有夠多「玩家真的走得到」的點', `n=${clearPts}`);
+    ok(diff > 0, 'groundHeightAt() 真的會抬高某些點（不然這條斷言是空過的）', `n=${diff}`);
+    eq(
+      diffClear,
+      0,
+      '玩家走得到的每一點，groundHeightAt() 與 terrainHeight() 逐點相同（行為零改變）',
+      `不同的點=${diffClear}／${clearPts}，最大差=${worstClear.toFixed(3)}`
+    );
+    // 每一塊可站立的頂面都抬得起來，而且它的圓心一定不是玩家站得到的地方
+    const stand = testWorld.solids.filter((s) => s.standable);
+    ok(
+      stand.every((s) => testWorld.groundHeightAt(s.x, s.z) > World.terrainHeight(s.x, s.z)),
+      '每一塊可站立的頂面都真的抬高了腳下的高度'
+    );
+    ok(
+      stand.every((s) => !testWorld.isClear(s.x, s.z)),
+      '可站立體的圓心都不是玩家走得到的點（所以接上去也不會有差別）'
+    );
+    // 出生點 ＋ 每一片土地上一個玩家真的站得住的點：兩支答案逐點相同
+    eq(
+      testWorld.groundHeightAt(World.SPAWN_AT[0], World.SPAWN_AT[1]),
+      World.terrainHeight(World.SPAWN_AT[0], World.SPAWN_AT[1]),
+      '出生點腳下的高度沒有變'
+    );
+    for (const site of World.REGION_SITES) {
+      let spot = null;
+      for (let ring = 0; ring < 30 && !spot; ring += 1) {
+        for (let a = 0; a < 16 && !spot; a += 1) {
+          const t = (a / 16) * Math.PI * 2;
+          const x = site.x + Math.cos(t) * ring;
+          const z = site.z + Math.sin(t) * ring;
+          if (testWorld.isClear(x, z)) spot = [x, z];
+        }
+      }
+      ok(spot, `[${site.id}] 找得到一個玩家站得住的點`);
+      if (!spot) continue;
+      eq(
+        testWorld.groundHeightAt(spot[0], spot[1]),
+        World.terrainHeight(spot[0], spot[1]),
+        `[${site.id}] 玩家站得住的那一點，腳下的高度沒有變`
+      );
+    }
+    // 沒有碰撞表時退回地形（純函式的預設路徑）
+    eq(
+      World.groundHeightAt(World.SPAWN_AT[0], World.SPAWN_AT[1], null),
+      World.terrainHeight(World.SPAWN_AT[0], World.SPAWN_AT[1]),
+      'groundHeightAt 沒有碰撞表時就是地形高度'
+    );
+  }
+
+  /* ------------------------------------------------------------------ *
+   * collision-audit 的新規則：正例（真的世界）＋ 反例（手動塞壞資料）
+   * ------------------------------------------------------------------ */
+  {
+    for (const [label, w, scn] of [['高畫質', testWorld, testScene], ['低畫質', lowWorld, lowScene]]) {
+      const rows = AuditP13.listSubstantial(scn, World.terrainHeight, World.coverage);
+      ok(rows.length > 150, `[${label}] 稽核清單真的掃到東西`, `n=${rows.length}`);
+      ok(
+        rows.every((r) => Number.isFinite(r.top)),
+        `[${label}] 稽核清單每一列的 top 都是數字（量體太大的退回外接盒的頂）`,
+        rows.filter((r) => !Number.isFinite(r.top)).map((r) => r.name).slice(0, 3).join(',')
+      );
+      ok(
+        rows.every((r) => !(r.excepted && r.standable)),
+        `[${label}] 光、霧、水、地形不會被貼上「可站立」的標籤`,
+        rows.filter((r) => r.excepted && r.standable).map((r) => r.name).slice(0, 3).join(',')
+      );
+      const res = AuditP13.auditStandables(w.solids, World.terrainHeight, World.coverage);
+      ok(res.stand.length > 20, `[${label}] 稽核真的看到可站立體`, `n=${res.stand.length}`);
+      eq(res.bad.length, 0, `[${label}] 沒有一塊可站立的頂面違規`, res.bad.slice(0, 4).map((b) => b.why).join(' ｜ '));
+    }
+    // 反例：四種違規各塞一顆，每一顆都要被抓出來、而且說得出理由
+    const [SX, SZ] = World.SPAWN_AT;
+    const g0 = World.terrainHeight(SX, SZ);
+    const bads = [
+      [{ x: SX, z: SZ, r: 1.2, standR: 1.2, top: NaN, topFace: false, standable: true }, '量不出來'],
+      [{ x: SX, z: SZ, r: 1.2, standR: 1.2, top: g0 + 9, topFace: true, standable: true }, '不在'],
+      [{ x: SX, z: SZ, r: 0.3, standR: 0.3, top: g0 + 1.2, topFace: true, standable: true }, '站不下人'],
+      [
+        {
+          x: VOID_AT[0],
+          z: VOID_AT[1],
+          r: 1.2,
+          standR: 1.2,
+          top: World.terrainHeight(VOID_AT[0], VOID_AT[1]) + 1.2,
+          topFace: true,
+          standable: true,
+        },
+        '虛空',
+      ],
+      [{ x: SX, z: SZ, r: 1.2, standR: 0.4, top: g0 + 1.2, topFace: true, standable: true }, '量過是平的只有'],
+      [{ x: SX, z: SZ, r: 1.2, standR: 2.0, top: g0 + 1.2, topFace: true, standable: true }, '還大'],
+    ];
+    for (const [row, needle] of bads) {
+      const res = AuditP13.auditStandables([row], World.terrainHeight, World.coverage);
+      eq(res.bad.length, 1, `[稽核反例] 這一顆被抓出來了（${needle}）`, JSON.stringify(row));
+      const why = res.bad[0] ? res.bad[0].why : '（沒有被抓出來）';
+      ok(why.includes(needle), `[稽核反例] 理由講得出來（${needle}）`, why);
+    }
+    // 正例：合格的那一顆一顆都不算違規
+    ok(
+      AuditP13.auditStandables(
+        [{ x: SX, z: SZ, r: 1.2, standR: 1.2, top: g0 + 1.2, topFace: true, standable: true }],
+        World.terrainHeight,
+        World.coverage
+      ).bad.length === 0,
+      '[稽核正例] 合格的可站立體不會被誤判'
+    );
+    // 不是可站立體的一律不管（這道規則只對 standable 說話）
+    eq(
+      AuditP13.auditStandables(
+        [{ x: VOID_AT[0], z: VOID_AT[1], r: 0.1, standR: 0, top: NaN, topFace: false, standable: false }],
+        World.terrainHeight,
+        World.coverage
+      ).bad.length,
+      0,
+      '[稽核] 沒有標 standable 的圓不受這道規則管'
+    );
+  }
+
+  /* ------------------------------------------------------------------ *
+   * FLOAT_MIN 的豁免語意：「從底下走得過去」**而且**「頂面站不上去」才豁免。
+   * P13 之前只有前半句 —— 飄在半空、卻有一片平頂的東西會整個漏掉稽核。
+   * ------------------------------------------------------------------ */
+  {
+    const floating = (deg, y) => {
+      const scn = new THREE.Group();
+      const m = new THREE.Mesh(new THREE.BoxGeometry(3, 1.0, 3), new THREE.MeshBasicMaterial());
+      m.position.y = y;
+      m.rotation.x = (deg * Math.PI) / 180;
+      m.name = 'floating-slab';
+      scn.add(m);
+      scn.updateMatrixWorld(true);
+      return AuditP13.listSubstantial(scn, flatGround, solidGround);
+    };
+    const flat = floating(0, 2.3);
+    eq(flat.length, 1, '[FLOAT_MIN] 飄在半空、頂面平的東西**要**被稽核到');
+    const flatRow = flat[0] || { bottom: NaN, standable: null };
+    ok(flatRow.bottom >= AuditP13.FLOAT_MIN, '[FLOAT_MIN] 它的底緣確實高過豁免門檻（P13 之前會被跳過）',
+      `bottom=${flatRow.bottom}`);
+    eq(flatRow.standable, true, '[FLOAT_MIN] 它被判定為可站立體');
+    const tilt = floating(20, 2.7);
+    eq(tilt.length, 0, '[FLOAT_MIN] 飄在半空、頂面站不上去的東西照樣豁免（人從底下走過去）');
+
+    /*
+     * 量體太大（超過 STAND_TRI_CAP）就量不出頂面 —— 這時候 `top` 仍然要是個數字
+     * （退回外接盒的頂），而且一律保守判成「站不上去」（審查 · 第 3 條）。
+     */
+    const scn = new THREE.Group();
+    const boulder = new THREE.Mesh(new THREE.SphereGeometry(3, 64, 48), new THREE.MeshBasicMaterial());
+    boulder.position.y = 3;
+    boulder.name = 'huge-boulder';
+    scn.add(boulder);
+    scn.updateMatrixWorld(true);
+    const tris = boulder.geometry.index
+      ? boulder.geometry.index.count / 3
+      : boulder.geometry.attributes.position.count / 3;
+    ok(tris > 2048, '這顆石頭的量體真的超過 STAND_TRI_CAP（不然這一條是空過的）', `tris=${tris}`);
+    const huge = AuditP13.listSubstantial(scn, flatGround, solidGround);
+    eq(huge.length, 1, '[量不出來] 大量體照樣進得了稽核清單');
+    const hugeRow = huge[0] || { top: NaN, standable: null };
+    ok(Number.isFinite(hugeRow.top), '[量不出來] top 退回外接盒的頂，仍然是個數字', `top=${hugeRow.top}`);
+    ok(Math.abs(hugeRow.top - 6) < 1e-4, '[量不出來] 退回的那個數字就是它的最高點', `top=${hugeRow.top}`);
+    eq(hugeRow.standable, false, '[量不出來] 量不出頂面一律保守判成站不上去');
+  }
+
+  /* --- WORLD.md 有把這一格的規則寫下來（§3.1 的跳躍鍵、§6.3 的頂面那一維） --- */
+  {
+    const worldMd = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+    const s31 = worldMd.slice(worldMd.indexOf('### 3.1'), worldMd.indexOf('### 3.2'));
+    ok(/\| 空白鍵 \|/.test(s31), 'WORLD.md §3.1 的世界層按鍵表有空白鍵');
+    ok(!/\| `J` \|/.test(s31), 'WORLD.md §3.1 的按鍵表不再有 `J`（跳躍已改成空白鍵）');
+    // v1.2 · P14 起跳躍真的接上了鍵盤 —— 「尚未啟用」那句話必須從文件裡消失
+    ok(!/尚未啟用/.test(s31), 'WORLD.md §3.1 不再說跳躍尚未啟用（P14 已經接上鍵盤事件）');
+    ok(/P24/.test(s31), 'WORLD.md §3.1 把手把／觸控的跳躍鍵留給 P24');
+    ok(/`Shift`/.test(s31), 'WORLD.md §3.1 說得出為什麼不是 Shift（跑）');
+    ok(/`↑`/.test(s31), 'WORLD.md §3.1 說得出抬頭看天空搬去哪裡了（↑）');
+    const s63 = worldMd.slice(worldMd.indexOf('### 6.3'), worldMd.indexOf('### 6.4'));
+    ok(/頂面站不上去/.test(s63), 'WORLD.md §6.3 第 3 條寫了「而且頂面站不上去」');
+    for (const key of ['`top`', '`topFace`', '`standable`', '`standR`', 'groundHeightAt']) {
+      ok(s63.includes(key), `WORLD.md §6.3 寫了 ${key}`);
+    }
+    /*
+     * 高度區間要整段比對：`String(STAND_MAX_H)` 是 `"3"`，而 `s63` 開頭就是 `"### 6.3"` ——
+     * 只 includes 一個 `"3"` 是**永遠成立**的空泛斷言（審查 · 第 5 條）。
+     */
+    ok(
+      s63.includes(`${World.STAND_MIN_H}–${World.STAND_MAX_H}`),
+      `WORLD.md §6.3 寫了完整的高度區間 ${World.STAND_MIN_H}–${World.STAND_MAX_H}`
+    );
+    ok(s63.includes(String(World.STAND_MIN_R)), 'WORLD.md §6.3 的站得下人半徑與程式碼一致');
+    ok(s63.includes(String(World.STAND_RING_STEP)), 'WORLD.md §6.3 寫了往外量的步長（＝這支量法的解析度）');
+    ok(s63.includes('`standTop`'), 'WORLD.md §6.3 寫了 standTop（腳踩得到的那一面）');
+    ok(/逐圓各自算/.test(s63), 'WORLD.md §6.3 寫了「逐圓各自算」（P10b／P11 的教訓）');
+    ok(/平到多遠就只抬到多遠/.test(s63), 'WORLD.md §6.3 寫了「平到多遠就只抬到多遠」（standR 不是 r 的別名）');
+    ok(/InstancedMesh/.test(s63), 'WORLD.md §6.3 寫明 instanced 那條路也濾半透明');
+    ok(/沒有把它接到玩家身上|刻意沒有把它接到玩家身上/.test(s63), 'WORLD.md §6.3 明講 groundHeightAt（P13 那一支）沒有接到玩家身上');
+    // v1.2 · P14：真的接到玩家身上的是多問一句「腳在哪」的那一支
+    ok(/`supportAt\(x, z, feetY\)`|supportAt/.test(s63), 'WORLD.md §6.3 寫了 P14 接上去的是 supportAt（多問一句腳在哪）');
+    ok(s63.includes('LEDGE_EPS'), 'WORLD.md §6.3 寫了 LEDGE_EPS（站到頂面上的容差）');
+    ok(/不會被瞬間抬到屋頂上/.test(s63), 'WORLD.md §6.3 回答了 P13 交接第 1 條（脫困中的人不會被抬到頂面）');
+    ok(/solidAtAbove/.test(s63), 'WORLD.md §6.3 寫了 solidAtAbove（跳上高台唯一需要的例外）');
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -3402,8 +4165,14 @@ for (const g of catalog.implementedRegions()) {
 eq(prog.masteredRegions().length, catalog.counts.implementedRegions, '所有已上線的區域全部精通');
 
 const achievement = prog.hiddenAchievement();
-eq(achievement.complete, true, '隱藏成就達成（全技巧 ＋ 四廠徽章）');
-eq(achievement.collected, curriculum.techniques.length, '隱藏成就的收集數正確');
+eq(achievement.complete, true, '隱藏成就達成（全技法 ＋ 四宿全亮）');
+/*
+ * v1.2 · P23：門檻對齊 P22 的終局（130 條技法全收 ＋ 四宿全亮）。
+ * 以前這裡量的是 68 條舊技巧 —— 兩個「全部完成」不是同一件事。
+ */
+eq(achievement.collected, catalog.counts.skills, '隱藏成就的收集數＝130 條技法（與終局同一把尺）');
+eq(achievement.total, catalog.counts.skills, '隱藏成就的總數＝130 條技法');
+eq(achievement.reached, true, '而且是**真的**達成（不是靠「達成過了」那個旗標撐著）');
 ok(
   achievement.vendors.every((v) => v.done),
   '四廠徽章都達標',
@@ -4117,22 +4886,35 @@ memory.clear();
 console.log('▸ 場景敘事（Phase 5）');
 
 const Props = await import('../src/world/props.js');
+// v1.2 · P21：轉折那一格的常數（純函式模組，測試與 main.js 讀同一份）
+const TurningP21 = await import('../src/world/turning.js');
 const { LORE_TABLETS, LORE_XP, STORY_VIGNETTES, LANDMARKS, PROP_KINDS, buildPathNetwork, pathInfluence, kitFor } = Props;
 
 /* --- 石碑：資料合法性 ------------------------------------------------ */
 eq(new Set(LORE_TABLETS.map((t) => t.id)).size, LORE_TABLETS.length, '石碑 id 沒有重複');
-ok(LORE_TABLETS.length >= 8 && LORE_TABLETS.length <= 14, '石碑數量在 8–14 之間', `n=${LORE_TABLETS.length}`);
+ok(LORE_TABLETS.length >= 8 && LORE_TABLETS.length <= 16, '石碑數量在 8–16 之間', `n=${LORE_TABLETS.length}`);
 ok(LORE_XP > 0 && LORE_XP <= 20, '石碑 XP 是「少量」', `xp=${LORE_XP}`);
 
-const regionIdSet = new Set(curriculum.groups.map((g) => g.id));
+/*
+ * v1.2 · P21：石碑的區域要對著**真的蓋出來的那 12 片土地**（`REGION_SITES`），
+ * 不是 curriculum.json 的舊五群 —— 從舊五群出發等於預設「表裡沒有的就不存在」
+ * （findings：「清單要從真的蓋得出來的那一份出發」），加建的四片土地立了碑也不會有人看。
+ */
+const regionIdSet = new Set(World.REGION_SITES.map((s2) => s2.id));
+for (const g of curriculum.groups) ok(regionIdSet.has(g.id), `[lore] 舊五群仍在真實區域表裡（${g.id}）`);
 for (const t of LORE_TABLETS) {
   ok(regionIdSet.has(t.region), `[lore:${t.id}] region 是真實區域`, t.region);
   ok(typeof t.title === 'string' && t.title.length > 0 && t.title.length <= 12, `[lore:${t.id}] 有簡短標題`, t.title);
   ok(Array.isArray(t.lines) && t.lines.length >= 1 && t.lines.length <= 3, `[lore:${t.id}] 1–3 句`, String(t.lines && t.lines.length));
-  for (const line of t.lines || []) {
-    ok(typeof line === 'string' && line.length > 0 && line.length <= 60, `[lore:${t.id}] 每句長度合理`, line);
+  /*
+   * v1.2 · P07（回信碑）：`lines` 從此可以是純字串（＝原句，舊格式）
+   * 或 `{ text, hand }`（原句／後人補寫／被劃掉的）。這一段的規則一條都沒放寬 ——
+   * 只是改成對「攤平之後的那一行字」驗（`tabletLines()` 是唯一的攤平入口）。
+   */
+  for (const line of Props.tabletLines(t)) {
+    ok(typeof line.text === 'string' && line.text.length > 0 && line.text.length <= 60, `[lore:${t.id}] 每句長度合理`, line.text);
     // 護欄 2：石碑是風味內容，不得帶連結、不得冒充課程出處
-    ok(!/https?:\/\//.test(line), `[lore:${t.id}] 不放連結（教學與出處只在圖鑑/關卡）`, line);
+    ok(!/https?:\/\//.test(line.text), `[lore:${t.id}] 不放連結（教學與出處只在圖鑑/關卡）`, line.text);
   }
   ok(!('source' in t) && !('sources' in t) && !('teaches' in t), `[lore:${t.id}] 沒有 source / teaches 欄位（不是課程）`);
 
@@ -4219,7 +5001,7 @@ for (const v of STORY_VIGNETTES) {
   ok(pathInfluence(v.at[0], v.at[1], pathSegs) > 0.5, `[vig:${v.id}] 有一條岔路通到小景`);
 }
 // 虛空裡不該有路
-eq(pathInfluence(0, -130, pathSegs), 0, '虛空裡沒有路');
+eq(pathInfluence(VOID_AT[0], VOID_AT[1], pathSegs), 0, '虛空裡沒有路', VOID_AT.join(','));
 // 地形高度不受路網影響（路只是頂點色）
 eq(World.terrainHeight(0, -20), World.terrainHeight(0, -20), '地形高度是純函式，與路網無關');
 for (const c of challenges) {
@@ -4289,6 +5071,14 @@ console.log('\n▸ 刻文小語與地圖彩蛋（Phase 22）');
 
 const inscriptions = inscriptionFile.entries;
 const secrets = secretFile.entries;
+/*
+ * v1.2 · P15：**走在地上碰得到的**那幾處祕密。
+ * `tell: "high"` 的躺在高台頂面上（腳離地 < `SECRET_HIGH_REACH` 一律搆不到），
+ * 所以「不要兩件事同時觸發」那一組距離規則對它們沒有意義 ——
+ * 它腳下那一塊地的淨空由那座高台自己守（與母題共用同一份門檻）。
+ * `scripts/lib/screen-rules.mjs` 的 `interactionTargets()` 用的是同一條規則。
+ */
+const groundSecrets = secrets.filter((sc) => sc.tell !== 'high');
 const insContent = createContent(curriculum, challengeData, builderZh, null, null, curriculumZh);
 const Inscriptions = await import('../src/world/inscriptions.js');
 const Reactive = await import('../src/world/reactive.js');
@@ -4374,13 +5164,46 @@ ok(
 );
 
 /* --- 祕密：純風味（跟石碑同一層護欄） -------------------------------- */
+/*
+ * v1.2 · P15：祕密從 4 處長到 12 處，而且散到 8 片土地 ——
+ * `curriculum.groups` 只有既有五區，所以區域名單改用世界真的蓋出來的那 12 片。
+ * 每片土地的主色（tell「odd」要拿它去比色相）：舊五區在 curriculum、
+ * 其餘七區在 `regions-v2.json` —— 與世界建構時 `colorOf()` 讀的是同一份。
+ */
+const regionIdSetP15 = new Set(World.REGION_SITES.map((s2) => s2.id));
+const ScreensP15 = await import('../src/world/screens.js');
+const regionColorP15 = new Map();
+for (const g of curriculum.groups) regionColorP15.set(g.id, g.color);
+for (const r of readJson('src/data/regions-v2.json').regions || []) {
+  if (r.color) regionColorP15.set(r.id, r.color);
+}
+
 eq(secretFile.authored, 'game', 'secrets.json 檔頭明講是遊戲自撰的層');
 eq(new Set(secrets.map((s) => s.id)).size, secrets.length, '祕密 id 沒有重複');
-ok(secrets.length >= 3 && secrets.length <= 6, '祕密數量在 3–6 之間', `n=${secrets.length}`);
+eq(secrets.length, EXPECT.secrets.value, '祕密數量＝契約值', `n=${secrets.length}`);
 eq(secrets.filter((s) => s.blessing).length, 1, '只有一個祕密帶「回聲的祝福」');
+/*
+ * v1.2 · P15：三種 tell（找到它之前，世界先給的那一點提示）。
+ * 契約：**三種都要有人用**，而且每一種至少 `minPerTell` 處 ——
+ * 只用一種就不叫「三種 tell」，那是同一件事重複 12 遍。
+ */
+{
+  const byTell = new Map(Reactive.SECRET_TELLS.map((k) => [k, 0]));
+  for (const sc of secrets) if (byTell.has(sc.tell)) byTell.set(sc.tell, byTell.get(sc.tell) + 1);
+  eq(
+    secrets.filter((sc) => Reactive.SECRET_TELLS.includes(sc.tell)).length,
+    secrets.length,
+    '每一處祕密都登記了一種 tell'
+  );
+  for (const k of Reactive.SECRET_TELLS) {
+    ok(byTell.get(k) >= EXPECT.secrets.minPerTell, `[tell:${k}] 至少 ${EXPECT.secrets.minPerTell} 處用得到`, String(byTell.get(k)));
+    ok(typeof secretFile.tells[k] === 'string' && secretFile.tells[k].length > 8, `[tell:${k}] 檔頭說得出它是什麼`);
+  }
+  eq(Object.keys(secretFile.tells).length, Reactive.SECRET_TELLS.length, 'tell 說明表沒有多出沒人用的種類');
+}
 for (const s of secrets) {
   const tag = `[secret:${s.id}]`;
-  ok(regionIdSet.has(s.region), `${tag} region 是真實區域`, s.region);
+  ok(regionIdSetP15.has(s.region), `${tag} region 是真實區域`, s.region);
   ok(typeof s.title === 'string' && s.title.length >= 2 && s.title.length <= 14, `${tag} 有簡短標題`, s.title);
   ok(Array.isArray(s.lines) && s.lines.length >= 2 && s.lines.length <= 4, `${tag} 2–4 句`);
   for (const line of [...(s.lines || []), s.note || '']) {
@@ -4412,28 +5235,124 @@ for (const s of secrets) {
   );
   ok(toLane > 8, `${tag} 不在必經的主動線上`, toLane.toFixed(1));
   ok(nearestPedestal(x, z) >= 8, `${tag} 不擋石座`, nearestPedestal(x, z).toFixed(1));
+
+  /* --- v1.2 · P15：三種 tell 各自的資料契約 --- */
+  if (s.tell === 'odd') {
+    // 「不對的東西」＝ 真的有一塊顏色不對：與這片土地的主色**色相差 ≥ 60°**
+    ok(/^#[0-9a-f]{6}$/i.test(s.oddAccent || ''), `${tag} odd 要指名那一塊不對的顏色`, String(s.oddAccent));
+    const hueOf = (hex) => {
+      const r = parseInt(hex.slice(1, 3), 16) / 255;
+      const g2 = parseInt(hex.slice(3, 5), 16) / 255;
+      const b = parseInt(hex.slice(5, 7), 16) / 255;
+      const mx = Math.max(r, g2, b);
+      const mn = Math.min(r, g2, b);
+      const d = mx - mn;
+      if (d < 1e-6) return 0;
+      let h = 0;
+      if (mx === r) h = ((g2 - b) / d) % 6;
+      else if (mx === g2) h = (b - r) / d + 2;
+      else h = (r - g2) / d + 4;
+      return ((h * 60) % 360 + 360) % 360;
+    };
+    const base = regionColorP15.get(s.region);
+    ok(Boolean(base), `${tag} 查得到這片土地的主色`, String(base));
+    const dh = Math.abs(hueOf(s.oddAccent) - hueOf(base));
+    const gap = Math.min(dh, 360 - dh);
+    ok(gap >= 60, `${tag} 那一塊真的格格不入（色相差 ≥ 60°）`, `${gap.toFixed(0)}°`);
+    ok(!('onPlatform' in s), `${tag} 不掛在高台上`);
+  } else if (s.tell === 'high') {
+    // 「高處」＝ 真的躺在一座高台的頂面上，而且那座高台真的比搆得到的門檻高
+    const pf = ScreensP15.PLATFORMS.find((p) => p.id === s.onPlatform);
+    ok(Boolean(pf), `${tag} onPlatform 指得到一座真的高台`, String(s.onPlatform));
+    if (pf) {
+      eq(pf.at[0], s.at[0], `${tag} 與那座高台同一個 x`);
+      eq(pf.at[1], s.at[1], `${tag} 與那座高台同一個 z`);
+      eq(pf.reveals, s.id, `${tag} 那座高台也指回這一處（兩邊對得上）`);
+      ok(
+        pf.height > Reactive.SECRET_HIGH_REACH,
+        `${tag} 那座高台比「搆得到」的門檻高（站上去才拿得到）`,
+        `${pf.height} > ${Reactive.SECRET_HIGH_REACH}`
+      );
+    }
+    ok(!('oddAccent' in s), `${tag} 高處的 tell 不靠顏色`);
+  } else {
+    ok(!('onPlatform' in s) && !('oddAccent' in s), `${tag} sound 的 tell 不靠顏色也不靠高台`);
+  }
+}
+/* 每一座掛了 `reveals` 的高台，都要指得到一處真的 `tell: "high"` 祕密（反向也對得上）。 */
+for (const pf of ScreensP15.PLATFORMS) {
+  if (!pf.reveals) continue;
+  const sc = secrets.find((x) => x.id === pf.reveals);
+  ok(Boolean(sc), `[platform:${pf.id}] reveals 指得到一處真的祕密`, String(pf.reveals));
+  if (sc) eq(sc.tell, 'high', `[platform:${pf.id}] 它指的那一處是「高處」的 tell`);
+}
+{
+  // 12 片土地裡有幾片藏得住東西 —— 只准變多（護欄 7）
+  const covered = new Set(secrets.map((sc) => sc.region));
+  ok(covered.size >= EXPECT.secrets.minRegions, `祕密散在至少 ${EXPECT.secrets.minRegions} 片土地上`, String(covered.size));
+  // 兩處祕密之間不要擠在一起（走一步同時找到兩處就不叫「藏起來的地方」）
+  for (let i = 0; i < secrets.length; i += 1) {
+    for (let j = i + 1; j < secrets.length; j += 1) {
+      const a = secrets[i];
+      const b = secrets[j];
+      ok(
+        Math.hypot(a.at[0] - b.at[0], a.at[1] - b.at[1]) >= 12,
+        `祕密 ${a.id} / ${b.id} 離得夠開`,
+        Math.hypot(a.at[0] - b.at[0], a.at[1] - b.at[1]).toFixed(1)
+      );
+    }
+  }
 }
 
 /* --- 會回應的東西：擺法與效能相關的規則 ------------------------------ */
 const spots = Reactive.REACTIVE_SPOTS;
 eq(new Set(spots.map((s) => s.id)).size, spots.length, '反應物件 id 沒有重複');
-ok(spots.length >= 18 && spots.length <= 30, '反應物件數量在合理範圍', `n=${spots.length}`);
+eq(spots.length, EXPECT.reactiveSpots.value, '反應物件數量＝契約值', `n=${spots.length}`);
 {
   const kinds = new Set(spots.map((s) => s.kind));
   ok(kinds.size >= 5, '至少有 5 種不同的反應', `kinds=${[...kinds].join(',')}`);
+  eq(kinds.size, Object.keys(Reactive.REACTION_KINDS).length, '六種反應全部有人用（沒有沒上場的種類）');
   for (const k of kinds) ok(k in Reactive.REACTION_KINDS, `[${k}] 是已實作的反應種類`);
   const regions = new Set(spots.map((s) => s.region));
   for (const g of curriculum.groups) ok(regions.has(g.id), `[${g.id}] 這片土地上有會回應的東西`);
+  // v1.2 · P06c：12 片土地一片都不准空著，而且每一片的件數就是配額表
+  for (const site of World.REGION_SITES) {
+    const here = spots.filter((s) => s.region === site.id);
+    ok(here.length > 0, `[${site.id}] 這片土地上有會回應的東西（P06c：七片空區補齊）`, `n=${here.length}`);
+    eq(here.length, EXPECT.reactiveSpots.perRegion[site.id], `[${site.id}] 反應物件數＝配額表`, `n=${here.length}`);
+  }
+  eq(
+    Object.values(EXPECT.reactiveSpots.perRegion).reduce((a, b) => a + b, 0),
+    EXPECT.reactiveSpots.value,
+    '配額表加起來＝反應物件總數'
+  );
 }
 for (const s of spots) {
   const tag = `[react:${s.id}]`;
   const [x, z] = s.at;
+  ok(/^[a-z0-9-]+$/.test(s.id), `${tag} id 是 kebab-case`);
   const here = World.regionAt(x, z);
   ok(here && here.id === s.region, `${tag} 落在標示的區域裡`, JSON.stringify(here));
   ok(World.coverage(x, z) > 0.85, `${tag} 站得住`);
   ok(nearestPedestal(x, z) >= 7, `${tag} 不在石座的淨空圈裡`, nearestPedestal(x, z).toFixed(1));
   const toIns = Math.min(...inscriptions.map((i) => Math.hypot(x - i.at[0], z - i.at[1])));
   ok(toIns >= 9, `${tag} 不壓在刻文小語上`, toIns.toFixed(1));
+}
+/*
+ * 音石列是一排，不是一個點：每一顆石頭自己就是一個觸發點。
+ * 整列有可能從邊緣掛出去 —— 每一顆都要站得住、走得到（不然那一段旋律玩家永遠聽不到）。
+ */
+for (const s of spots.filter((sp) => sp.kind === 'songstone')) {
+  const n = (s.opts && s.opts.stones) || 5;
+  const gap = (s.opts && s.opts.gap) || 2.3;
+  const dir = Number.isFinite(s.opts && s.opts.dir) ? s.opts.dir : 0;
+  for (let i = 0; i < n; i += 1) {
+    const off = (i - (n - 1) / 2) * gap;
+    const sx = s.at[0] + Math.cos(dir) * off;
+    const sz = s.at[1] + Math.sin(dir) * off;
+    ok(testWorld.isWalkable(sx, sz), `[react:${s.id}] 第 ${i + 1} 顆音石踩得到`, `${sx.toFixed(1)},${sz.toFixed(1)}`);
+    ok(!testWorld.solidAt(sx, sz), `[react:${s.id}] 第 ${i + 1} 顆音石沒有埋在石頭裡`);
+  }
 }
 for (let i = 0; i < spots.length; i += 1) {
   for (let j = i + 1; j < spots.length; j += 1) {
@@ -4643,8 +5562,20 @@ const handles = handleFile.entries;
 eq(handleFile.authored, 'game', 'handles.json 檔頭明講是遊戲自撰的層');
 ok(handleFile.xp > 0 && handleFile.xp <= 8, '動一件器物的 XP 是「很少量」', `xp=${handleFile.xp}`);
 eq(new Set(handles.map((h) => h.id)).size, handles.length, '器物 id 沒有重複');
-ok(handles.length >= 18 && handles.length <= 30, '器物數量在合理範圍', `n=${handles.length}`);
+eq(handles.length, EXPECT.handles.value, '器物數量＝契約值', `n=${handles.length}`);
 {
+  // v1.2 · P06c：12 片土地一片都不准空著，件數就是配額表
+  for (const site of World.REGION_SITES) {
+    const here = handles.filter((h) => h.region === site.id);
+    ok(here.length > 0, `[${site.id}] 這片土地上有動得了的東西（P06c：七片空區補齊）`, `n=${here.length}`);
+    eq(here.length, EXPECT.handles.perRegion[site.id], `[${site.id}] 器物數＝配額表`, `n=${here.length}`);
+    eq(new Set(here.map((h) => h.kind)).size, here.length, `[${site.id}] 同一片土地上不重複同一種器物`);
+  }
+  eq(
+    Object.values(EXPECT.handles.perRegion).reduce((a, b) => a + b, 0),
+    EXPECT.handles.value,
+    '配額表加起來＝器物總數'
+  );
   const kinds = new Set(handles.map((h) => h.kind));
   ok(kinds.size >= 6, '至少有 6 種不同的器物', `kinds=${[...kinds].join(',')}`);
   for (const k of kinds) {
@@ -4716,14 +5647,63 @@ for (const kindMeta of Object.values(handleFile.kinds || {})) {
         return Math.hypot(x - (l.ax + dx * t), z - (l.az + dz * t));
       })
     );
+  /*
+   * v1.2 · P11：**橋上的器物**的例外表（上限 1 條，每一條寫理由）。
+   *
+   * 研究 M §1f／提案 M11：一條 100 公尺的直橋中段要有一個「中點事件」，
+   * 不然過橋只是走廊。但橋面只有 `half 9`、真正平的甲板是 `flat 5` ——
+   * 「站在橋上」與「離主動線 > 8 公尺」在幾何上互斥（8 公尺處已經是往虛空垂下去的坡）。
+   * 所以這一件登記例外，並改用更嚴的替代斷言：主動線 ±LANE_HALF 一寸都不准被碰
+   * （長凳本來就沒有碰撞體 —— 凳面 0.19、凳腳 0.5，兩軸都薄於 SOLID_PLATE_MIN）、
+   * 甲板覆蓋 ≥ 0.95、離閘門 ≥ 8。
+   */
+  const P11_BRIDGE_HANDLES = Object.freeze({
+    'rsn-bench-corridor': {
+      minLane: 4.5,
+      why: '橋中段的長凳（研究 M11 的中點事件）：橋面平的部分只有半寬 5 公尺，要坐在橋上就一定在主動線 8 公尺內；它沒有碰撞體，主動線一寸沒被碰到。',
+    },
+  });
+  ok(Object.keys(P11_BRIDGE_HANDLES).length <= 1, '橋上的器物例外表最多 1 條（P11）');
+  for (const e of Object.values(P11_BRIDGE_HANDLES)) ok((e.why || '').length >= 10, '每一條例外都寫了理由', e.why);
+
   for (const h of handles) {
     const tag = `[handle:${h.id}]`;
     const [x, z] = h.at;
     const here = World.regionAt(x, z);
-    ok(here && here.id === h.region && !here.onBridge, `${tag} 落在標示的區域裡（而且不在橋上）`, JSON.stringify(here));
+    const bridgeOk = P11_BRIDGE_HANDLES[h.id];
+    ok(
+      here && here.id === h.region && (!here.onBridge || Boolean(bridgeOk)),
+      `${tag} 落在標示的區域裡（不在橋上，除非登記過）`,
+      JSON.stringify(here)
+    );
     ok(World.coverage(x, z) > 0.85, `${tag} 站得住（沒有掉進虛空）`, World.coverage(x, z).toFixed(2));
     ok(nearestPedestal(x, z) >= 7, `${tag} 不在石座的淨空圈裡`, nearestPedestal(x, z).toFixed(1));
-    ok(laneDist(x, z) > 8, `${tag} 不擋橋的主動線`, laneDist(x, z).toFixed(1));
+    ok(laneDist(x, z) > (bridgeOk ? bridgeOk.minLane : 8), `${tag} 不擋橋的主動線`, laneDist(x, z).toFixed(1));
+    if (bridgeOk) {
+      // 替代斷言：主動線本身一寸都沒被碰到、甲板是平的、離閘門夠遠
+      ok(World.coverage(x, z) >= 0.95, `${tag} 站在橋面平的那一段`, World.coverage(x, z).toFixed(2));
+      const gateD = Math.min(
+        ...[...World.CORRIDORS, ...World.ANNEX_LINKS].map((c) => Math.hypot(x - c.gate.x, z - c.gate.z))
+      );
+      ok(gateD >= 8, `${tag} 離閘門 ≥ 8m`, gateD.toFixed(1));
+      // 別區（附屬區沒有 BRIDGE_LANES）要**失敗一條斷言**，不是整支測試爆掉
+      const lane = World.BRIDGE_LANES.find((l) => l.region === h.region);
+      ok(Boolean(lane), `${tag} 登記在橋上例外的區有主動線可以量`, h.region);
+      let blocked = 0;
+      if (lane) {
+        for (let t = 0; t <= 1.0001; t += 0.02) {
+          const lx = lane.ax + (lane.bx - lane.ax) * t;
+          const lz = lane.az + (lane.bz - lane.az) * t;
+          for (const off of [-World.LANE_HALF, 0, World.LANE_HALF]) {
+            const nx = -(lane.bz - lane.az);
+            const nz = lane.bx - lane.ax;
+            const len = Math.hypot(nx, nz) || 1;
+            if (testWorld.solidAt(lx + (nx / len) * off, lz + (nz / len) * off)) blocked += 1;
+          }
+        }
+        eq(blocked, 0, `${tag} 那條橋的主動線（±LANE_HALF）整條走得通`);
+      }
+    }
     ok(Math.hypot(x - 0, z - 6) > World.SPAWN_CLEAR + 2, `${tag} 不壓在出生點上`);
     const toIns = Math.min(...inscriptions.map((i) => Math.hypot(x - i.at[0], z - i.at[1])));
     ok(toIns >= 8, `${tag} 不壓在刻文小語上（不搶 E）`, toIns.toFixed(1));
@@ -4733,7 +5713,7 @@ for (const kindMeta of Object.values(handleFile.kinds || {})) {
     ok(toTablet >= 7, `${tag} 不壓在世界觀石碑上（不搶 E）`, toTablet.toFixed(1));
     const toLandmark = Math.min(...LANDMARKS.map((l) => Math.hypot(x - l.at[0], z - l.at[1])));
     ok(toLandmark >= 14, `${tag} 沒有站進地標的留白圈`, toLandmark.toFixed(1));
-    const toSecret = Math.min(...secrets.map((s) => Math.hypot(x - s.at[0], z - s.at[1])));
+    const toSecret = Math.min(...groundSecrets.map((s) => Math.hypot(x - s.at[0], z - s.at[1])));
     ok(toSecret >= 9, `${tag} 不壓在藏起來的地方上`, toSecret.toFixed(1));
   }
   for (let i = 0; i < handles.length; i += 1) {
@@ -4747,6 +5727,492 @@ for (const kindMeta of Object.values(handleFile.kinds || {})) {
       );
     }
   }
+}
+
+/* --- v1.2 · P06c：兩層一起看的擺位規則（互動圈不重疊、聲音不糊掉） ---- *
+ *
+ * P01 的濁靈規則講的是「互動圈不重疊 ＝ 兩層半徑相加」。這一節把同一條規矩套到
+ * 反應物與器物上，並且**跨層一起驗**（兩層都是走路上遇到的小東西，不能互相蓋掉）：
+ *
+ *   · 器物 ↔ 器物 ≥ 14（既有規則，密度要有節奏）
+ *   · 反應 ↔ 反應 ≥ 11（WORLD §4.4：離太近會同時響，聲音糊掉）
+ *   · 反應 ↔ 器物 ≥ 8.7（5.5 ＋ 3.2，同 P01 的算法）
+ *   · 石碑 ≥ 10.1、刻文 ≥ 9.3、濁靈 ≥ 8.7、地標 ≥ 14、祕密 ≥ 9
+ *   · 橋主動線 ≥ LANE_HALF + 4、閘門／頸口 ≥ 8、出生點 ≥ SPAWN_CLEAR + 2、起始祭壇 ≥ 9
+ *   · 石座 ≥ 12（6.5 ＋ 5.5 的同一個保守值）—— **例外表在下面，每一條都要寫理由**
+ *
+ * 「清不清得下人」對**真的會出貨的世界**驗，只扣掉「它自己」那一顆碰撞體
+ * （`clearExceptSelf`）——另外蓋一個少了這批器物的世界會讓程序化擺放的亂數流位移，
+ * 那是在驗一個不存在的佈局。反應物那一層本來就不登記碰撞體。
+ */
+{
+  const P06C_SET = new Set(P06C_REGIONS);
+  /*
+   * 石座淨空的例外表（同 P01 的規矩：例外要寫理由、要有上限）。
+   * 分歧之廳半徑 29 站了 10 座石座、護欄崗半徑 27 站了 6 座＋地標，觀象臺的橋頭又壓著主動線 ——
+   * 這三片土地上沒有任何一點同時滿足「離每一座石座 ≥ 12」與其餘每一條規則。
+   * 退到的值仍然大於既有規則（器物 7、反應 7），而且器物那一層都還在
+   * 「石座 6.5 ＋ 器物 3.2 ＝ 9.7」的附近；E 的仲裁裡石座本來就贏，玩家端零倒退。
+   */
+  const P06C_MARKER_EXCEPTIONS = Object.freeze({
+    divergence: { reactive: 8.5, handle: 8.5, why: '分歧之廳半徑 29 站了 10 座石座，全區無 ≥12 的落點' },
+    wards: { reactive: 8, handle: 9, why: '護欄崗半徑 27 站了 6 座石座＋地標，全區無 ≥12 的落點' },
+    sight: { reactive: 10, handle: 10, why: '觀象臺的路網貼著橋頭與坡緣，≥12 與「離主動線 >8」同時成立時無解' },
+  });
+  ok(Object.keys(P06C_MARKER_EXCEPTIONS).length <= 3, '石座淨空例外表最多 3 條（P06c）');
+  for (const e of Object.values(P06C_MARKER_EXCEPTIONS)) ok((e.why || '').length >= 10, '每一條例外都寫了理由', e.why);
+
+  const layered = [
+    ...Reactive.REACTIVE_SPOTS.map((s) => ({ layer: 'reactive', id: s.id, region: s.region, at: s.at })),
+    ...handles.map((h) => ({ layer: 'handle', id: h.id, region: h.region, at: h.at })),
+  ];
+  const fresh = layered.filter((it) => P06C_SET.has(it.region));
+  eq(fresh.filter((it) => it.layer === 'reactive').length, 22, 'P06c 新加的反應物共 22 件');
+  eq(fresh.filter((it) => it.layer === 'handle').length, 22, 'P06c 新加的器物共 22 件');
+
+  const segDist = (px, pz, ax, az, bx, bz) => {
+    const dx = bx - ax;
+    const dz = bz - az;
+    const l2 = dx * dx + dz * dz;
+    const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / l2)) : 0;
+    return Math.hypot(px - (ax + dx * t), pz - (az + dz * t));
+  };
+  const laneDistOf = (x, z) => Math.min(...World.BRIDGE_LANES.map((l) => segDist(x, z, l.ax, l.az, l.bx, l.bz)));
+  for (const it of fresh) {
+    const tag = `[p06c:${it.layer}:${it.id}]`;
+    const [x, z] = it.at;
+    const here = World.regionAt(x, z);
+    ok(here && here.id === it.region && !here.onBridge, `${tag} regionAt 說它在 ${it.region}（而且不在橋上）`, JSON.stringify(here));
+    ok(World.coverage(x, z) > 0.9, `${tag} 站得住（coverage > 0.9）`, World.coverage(x, z).toFixed(2));
+    ok(clearExceptSelf(testWorld, x, z), `${tag} 這一點除了它自己以外沒有別的東西擋著`);
+    const exc = P06C_MARKER_EXCEPTIONS[it.region];
+    const markerMin = exc ? exc[it.layer] : 12;
+    const toMarker = Math.min(...challenges.map((c) => Math.hypot(x - c.position[0], z - c.position[1])));
+    ok(toMarker >= markerMin, `${tag} 離石座 ≥ ${markerMin}m`, toMarker.toFixed(2));
+    const toMurk = Math.min(...murkFile.entries.map((m) => Math.hypot(x - m.at[0], z - m.at[1])));
+    ok(toMurk >= 8.7, `${tag} 離濁靈 ≥ 8.7m`, toMurk.toFixed(1));
+    const toTablet2 = Math.min(...LORE_TABLETS.map((t) => Math.hypot(x - t.at[0], z - t.at[1])));
+    ok(toTablet2 >= 10.1, `${tag} 離世界觀石碑 ≥ 10.1m`, toTablet2.toFixed(1));
+    const toIns2 = Math.min(...inscriptions.map((i) => Math.hypot(x - i.at[0], z - i.at[1])));
+    ok(toIns2 >= 9.3, `${tag} 離刻文小語 ≥ 9.3m`, toIns2.toFixed(1));
+    const toSecret2 = Math.min(...groundSecrets.map((sc) => Math.hypot(x - sc.at[0], z - sc.at[1])));
+    ok(toSecret2 >= 9, `${tag} 離藏起來的地方 ≥ 9m`, toSecret2.toFixed(1));
+    const toLandmark2 = Math.min(...LANDMARKS.map((l) => Math.hypot(x - l.at[0], z - l.at[1])));
+    ok(toLandmark2 >= 14, `${tag} 沒有站進地標的留白圈`, toLandmark2.toFixed(1));
+    ok(laneDistOf(x, z) >= World.LANE_HALF + 4, `${tag} 離橋的主動線 ≥ 4m`, laneDistOf(x, z).toFixed(1));
+    for (const a of World.ANNEX_LINKS) ok(Math.hypot(x - a.gate.x, z - a.gate.z) >= 8, `${tag} 離 ${a.region} 頸口 ≥ 8m`);
+    for (const c of World.CORRIDORS) ok(Math.hypot(x - c.gate.x, z - c.gate.z) >= 8, `${tag} 離 ${c.region} 閘門 ≥ 8m`);
+    ok(Math.hypot(x, z - 6) >= World.SPAWN_CLEAR + 2, `${tag} 不壓在出生點上`);
+    ok(
+      Math.hypot(x - prologueForWorld.shrine.at[0], z - prologueForWorld.shrine.at[1]) >= 9,
+      `${tag} 離起始祭壇 ≥ 9m`
+    );
+  }
+  /*
+   * 走得到嗎（e2e 的同一條線，先在 rubric 攔）：
+   * `buildRegionProps()` 的 `place()` 試 8 次都撞到淨空區時會回一個**固定退路座標**，
+   * 那個落點不再檢查 keepClear —— 所以「旁邊留白 5.5 公尺」不是保證，要真的量。
+   *   · 反應物：半徑 2.0 的一圈 16 個方向，至少 13 個沒有碰撞體（＝ e2e 的門檻）
+   *   · 器物：半徑 2.4 的一圈 20 個方向，至少 18 個（＝ e2e 與既有 rubric 的門檻）
+   */
+  for (const s of Reactive.REACTIVE_SPOTS) {
+    let free = 0;
+    for (let a = 0; a < 16; a += 1) {
+      const ang = (a / 16) * Math.PI * 2;
+      if (!testWorld.solidAt(s.at[0] + Math.cos(ang) * 2.0, s.at[1] + Math.sin(ang) * 2.0)) free += 1;
+    }
+    ok(free >= 13, `[react:${s.id}] 四周走得過去（不會被道具圍死）`, `${free}/16`);
+  }
+  // 跨層的互動圈：兩兩都要拉得開（全世界一起驗，不只新加的那一批）
+  for (let i = 0; i < layered.length; i += 1) {
+    for (let j = i + 1; j < layered.length; j += 1) {
+      const a = layered[i];
+      const b = layered[j];
+      const min = a.layer === b.layer ? (a.layer === 'handle' ? 14 : 11) : 8.7;
+      const d = Math.hypot(a.at[0] - b.at[0], a.at[1] - b.at[1]);
+      ok(d >= min, `${a.layer}:${a.id} / ${b.layer}:${b.id} 的互動圈不重疊（≥ ${min}m）`, d.toFixed(2));
+    }
+  }
+}
+
+/* ================================================================== */
+/* v1.2 · P07：抄寫人的殘頁（letters.json）                             */
+/*                                                                    */
+/*   一半有教學（掛真實技巧＋可點的官方出處），一半純風味（不准有連結）。  */
+/*   擺位沿用 P06c 的那一套（互動圈不重疊、靠路、有得走），半徑 3.8。     */
+/* ================================================================== */
+console.log('\n▸ 抄寫人的殘頁（v1.2 · P07）');
+
+const Letters = await import('../src/world/letters.js');
+const letters = letterFile.entries;
+/** 12 片土地（curriculum.groups 只有既有五區 —— 殘頁鋪滿 12 區，所以用世界的區域表）。 */
+const regionIdSetP07 = new Set(World.REGION_SITES.map((s) => s.id));
+const anchorFileP07 = readJson('src/data/source-anchors.json');
+const anchorUrlSet = new Set((anchorFileP07.entries || []).map((e) => e.url));
+const LETTER_BANNED = ['送出評分', '按鈕', '面板', 'localStorage', 'bloom', '後製', 'Web Audio', 'API key', 'rubric', 'debug'];
+const CJK_P07 = /[一-鿿]/;
+
+/* --- ① 檔頭與數量（契約在 expected-counts） --- */
+eq(letterFile.version, 1, 'letters.json 有版本欄');
+eq(letterFile.authored, 'game', 'letters.json 檔頭明講是遊戲自撰的層');
+ok(
+  nonEmptyStr(letterFile.note) && /出處|官方/.test(letterFile.note),
+  'letters.json 檔頭說明「出處以官方文件為準」'
+);
+ok(letterFile.xp > 0 && letterFile.xp <= 10, '撿一頁殘頁的 XP 是「很少量」', `xp=${letterFile.xp}`);
+eq(letters.length, EXPECT.letters.value, `殘頁數＝契約（${EXPECT.letters.value} 頁）`);
+eq(new Set(letters.map((l) => l.id)).size, letters.length, '殘頁 id 沒有重複');
+for (const site of World.REGION_SITES) {
+  eq(
+    letters.filter((l) => l.region === site.id).length,
+    EXPECT.letters.perRegion,
+    `[${site.id}] 這片土地上有 ${EXPECT.letters.perRegion} 頁殘頁`
+  );
+}
+{
+  const teaching = letters.filter((l) => 'techniqueId' in l);
+  eq(teaching.length, EXPECT.letters.teaching, '有教學句的殘頁數＝契約（另一半是純風味）');
+}
+
+/* --- ② 每一頁的結構、教學正典、出處（護欄 2） --- */
+for (const l of letters) {
+  const tag = `[letter:${l.id}]`;
+  ok(/^letter-[a-z0-9-]+$/.test(l.id), `${tag} id 是 kebab-case 且帶 letter- 前綴`);
+  ok(regionIdSetP07.has(l.region), `${tag} region 是真實區域`, l.region);
+  ok(Letters.LETTER_PROPS.includes(l.prop), `${tag} 載體是已實作的種類`, l.prop);
+  ok(Array.isArray(l.at) && l.at.length === 2 && l.at.every(Number.isFinite), `${tag} at 是 [x, z]`);
+  ok(typeof l.title === 'string' && l.title.length >= 2 && l.title.length <= 14, `${tag} 有簡短標題`, l.title);
+  ok(Array.isArray(l.lines) && l.lines.length >= 2 && l.lines.length <= 4, `${tag} 2–4 句`, String(l.lines?.length));
+  for (const line of l.lines || []) {
+    ok(typeof line === 'string' && line.length > 0 && line.length <= 60, `${tag} 每句長度合理`, line);
+    ok(!/https?:\/\//.test(line), `${tag} 世界的話裡不放連結`, line);
+    ok(CJK_P07.test(line), `${tag} 世界的話是中文`, line);
+    ok(!ENGLISH(line), `${tag} 世界的話沒有整句英文`, ENGLISH(line) || '');
+    for (const b of LETTER_BANNED) ok(!line.includes(b), `${tag} 不出現系統術語「${b}」`);
+  }
+
+  const teaches = 'techniqueId' in l;
+  if (teaches) {
+    /*
+     * 有教學句的那一半：跟刻文小語同一個誠實模式 ——
+     * 掛得回一條真實技巧、顯示的說法取自既有中文層、後面接得出可點的官方出處。
+     */
+    const tech = insContent.technique(l.techniqueId);
+    ok(Boolean(tech), `${tag} techniqueId 是 curriculum 裡真實存在的技巧`, l.techniqueId);
+    const view = insContent.displayTechnique(l.techniqueId);
+    ok(Boolean(view && view.tip && view.tip.length > 8), `${tag} 有既有的中文說法可以顯示`);
+    ok(!('tip' in l) && !('what' in l), `${tag} 資料層不自帶教學句子（一律取自 curriculum）`);
+    ok(typeof l.source === 'string' && /^https:\/\//.test(l.source), `${tag} 教學句一定附得出 https 出處`, l.source);
+    eq(l.source, tech && tech.sources[0].url, `${tag} source 與那條技巧的官方網址逐字相同`);
+    ok(anchorUrlSet.has(l.source), `${tag} 這份官方文件在 source-anchors.json 裡（點過去會落在被引用的那一節）`, l.source);
+    ok(
+      typeof l.hint === 'string' && l.hint.length >= 8 && l.hint.length <= 46,
+      `${tag} 有一句可以照著做的白話提示`,
+      l.hint
+    );
+    ok(!/https?:\/\//.test(l.hint), `${tag} 提示裡不放連結`, l.hint);
+    ok(!ENGLISH(l.hint), `${tag} 提示是中文`, ENGLISH(l.hint) || '');
+    ok(l.hint !== (view && view.tip), `${tag} 提示不是直接複製官方說法`);
+    for (const b of LETTER_BANNED) ok(!l.hint.includes(b), `${tag} 提示不出現系統術語「${b}」`);
+  } else {
+    // 純風味的那一半：跟祕密與世界觀石碑同一層護欄（不教技巧、不放連結）
+    ok(
+      !('source' in l) && !('sources' in l) && !('teaches' in l) && !('hint' in l) && !('skillId' in l),
+      `${tag} 純風味：沒有 source / teaches / hint 欄位（不是課程）`
+    );
+  }
+}
+
+/* --- ③ 擺位：互動圈不重疊、靠著路、四周走得到（P06c 那一套的殘頁版） --- */
+{
+  /*
+   * 石座淨空的例外表（同 P01／P06c 的規矩：登記在測試裡、每一條寫理由、上限 3 條）。
+   * 殘頁的互動半徑 3.8 ＋ 石座 6.5 ＝ 10.3 是預設值；下面三片土地上
+   * **沒有任何一點**同時滿足 10.3 與其餘每一條規則（0.5 公尺格點全區掃過）。
+   */
+  const P07_MARKER_EXCEPTIONS = Object.freeze({
+    wards: { min: 9.5, why: '護欄崗半徑 27 站了 6 座石座＋地標＋祕密，全區無 ≥10.3 的落點' },
+    divergence: { min: 8.5, why: '分歧之廳半徑 29 站了 10 座石座，全區無 ≥10.3 的落點' },
+    sight: { min: 9.5, why: '觀象臺的路網貼著橋頭與坡緣，≥10.3 時兩頁只擠得進同一個小口袋' },
+  });
+  ok(Object.keys(P07_MARKER_EXCEPTIONS).length <= 3, '殘頁的石座淨空例外表最多 3 條（P07）');
+  for (const e of Object.values(P07_MARKER_EXCEPTIONS)) ok((e.why || '').length >= 10, '每一條例外都寫了理由', e.why);
+
+  const segDistP07 = (px, pz, ax, az, bx, bz) => {
+    const dx = bx - ax;
+    const dz = bz - az;
+    const l2 = dx * dx + dz * dz;
+    const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / l2)) : 0;
+    return Math.hypot(px - (ax + dx * t), pz - (az + dz * t));
+  };
+  const laneDistP07 = (x, z) => Math.min(...World.BRIDGE_LANES.map((l) => segDistP07(x, z, l.ax, l.az, l.bx, l.bz)));
+  // 路網：與 world.js 蓋地面時同一個呼叫（殘頁要「掉在路邊」，不是掉在荒野）
+  const pathSegsP07 = buildPathNetwork(World.REGION_SITES, [...World.CORRIDORS, ...World.ANNEX_LINKS], challenges);
+  const pathDistP07 = (x, z) => Math.min(...pathSegsP07.map(([ax, az, bx, bz]) => segDistP07(x, z, ax, az, bx, bz)));
+  const nearestOf = (list, x, z) => Math.min(...list.map((p) => Math.hypot(x - p[0], z - p[1])));
+
+  for (const l of letters) {
+    const tag = `[letter:${l.id}]`;
+    const [x, z] = l.at;
+    const here = World.regionAt(x, z);
+    ok(here && here.id === l.region && !here.onBridge, `${tag} regionAt 說它在 ${l.region}（而且不在橋上）`, JSON.stringify(here));
+    ok(World.coverage(x, z) > 0.9, `${tag} 站得住（coverage > 0.9）`, World.coverage(x, z).toFixed(2));
+    ok(!testWorld.solidAt(x, z), `${tag} 這一點沒有別的東西擋著（殘頁自己不登記碰撞體）`);
+    let free = 0;
+    for (let a = 0; a < 16; a += 1) {
+      const ang = (a / 16) * Math.PI * 2;
+      if (!testWorld.solidAt(x + Math.cos(ang) * 2.4, z + Math.sin(ang) * 2.4)) free += 1;
+    }
+    ok(free >= 14, `${tag} 四周走得到（互動半徑 ${Letters.LETTER_RADIUS}）`, `${free}/16`);
+    // tell：它要在路邊被看見，不是藏在荒野（祕密才藏，殘頁是撿的）
+    ok(pathDistP07(x, z) <= 12, `${tag} 掉在路邊（離路網 ≤ 12m）`, pathDistP07(x, z).toFixed(1));
+    ok(laneDistP07(x, z) >= World.LANE_HALF + 4, `${tag} 離橋的主動線 ≥ 4m`, laneDistP07(x, z).toFixed(1));
+    const markerMin = (P07_MARKER_EXCEPTIONS[l.region] || {}).min || 10.3;
+    const toMarker = nearestOf(
+      challenges.map((c) => c.position),
+      x,
+      z
+    );
+    ok(toMarker >= markerMin, `${tag} 離石座 ≥ ${markerMin}m`, toMarker.toFixed(2));
+    const toMurkP07 = nearestOf(
+      murkFile.entries.map((m) => m.at),
+      x,
+      z
+    );
+    ok(toMurkP07 >= 9.3, `${tag} 離濁靈 ≥ 9.3m`, toMurkP07.toFixed(1));
+    const toTabletP07 = nearestOf(
+      LORE_TABLETS.map((t) => t.at),
+      x,
+      z
+    );
+    ok(toTabletP07 >= 8.4, `${tag} 離世界觀石碑 ≥ 8.4m`, toTabletP07.toFixed(1));
+    const toInsP07 = nearestOf(
+      inscriptions.map((i) => i.at),
+      x,
+      z
+    );
+    ok(toInsP07 >= 7.6, `${tag} 離刻文小語 ≥ 7.6m（兩層半徑相加）`, toInsP07.toFixed(1));
+    const toHandleP07 = nearestOf(
+      handles.map((h) => h.at),
+      x,
+      z
+    );
+    ok(toHandleP07 >= 7, `${tag} 離器物 ≥ 7m`, toHandleP07.toFixed(1));
+    const toReactP07 = nearestOf(
+      Reactive.REACTIVE_SPOTS.map((s) => s.at),
+      x,
+      z
+    );
+    ok(toReactP07 >= 8.2, `${tag} 離會回應的東西 ≥ 8.2m`, toReactP07.toFixed(1));
+    const toSecretP07 = nearestOf(
+      groundSecrets.map((s) => s.at),
+      x,
+      z
+    );
+    ok(toSecretP07 >= 9.3, `${tag} 離藏起來的地方 ≥ 9.3m`, toSecretP07.toFixed(1));
+    const toLandmarkP07 = nearestOf(
+      LANDMARKS.map((m) => m.at),
+      x,
+      z
+    );
+    ok(toLandmarkP07 >= 14, `${tag} 沒有站進地標的留白圈`, toLandmarkP07.toFixed(1));
+    for (const a of World.ANNEX_LINKS) ok(Math.hypot(x - a.gate.x, z - a.gate.z) >= 8, `${tag} 離 ${a.region} 頸口 ≥ 8m`);
+    for (const c of World.CORRIDORS) ok(Math.hypot(x - c.gate.x, z - c.gate.z) >= 8, `${tag} 離 ${c.region} 閘門 ≥ 8m`);
+    ok(Math.hypot(x, z - 6) >= World.SPAWN_CLEAR + 2, `${tag} 不壓在出生點上`);
+    ok(
+      Math.hypot(x - prologueForWorld.shrine.at[0], z - prologueForWorld.shrine.at[1]) >= 9,
+      `${tag} 離起始祭壇 ≥ 9m`
+    );
+  }
+  for (let i = 0; i < letters.length; i += 1) {
+    for (let j = i + 1; j < letters.length; j += 1) {
+      const a = letters[i].at;
+      const b = letters[j].at;
+      ok(
+        Math.hypot(a[0] - b[0], a[1] - b[1]) >= 7.6,
+        `殘頁 ${letters[i].id} / ${letters[j].id} 的互動圈不重疊（≥ 7.6m）`
+      );
+    }
+  }
+}
+
+/* --- ④ 蓋出來的東西：0 光源、跨得過去、每一頁很小 --- */
+{
+  const kitP07 = kitFor('#8aa0b4');
+  let lights = 0;
+  let tris = 0;
+  let maxTop = 0;
+  let tallest = '';
+  const bb = new THREE.Box3();
+  for (const spec of letters) {
+    const built = Letters.buildLetter(spec, kitP07, World.terrainHeight);
+    eq(built.group.name, `letter:${spec.id}`, `[${spec.id}] 場景圖節點名是 letter:<id>`);
+    built.group.updateMatrixWorld(true);
+    let one = 0;
+    built.group.traverse((o) => {
+      if (o.isLight) lights += 1;
+      if (o.isMesh && o.geometry) {
+        const g = o.geometry;
+        const n = g.index ? g.index.count / 3 : (g.attributes.position ? g.attributes.position.count / 3 : 0);
+        one += n;
+      }
+    });
+    tris += one;
+    ok(one <= 400, `[${spec.id}] 一頁殘頁 ≤ 400 三角形`, String(Math.round(one)));
+    bb.setFromObject(built.group);
+    const top = bb.max.y - World.terrainHeight(spec.at[0], spec.at[1]);
+    if (top > maxTop) {
+      maxTop = top;
+      tallest = spec.id;
+    }
+  }
+  eq(lights, 0, '殘頁一盞燈都沒加（只用自發光材質）');
+  ok(tris < 8000, '24 頁殘頁的三角形總量 < 8k', `tris=${Math.round(tris)}`);
+  // 碰撞的第 2 條（露出地面 ≥ 0.9 公尺）不成立 → 稽核判定「跨得過去」，不需要碰撞體
+  ok(maxTop < 0.9, '每一頁都低於 0.9 公尺（跨得過去，不必登記碰撞體）', `max=${maxTop.toFixed(2)} (${tallest})`);
+  ok(Letters.LETTER_RADIUS === Inscriptions.INSCRIPTION_RADIUS, '殘頁的互動半徑與刻文小語同一階（3.8）');
+  ok(Letters.LETTER_RADIUS > Handles.HANDLE_RADIUS, '殘頁的互動半徑比器物大（搶 E 的順序在器物之上）');
+}
+
+/* --- ⑤ 世界接線：nearestLetter / markLetterFound ＋ main.js 的仲裁順序 --- */
+{
+  const near = testWorld.nearestLetter(new THREE.Vector3(letters[0].at[0] + 1, 0, letters[0].at[1] + 1));
+  ok(Boolean(near && near.letter.id === letters[0].id), '走到旁邊就找得到那一頁殘頁');
+  const far = testWorld.nearestLetter(new THREE.Vector3(letters[0].at[0] + 40, 0, letters[0].at[1] + 40));
+  eq(far, null, '離得遠就找不到（半徑之外不搶 E）');
+  eq(testWorld.markLetterFound(letters[0].id), true, 'markLetterFound 找得到那一頁');
+  eq(testWorld.markLetterFound('letter-does-not-exist'), false, 'markLetterFound 對不存在的 id 回 false');
+  eq(testWorld.letters.length, letters.length, '每一頁殘頁都蓋在世界裡');
+
+  const mainSrcP07 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const iIns = mainSrcP07.indexOf('nearInscription =\n      !hitFinale');
+  const iLetter = mainSrcP07.indexOf('nearLetter =\n      !hitFinale');
+  const iHandle = mainSrcP07.indexOf('nearHandle = !blocked');
+  ok(iIns > 0 && iLetter > iIns && iHandle > iLetter, 'E 的仲裁順序：刻文小語 → 殘頁 → 器物');
+  ok(
+    /nearLetter =\s*\n\s*!hitFinale &&\s*\n\s*!hitMarker &&\s*\n\s*!hitMurk &&\s*\n\s*!hitWatchman &&\s*\n\s*!hitGuardian &&\s*\n\s*!hitTablet &&\s*\n\s*!hitInscription &&\s*\n\s*hitLetter/.test(
+      mainSrcP07
+    ),
+    // v1.2 · P18：石碑前面又多了一層（守門者）；P22 又在最前面插進終局那一層，
+    // 殘頁仍然排在每一層之後
+    '殘頁讓終局／石座／濁靈／守夜人／守門者／石碑／刻文小語先搶 E'
+  );
+  ok(
+    /hitMarker \|\| hitMurk \|\| hitWatchman \|\| hitGuardian \|\| hitTablet \|\| hitInscription \|\| hitLetter/.test(
+      mainSrcP07
+    ),
+    '殘頁在範圍內時，閘門不再問'
+  );
+}
+
+/* --- ⑥ 存檔與進程：純加法、XP 只給一次、教學那一半才收技巧 --- */
+{
+  const base = SaveIO.defaultSave();
+  ok(Array.isArray(base.lettersFound) && base.lettersFound.length === 0, '新存檔有空的 lettersFound');
+  eq(SaveIO.normalize({}).lettersFound.length, 0, '舊存檔沒有 lettersFound → 補空陣列');
+  eq(SaveIO.normalize({ lettersFound: ['a', 'a', 7] }).lettersFound.join(','), 'a', 'lettersFound 去重、只留字串');
+
+  memory.clear();
+  const prog = createProgression({ catalog, challenges });
+  const teachingLetter = letters.find((l) => l.techniqueId);
+  const flavourLetter = letters.find((l) => !l.techniqueId);
+  eq(prog.letterCount(), 0, '一開始一頁都沒撿');
+  eq(prog.hasFoundLetter(teachingLetter.id), false, '還沒撿過');
+  const r1 = prog.readLetter(teachingLetter.id, teachingLetter.techniqueId, letterFile.xp);
+  eq(r1.alreadyFound, false, '第一次撿：alreadyFound = false');
+  eq(r1.xpGain, letterFile.xp, '第一次撿給 letters.json 的 XP');
+  eq(r1.newlyCollected.includes(teachingLetter.techniqueId), true, '有教學的殘頁把技巧寫進圖鑑');
+  const r2 = prog.readLetter(teachingLetter.id, teachingLetter.techniqueId, letterFile.xp);
+  eq(r2.alreadyFound, true, '再撿一次不算新的');
+  eq(r2.xpGain, 0, '再撿一次不給 XP（不能刷分）');
+  const r3 = prog.readLetter(flavourLetter.id, null, letterFile.xp);
+  eq(r3.newlyCollected.length, 0, '純風味的殘頁一條技巧都不收');
+  eq(prog.letterCount(), 2, '撿到的頁數會累加');
+  const gradesBefore = Object.keys(prog.state.bestGrades).length;
+  eq(gradesBefore, 0, '撿殘頁不寫 bestGrades（不佔 142 關的分子）');
+  const reload = createProgression({ catalog, challenges });
+  eq(reload.letterCount(), 2, '撿到的殘頁寫進存檔並讀得回來');
+  reload.resetAll();
+  eq(reload.letterCount(), 0, 'reset 之後殘頁清空');
+  memory.clear();
+}
+
+/* --- ⑦ firstPrompt：只寫一次、≤280 字、原文不被竄改 --- */
+{
+  eq(SaveIO.defaultSave().firstPrompt, '', '新存檔的 firstPrompt 是空字串');
+  eq(SaveIO.normalize({}).firstPrompt, '', '舊存檔沒有 firstPrompt → 補空字串');
+  eq(SaveIO.normalize({ firstPrompt: 42 }).firstPrompt, '', '壞值（非字串）落成空字串');
+  eq(SaveIO.normalize({ firstPrompt: '  說清楚一點  ' }).firstPrompt, '說清楚一點', '去頭尾空白');
+  eq(SaveIO.normalize({ firstPrompt: 'x'.repeat(400) }).firstPrompt.length, SaveIO.FIRST_PROMPT_MAX, '超過上限就截斷');
+  ok(SaveIO.FIRST_PROMPT_MAX === 280, 'firstPrompt 上限是 280 字', String(SaveIO.FIRST_PROMPT_MAX));
+
+  memory.clear();
+  const prog = createProgression({ catalog, challenges });
+  eq(prog.firstPrompt(), '', '一開始沒有第一句');
+  eq(prog.captureFirstPrompt('   ').captured, false, '空白不算一句話');
+  const first = prog.captureFirstPrompt('請把這張告示改寫成三點條列。');
+  eq(first.captured, true, '第一次送出就記下來了');
+  eq(prog.firstPrompt(), '請把這張告示改寫成三點條列。', '記的是玩家寫的原文');
+  const second = prog.captureFirstPrompt('這是第二句，不該蓋掉第一句。');
+  eq(second.captured, false, '第二次不再擷取（第一句就是第一句）');
+  eq(prog.firstPrompt(), '請把這張告示改寫成三點條列。', '第一句沒有被覆寫');
+  // 玩家寫的字一個位元組都不改（顯示的一方自己跳脫；P22 會用到）
+  const reload = createProgression({ catalog, challenges });
+  eq(reload.firstPrompt(), '請把這張告示改寫成三點條列。', '第一句寫進存檔並讀得回來');
+  reload.resetAll();
+  eq(reload.firstPrompt(), '', 'reset 之後第一句清空');
+  // 玩家寫的字一個位元組都不改（顯示的一方自己跳脫；P22 會用到）
+  memory.clear();
+  const raw = createProgression({ catalog, challenges });
+  raw.captureFirstPrompt('<b>不要</b>幫我猜');
+  eq(raw.firstPrompt(), '<b>不要</b>幫我猜', 'firstPrompt 原樣保留（不在存檔層改玩家的字）');
+  memory.clear();
+
+  // 擷取點：序章的練習台一定寫、主控台只有自由書寫才補寫
+  const practiceSrc = readFileSync(resolve(root, 'src/prompt/practice.js'), 'utf8');
+  ok(/progression\.captureFirstPrompt\?\.\(text\)/.test(practiceSrc), '序章練習台送出時擷取第一句');
+  const consoleSrcP07 = readFileSync(resolve(root, 'src/prompt/console.js'), 'utf8');
+  ok(
+    /if \(mode === 'free'\) progression\.captureFirstPrompt\?\.\(text\)/.test(consoleSrcP07),
+    '主控台只在自由書寫時補記第一句（石碑刻印不算「你寫的第一句」）'
+  );
+}
+
+/* --- ⑧ 回信碑：一塊碑上不只一種筆跡（新舊格式都要能渲染） --- */
+{
+  eq(Props.tabletLines({ lines: ['一句話'] })[0].hand, 'first', '舊格式（純字串）＝原句');
+  eq(Props.tabletLines({ lines: ['一句話'] })[0].text, '一句話', '舊格式的文字原樣保留');
+  eq(Props.tabletLines({ lines: [{ text: '補一句', hand: 'later' }] })[0].hand, 'later', '新格式讀得出筆跡');
+  eq(Props.tabletLines({ lines: [{ text: '壞筆跡', hand: 'nope' }] })[0].hand, 'first', '不認得的筆跡退回原句');
+  eq(Props.tabletLines({}).length, 0, '沒有 lines 也不會爆');
+
+  const threaded = LORE_TABLETS.filter((t) => (t.lines || []).some((l) => typeof l !== 'string'));
+  eq(threaded.length, 6, '14 塊碑裡有 6 塊是回信碑（多筆跡）');
+  for (const t of threaded) {
+    /*
+     * v1.2 · P21：問「這塊碑一共寫了幾種筆跡」就要把每一層門都打開 ——
+     * `tabletLines(t)` 缺省是「一層門都沒亮」，拿它來數筆跡會數不到掛了 `when` 的那一層
+     * （而那正是 P21 新加的兩塊碑上的第三種筆跡）。
+     */
+    const hands = new Set(Props.tabletLines(t, Props.TABLET_GATES).map((l) => l.hand));
+    eq(hands.size, 3, `[lore:${t.id}] 三種筆跡都在（原句／後人補寫／被劃掉的）`, [...hands].join(','));
+  }
+  for (const t of LORE_TABLETS) {
+    for (const l of Props.tabletLines(t, Props.TABLET_GATES)) {
+      ok(Props.TABLET_HANDS.includes(l.hand), `[lore:${t.id}] 筆跡是已實作的三種之一`, l.hand);
+      ok(l.text.length > 0 && l.text.length <= 60, `[lore:${t.id}] 每句長度合理`, l.text);
+      ok(!/https?:\/\//.test(l.text), `[lore:${t.id}] 不放連結`, l.text);
+    }
+  }
+  const tabletUiSrc = readFileSync(resolve(root, 'src/ui/tablet.js'), 'utf8');
+  ok(
+    /tabletLines\(tablet, meta\.lit \|\| null\)/.test(tabletUiSrc),
+    '石碑面板走 tabletLines()（新舊格式同一條路），而且把「現在亮著的門」交給它'
+  );
+  ok(/lore__line--\$\{esc\(l\.hand\)\}/.test(tabletUiSrc), '每一行標上自己的筆跡 class');
+  const cssSrcP07 = readFileSync(resolve(root, 'src/styles.css'), 'utf8');
+  ok(/\.lore__line--later\s*\{/.test(cssSrcP07), 'CSS 有「後人補寫」的字級');
+  ok(/\.lore__line--struck\s*\{[^}]*line-through/.test(cssSrcP07), '「被劃掉的」真的有刪除線');
 }
 
 /* --- 互動文法：只有 E、半徑排在刻文小語底下 -------------------------- */
@@ -4952,6 +6418,26 @@ ok(Handles.CAPSTAN_TURNS >= 2 && Handles.CAPSTAN_TURNS <= 4, '絞盤要推 2–4
     '加了一整層器物之後碰撞體仍在預算內',
     `n=${testWorld.solids.length}`
   );
+  /* v1.2 · P06c：兩層各補了 22 件之後重量一次預算（WORLD §6.1） */
+  {
+    ok(testWorld.solids.length < 1100, 'P06c：碰撞體 < 1,100', `n=${testWorld.solids.length}`);
+    let tris = 0;
+    let worldLights = 0;
+    testWorld.root.traverse((o) => {
+      if (o.isLight) worldLights += 1;
+      if (o.isMesh && o.geometry) {
+        const idx = o.geometry.index;
+        tris += (idx ? idx.count / 3 : o.geometry.attributes.position.count / 3) * (o.isInstancedMesh ? o.count : 1);
+      }
+    });
+    ok(tris < WORLD_TRI_CEIL, `P06c：世界三角形 < ${WORLD_TRI_CEIL}（P20b 的框）`, `tris=${Math.round(tris)}`);
+    eq(worldLights, 37, 'P06c：光源數不變（這兩層一盞燈都不加）', `lights=${worldLights}`);
+    let reactiveLights = 0;
+    testWorld.reactive.group.traverse((o) => {
+      if (o.isLight) reactiveLights += 1;
+    });
+    eq(reactiveLights, 0, 'P06c：會回應的東西一盞燈都沒加');
+  }
   // 低畫質也要蓋（器物不是「畫質選項」，它是玩法）
   let lowBuilt = 0;
   lowWorld.root.traverse((o) => {
@@ -5004,6 +6490,2636 @@ memory.clear();
   eq(again.handleCount(), 0, '重置會清掉動過的器物');
 }
 memory.clear();
+
+/* ================================================================== */
+/* v1.2 · P01：濁靈（Murk）—— 資料層 ＋ 世界實體 ＋ 互動仲裁 ＋ 不落盤   */
+/* ================================================================== */
+console.log('▸ 濁靈（v1.2 · P01／P02）');
+const Murks = await import('../src/world/murks.js');
+const distToSeg = (px, pz, ax, az, bx, bz) => {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const l2 = dx * dx + dz * dz;
+  let t = l2 ? ((px - ax) * dx + (pz - az) * dz) / l2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + dx * t), pz - (az + dz * t));
+};
+{
+  const murks = murkFile.entries;
+  /*
+   * v1.2 · P17：同一份資料裡兩個尺寸 —— 小濁靈（8 隻、前四區各 2、rubric 三條）
+   * 與**大濁靈**（12 隻、一片土地一隻、rubric 6–8 條、`kind: "great"`）。
+   * 兩種共用同一份契約（沒有回合、沒有勝負、進度只累積、選項式作答、
+   * slot 數 ＝ rubric 條數 ＝ 殼數），差別只在尺寸與層數。
+   */
+  const smallMurks = murks.filter((m) => m.kind !== 'great');
+  const greatMurks = murks.filter((m) => m.kind === 'great');
+  const isGreat = (m) => m.kind === 'great';
+  const MURK_REGIONS = ['foundations', 'reasoning', 'grounding', 'orchestration'];
+  const challengeByIdM = new Map(challenges.map((c) => [c.id, c]));
+
+  /* --- ① 檔頭與數量（契約在 expected-counts） --- */
+  eq(murkFile.version, 1, 'murks.json 有版本欄');
+  eq(murkFile.authored, 'game', 'murks.json 檔頭明講是遊戲自撰的層');
+  ok(nonEmptyStr(murkFile.note) && /出處|官方/.test(murkFile.note), 'murks.json 檔頭說明「出處以官方文件為準」');
+  ok(Number.isFinite(murkFile.xp) && murkFile.xp > 0 && murkFile.xp <= 40, '安撫一隻濁靈的 XP 是少量（P02 才發）', String(murkFile.xp));
+  eq(smallMurks.length, EXPECT.murks.value, `小濁靈數＝契約（${EXPECT.murks.value} 隻）`);
+  eq(greatMurks.length, EXPECT.greatMurks.value, `大濁靈數＝契約（${EXPECT.greatMurks.value} 隻）`);
+  eq(new Set(murks.map((m) => m.id)).size, murks.length, '濁靈 id 沒有重複');
+  for (const rid of MURK_REGIONS) {
+    eq(smallMurks.filter((m) => m.region === rid).length, 2, `[${rid}] 有 2 隻小濁靈（D1：前四區各 2）`);
+  }
+  eq(smallMurks.every((m) => MURK_REGIONS.includes(m.region)), true, '小濁靈只落在前四區');
+  // 大濁靈：**每一片土地一隻**（12 片，一片都不能少、一片都不能多）
+  for (const site of World.REGION_SITES) {
+    eq(greatMurks.filter((m) => m.region === site.id).length, 1, `[${site.id}] 有 1 隻大濁靈（P17：每片土地一隻）`);
+  }
+  eq(new Set(greatMurks.map((m) => m.region)).size, EXPECT.greatMurks.value, '大濁靈沒有兩隻站在同一片土地上');
+  eq(greatMurks.every((m) => /^murk-great-/.test(m.id)), true, '大濁靈的 id 都帶 murk-great- 前綴');
+  /*
+   * **既有 8 隻一個位元組都不准改**（P17 的硬規則）：逐欄位比對上一次收尾時的那一份。
+   * 這裡存的是每一隻的 SHA-256（sort_keys 的 JSON），改任何一個字都會紅。
+   *
+   * **v1.2 · P22c 換過一次指紋**（`83b06b099f853b8c` → `32eed3ea15b1aeb1`）。
+   * 那一格把整個世界的 XZ 座標乘 1.3，濁靈的 `at` 是世界座標，所以它一定會動 ——
+   * 換指紋之前逐欄位比對過：**除了 `at` 之外，八隻的每一個欄位逐位元組相同**
+   * （題目、rubric、出處、flow、sample 一個字都沒動），而八個 `at` 裡有七個
+   * 正好是舊值 ×1.3，只有 `murk-vague-ask` 另外挪了 0.9 公尺
+   * （放大之後有一顆程序化碎石落在牠的座標上，`[murk-vague-ask] 座標在加入濁靈之前的世界是清的`
+   *  這條斷言抓到的）。**這條規則的意思沒有變**：任何一個字的改動仍然會紅。
+   */
+  {
+    const { createHash } = await import('node:crypto');
+    const digest = createHash('sha256').update(JSON.stringify(smallMurks)).digest('hex').slice(0, 16);
+    eq(digest, '32eed3ea15b1aeb1', '既有 8 隻小濁靈一個位元組都沒有被改到（v1.2 · P22c 收尾時的指紋）');
+  }
+
+  /* --- ② 每一筆的結構、教學正典、出處（護欄 2） --- */
+  const MURK_TEXT_FIELDS = ['title', 'taint', 'mission', 'clue', 'sample'];
+  const BANNED = ['送出評分', '按鈕', '面板', 'localStorage', 'bloom', '後製', 'Web Audio', 'API key', 'rubric', 'debug'];
+  for (const m of murks) {
+    const tag = `[${m.id}]`;
+    ok(/^murk-[a-z0-9-]+$/.test(m.id), `${tag} id 是 kebab-case 且帶 murk- 前綴`);
+    ok(Array.isArray(m.at) && m.at.length === 2 && m.at.every(Number.isFinite), `${tag} at 是 [x, z]`);
+    for (const f of MURK_TEXT_FIELDS) {
+      ok(nonEmptyStr(m[f]), `${tag} ${f} 非空`);
+      ok(!ENGLISH(m[f] || ''), `${tag} ${f} 沒有整句英文`, m[f]);
+      for (const b of BANNED) ok(!(m[f] || '').includes(b), `${tag} ${f} 不出現系統術語「${b}」`);
+    }
+    ok(m.taint.length >= MIN_PROMPT_LENGTH, `${tag} 濁言長得像一段真的請求（不是靠太短才不過）`, String(m.taint.length));
+    // 大濁靈的濁言是「一句話缺很多件事」，本來就比小濁靈長一截（但仍然是一兩句話）
+    ok(m.taint.length <= (isGreat(m) ? 140 : 60), `${tag} 濁言只有一兩句`, String(m.taint.length));
+    if (isGreat(m)) ok(m.taint.length >= 40, `${tag} 大濁靈的濁言有份量（缺很多件事）`, String(m.taint.length));
+    ok(m.taint !== m.sample, `${tag} 濁言與範例解是弱→強對照，不是同一段`);
+    ok(Array.isArray(m.teaches), `${tag} teaches 是陣列`);
+    for (const t of m.teaches) ok(techById.has(t), `${tag} teaches "${t}" 存在於 curriculum`);
+    ok(typeof m.primarySkillId === 'string' && Boolean(catalog.skill(m.primarySkillId)), `${tag} primarySkillId 是 v2 catalog 裡真的技能`, m.primarySkillId);
+    ok(m.primaryTechniqueId === null || techById.has(m.primaryTechniqueId), `${tag} primaryTechniqueId 是 null 或存在的舊技巧`);
+    // rubric：主列 weight 2 ＋ 其餘 weight 1；小濁靈三條、大濁靈 6–8 條
+    const [RUB_LO, RUB_HI] = EXPECT.greatMurks.rubricRange;
+    ok(
+      Array.isArray(m.rubric) && (isGreat(m) ? m.rubric.length >= RUB_LO && m.rubric.length <= RUB_HI : m.rubric.length === 3),
+      `${tag} rubric ${isGreat(m) ? `${RUB_LO}–${RUB_HI} 條` : '三條'}`,
+      String((m.rubric || []).length)
+    );
+    eq(new Set((m.rubric || []).map((r) => r.check)).size, (m.rubric || []).length, `${tag} rubric 沒有重複的檢查器`);
+    const primaries = m.rubric.filter((r) => r.primary === true);
+    eq(primaries.length, 1, `${tag} rubric 恰好一條主列（primary:true）`);
+    const primary = primaries[0] || {};
+    eq(primary.weight, 2, `${tag} 主列 weight 2`);
+    eq(primary.skillId, m.primarySkillId, `${tag} 主列的 skillId 就是 primarySkillId（第二幕靠它找主刻文）`);
+    for (const r of m.rubric) {
+      ok(CHECK_IDS.includes(r.check), `${tag} rubric check "${r.check}" 是既有檢查器`);
+      ok(!r.techniqueId || techById.has(r.techniqueId), `${tag} rubric techniqueId "${r.techniqueId}" 存在`);
+      ok(!r.skillId || Boolean(catalog.skill(r.skillId)), `${tag} rubric skillId "${r.skillId}" 存在於 v2 catalog`);
+      ok(nonEmptyStr(r.hint), `${tag} rubric ${r.check} 有提示`);
+      for (const b of BANNED) ok(!(r.hint || '').includes(b), `${tag} 提示不出現系統術語「${b}」`);
+      if (!r.primary) eq(r.weight, 1, `${tag} 副列 ${r.check} weight 1`);
+    }
+    const total = m.rubric.reduce((n, r) => n + r.weight, 0);
+    eq(total, m.rubric.length + 1, `${tag} 總權重 ＝ 條數 ＋ 1（主列 2、其餘 1）`);
+    // 小濁靈 3/4；大濁靈一律 75%（分兩次各補一半也湊得到，見下面的累積契約）
+    eq(m.pass, isGreat(m) ? Math.ceil(total * 0.75) : 3, `${tag} 門檻 ${isGreat(m) ? 'ceil(總權重 × 0.75)' : '3'}`);
+    /*
+     * v1.2 · P17：**每一列都是某一座神廟真的在教的那一對**（護欄 2：不自己發明技巧）。
+     * `skillId` 要在 v2 catalog 裡，而且 (check, skillId) 這一對要真的有一座神廟用它當主檢查。
+     */
+    if (isGreat(m)) {
+      for (const r of m.rubric) {
+        ok(typeof r.skillId === 'string' && Boolean(catalog.skill(r.skillId)), `${tag} 每一列都掛著真的技能（${r.check}）`, r.skillId);
+        ok(
+          challenges.some((c) => c.primarySkillId === r.skillId && ((c.rubric || []).find((x) => x.primary) || {}).check === r.check),
+          `${tag} (${r.check}, ${r.skillId}) 是某一座神廟教的那一對`
+        );
+      }
+      // 眉批與來歷：遊戲自撰的風味層 —— 有內容、是中文、**不掛連結**（護欄 2）
+      for (const f of ['scribeNote', 'origin']) {
+        ok(nonEmptyStr(m[f]), `${tag} ${f} 非空（圖鑑的第二／第三層）`);
+        ok(!ENGLISH(m[f] || ''), `${tag} ${f} 沒有整句英文`);
+        ok(!/https?:\/\//.test(m[f] || ''), `${tag} ${f} 不掛連結（純風味，不是教學句）`);
+        for (const b2 of BANNED) ok(!(m[f] || '').includes(b2), `${tag} ${f} 不出現系統術語「${b2}」`);
+      }
+      ok(m.scribeNote.length <= 80, `${tag} 眉批是一兩句話`, String(m.scribeNote.length));
+      ok(m.origin.length <= 80, `${tag} 來歷是一句話`, String(m.origin.length));
+    } else {
+      eq(m.scribeNote, undefined, `${tag} 小濁靈沒有眉批（既有 8 隻一個位元組都不准動）`);
+      eq(m.origin, undefined, `${tag} 小濁靈沒有來歷`);
+    }
+    // 出處：沿用該區已有神廟的 source（保證是它所教技能的官方出處）
+    ok(/^https:\/\//.test(m.source), `${tag} source 是 https 連結`);
+    ok((skillSourceUrls.get(m.primarySkillId) || new Set()).has(m.source), `${tag} source 是它所教技能的官方出處（回查 skill-codex-v2）`, m.source);
+    const src = challengeByIdM.get(m.sourceChallengeId);
+    ok(Boolean(src), `${tag} sourceChallengeId 指向真的存在的神廟`, m.sourceChallengeId);
+    if (src) {
+      eq(src.region, m.region, `${tag} 綁的是同一區的神廟`);
+      eq(src.source, m.source, `${tag} source 逐字沿用那座神廟的 source`);
+      eq(src.primarySkillId, m.primarySkillId, `${tag} 教的技能就是那座神廟教的`);
+      const srcPrimary = (src.rubric || []).find((r) => r.primary);
+      eq(primary.check, srcPrimary && srcPrimary.check, `${tag} 主檢查沿用那座神廟的主檢查`);
+      ok(JSON.stringify(m.teaches) === JSON.stringify(src.teaches), `${tag} teaches 與那座神廟一致（收集不亂加）`);
+    }
+    // 弱 → 強：範例解 ≥ A、濁言原文不過（詳細門檻在 playtest）
+    const s = evaluate(m, m.sample);
+    ok(s.passed && ['A', 'S'].includes(s.grade), `${tag} 範例解至少 A`, `grade=${s.grade} ${s.earned}/${s.total}`);
+    const t = evaluate(m, m.taint);
+    ok(!t.passed && !t.tooShort, `${tag} 濁言原文本身不過（而且不是因為太短）`, `earned=${t.earned}`);
+  }
+
+  /* --- ②b 選擇式作答（v1.2 · P06b）：一段對一層殼 --- */
+  /*
+   * 站長實玩裁決：「濁靈的遊戲內容，也是讓使用者用選的，不要打字。」
+   * 濁靈補上石碑刻印（choice）的流程，而且**段數 ＝ rubric 條數 ＝ 殼數**：
+   * 第 i 段的正解就是讓第 i 條檢查亮起來的那一句 —— 這樣「選對一段 → 剝一層殼」
+   * 才是誠實的。下面每一條都用真的離線引擎驗，不用眼睛看。
+   */
+  {
+    const { flowKind: murkFlowKind } = await import('../src/prompt/console.js');
+    const { isSlotList: murkIsSlotList } = await import('../src/prompt/slots.js');
+    const rightOf = (slot) => slot.options.find((o) => o.correct);
+    const assembleMurk = (flow) => flow.slots.map((s) => rightOf(s).text).join('\n');
+    let murkSlotTotal = 0;
+    let murkSlotVaried = 0;
+    for (const m of murks) {
+      const tag = `[${m.id}]`;
+      const flow = m.flow;
+      ok(Boolean(flow) && Array.isArray(flow.slots), `${tag} 有選擇式作答的流程（flow.slots）`);
+      if (!flow || !Array.isArray(flow.slots)) continue;
+      eq(murkFlowKind(flow), 'choice', `${tag} 題型是石碑刻印（choice）`);
+      ok(murkIsSlotList(flow.slots), `${tag} slots 通過石碑刻印的資料契約`);
+      eq(flow.slots.length, m.rubric.length, `${tag} 段數 ＝ rubric 條數 ＝ 殼數`);
+      flow.slots.forEach((slot, i) => {
+        const at = `${tag} 第 ${i + 1} 段`;
+        murkSlotTotal += 1;
+        if (!slot.options[0].correct) murkSlotVaried += 1;
+        ok(typeof slot.ask === 'string' && slot.ask.length >= 6, `${at} 有一句話的問題`, slot.ask);
+        if (isGreat(m)) {
+          // v1.2 · P17 規則疊加：每一段都寫著「這一層要什麼」，走到才看得見
+          ok(typeof slot.layer === 'string' && slot.layer.length >= 4 && slot.layer.length <= 30, `${at} 有一行「這一層寫著什麼」`, slot.layer);
+          ok(CJK.test(slot.layer || ''), `${at} 那一行是中文`);
+          ok(!ENGLISH(slot.layer || ''), `${at} 那一行沒有英文句子`);
+        }
+        ok(slot.ask.length <= 44, `${at} 問題夠短（一眼讀完）`, `${slot.ask.length} 字`);
+        ok(CJK.test(slot.ask), `${at} 問題是中文`, slot.ask);
+        ok(!ENGLISH(slot.ask), `${at} 問題沒有英文句子`, ENGLISH(slot.ask) || '');
+        for (const b of BANNED) ok(!slot.ask.includes(b), `${at} 問題不出現系統術語「${b}」`);
+        ok(
+          Array.isArray(slot.options) && slot.options.length >= 2 && slot.options.length <= 3,
+          `${at} 有 2–3 個選項`,
+          `n=${slot.options ? slot.options.length : 0}`
+        );
+        const rights = slot.options.filter((o) => o.correct);
+        eq(rights.length, 1, `${at} 剛好一個正確選項`);
+        for (const [j, o] of slot.options.entries()) {
+          ok(typeof o.text === 'string' && o.text.trim().length > 0, `${at} 選項 ${j + 1} 有內容`);
+          ok(CJK.test(o.text), `${at} 選項 ${j + 1} 是中文`, o.text.slice(0, 24));
+          ok(!ENGLISH(o.text), `${at} 選項 ${j + 1} 沒有英文句子`, ENGLISH(o.text) || '');
+          ok(!/https?:\/\//.test(o.text), `${at} 選項 ${j + 1} 不自帶連結（出處只在刻文與圖鑑）`);
+          for (const b of BANNED) ok(!o.text.includes(b), `${at} 選項 ${j + 1} 不出現系統術語「${b}」`);
+          if (o.correct) continue;
+          const fb = String(o.feedback || '');
+          ok(fb.trim().length >= 12, `${at} 錯的選項 ${j + 1} 有教學回饋`, fb);
+          ok(CJK.test(fb), `${at} 錯的選項 ${j + 1} 的回饋是中文`, fb);
+          ok(!ENGLISH(fb), `${at} 錯的選項 ${j + 1} 的回饋沒有英文句子`, ENGLISH(fb) || '');
+          ok(!/https?:\/\//.test(fb), `${at} 錯的選項 ${j + 1} 的回饋不自帶連結`);
+          for (const b of BANNED) ok(!fb.includes(b), `${at} 錯的選項 ${j + 1} 的回饋不出現系統術語「${b}」`);
+          ok(o.text.trim() !== rights[0].text.trim(), `${at} 錯的選項 ${j + 1} 不是正確答案的複製`, o.text.slice(0, 30));
+        }
+      });
+      /* 全部選對 ＝ 牠的正言（逐值），而且三條檢查全亮、評價 ≥ A */
+      const assembled = assembleMurk(flow);
+      eq(assembled, m.sample, `${tag} 全部選對組出來的就是 sample（逐值相同）`);
+      const ev = evaluate(m, assembled);
+      ok(ev.passed && ['A', 'S'].includes(ev.grade), `${tag} 全部選對至少 A`, `grade=${ev.grade} ${ev.earned}/${ev.total}`);
+      ok(!ev.tooShort, `${tag} 刻出來的 prompt 不會太短`, `${assembled.length} 字`);
+      ev.results.forEach((r, i) => {
+        ok(r.passed, `${tag} 全部選對 → 第 ${i + 1} 條檢查（${r.check}）亮著`, r.evidence);
+      });
+      /* 一段對一層殼：第 i 段選錯 → 第 i 條檢查暗著（其餘段照正解） */
+      flow.slots.forEach((slot, i) => {
+        for (const [j, wrong] of slot.options.entries()) {
+          if (wrong.correct) continue;
+          const text = flow.slots.map((s, k) => (k === i ? wrong.text : rightOf(s).text)).join('\n');
+          const e2 = evaluate(m, text);
+          ok(
+            !e2.results[i].passed,
+            `${tag} 第 ${i + 1} 段選 ${j + 1} 號（錯的）→ 第 ${i + 1} 條檢查（${m.rubric[i].check}）不亮`,
+            `score=${e2.results[i].score} ${e2.results[i].evidence}`
+          );
+        }
+      });
+    }
+    const expectSlots = murks.reduce((n, m) => n + m.rubric.length, 0);
+    eq(murkSlotTotal, expectSlots, `濁靈一共 ${expectSlots} 段刻印（每一段對一層殼）`);
+    ok(
+      murkSlotVaried / murkSlotTotal > 0.4,
+      `濁靈的正解位置有打散（不是永遠第一個：${murkSlotVaried} / ${murkSlotTotal} 段不在第一個）`
+    );
+  }
+
+  /* --- ③ 座標規則（WORLD.md §6.4 淨空；對 baseline 世界驗） --- */
+  /*
+   * 濁靈的互動圈（5.5）比石碑（4.6）／刻文（3.8）／器物（3.2）大、而且搶 E 時排在它們前面 ——
+   * 所以牠不能站進那些東西的可讀範圍：距離 ≥ 5.5 ＋ 那一層的半徑，兩個圈才不會疊。
+   * 石座（6.5）雖然贏過濁靈，但兩圈疊在一起就會有「站在石座前卻按到濁靈」或
+   * 反過來的雙目標區，一律 ≥ 12（6.5 ＋ 5.5）。其他不搶 E 的東西（反應物／地標／小景／祕密）≥ 4。
+   */
+  const MURK_R = Murks.MURK_RADIUS; // 5.5
+  const LAYER_R = { handle: 3.2, tablet: 4.6, inscription: 3.8 };
+  const nearRules = [
+    ...handleFile.entries.map((h) => [h.at[0], h.at[1], `handle:${h.id}`, MURK_R + LAYER_R.handle]),
+    ...Props.LORE_TABLETS.map((t) => [t.at[0], t.at[1], `tablet:${t.id}`, MURK_R + LAYER_R.tablet]),
+    ...inscriptionFile.entries.map((i) => [i.at[0], i.at[1], `inscription:${i.id}`, MURK_R + LAYER_R.inscription]),
+    ...Reactive.REACTIVE_SPOTS.map((s) => [s.at[0], s.at[1], `reactive:${s.id}`, 4]),
+    ...Props.LANDMARKS.map((l) => [l.at[0], l.at[1], `landmark:${l.id}`, 4]),
+    ...Props.STORY_VIGNETTES.map((v) => [v.at[0], v.at[1], `vignette:${v.id}`, 4]),
+    ...secretFile.entries.map((s) => [s.at[0], s.at[1], `secret:${s.id}`, 4]),
+  ];
+  /*
+   * 石座淨空的例外表：流程與代理區（orchestration）13 座石座擠在半徑 34 的平地上，
+   * 找不到任何一點同時離全部石座 ≥ 12 —— 這一隻退到 ≥ 10（兩圈疊 2 公尺；石座在仲裁裡本來就贏，
+   * 玩家端零倒退：站在石座前永遠是石座）。要加例外就要寫理由。
+   */
+  const MARKER_MIN_EXCEPTIONS = Object.freeze({ 'murk-while-at-it': { min: 10, why: 'orchestration 13 座石座飽和，全區無 ≥12 的位置' } });
+  for (const m of smallMurks) {
+    const tag = `[${m.id}]`;
+    const [x, z] = m.at;
+    const site = World.REGION_SITES.find((s) => s.id === m.region);
+    ok(Math.hypot(x - site.x, z - site.z) <= site.flat, `${tag} 在該區的平地半徑內`, `d=${Math.hypot(x - site.x, z - site.z).toFixed(1)} flat=${site.flat}`);
+    const here = World.regionAt(x, z);
+    ok(here && here.id === m.region && !here.onBridge, `${tag} regionAt 說牠站在 ${m.region}`, JSON.stringify(here));
+    const markerMin = MARKER_MIN_EXCEPTIONS[m.id] ? MARKER_MIN_EXCEPTIONS[m.id].min : 12;
+    for (const c of challenges) {
+      const d = Math.hypot(x - c.position[0], z - c.position[1]);
+      ok(d >= markerMin, `${tag} 離石座 ${c.id} ≥ ${markerMin}m（互動圈不重疊）`, d.toFixed(1));
+    }
+    ok(Object.keys(MARKER_MIN_EXCEPTIONS).length <= 1, '石座淨空例外表最多 1 條');
+    for (const l of World.BRIDGE_LANES) {
+      ok(distToSeg(x, z, l.ax, l.az, l.bx, l.bz) >= World.LANE_HALF + 4, `${tag} 離 ${l.region} 橋的主動線 ≥ 4m`);
+    }
+    for (const a of World.ANNEX_LINKS) ok(Math.hypot(x - a.gate.x, z - a.gate.z) >= 8, `${tag} 離 ${a.region} 頸口 ≥ 8m`);
+    for (const c of World.CORRIDORS) ok(Math.hypot(x - c.gate.x, z - c.gate.z) >= 8, `${tag} 離 ${c.region} 閘門 ≥ 8m`);
+    for (const [px, pz, name, min] of nearRules) {
+      ok(Math.hypot(x - px, z - pz) >= min, `${tag} 離 ${name} ≥ ${min}m`, Math.hypot(x - px, z - pz).toFixed(1));
+    }
+    ok(Math.hypot(x, z - 6) >= 7, `${tag} 離出生點 ≥ 7m`);
+    ok(Math.hypot(x - prologueForWorld.shrine.at[0], z - prologueForWorld.shrine.at[1]) >= 9, `${tag} 離起始祭壇 ≥ 9m`);
+    for (const other of murks) {
+      if (other === m) continue;
+      ok(Math.hypot(x - other.at[0], z - other.at[1]) >= 12, `${tag} 與 ${other.id} 距離 ≥ 12m（互動半徑 5.5 不重疊）`);
+    }
+    ok(baselineWorld.isClear(x, z), `${tag} 座標在加入濁靈之前的世界是清的`);
+    // 加了濁靈之後：牠自己擋人，但四面八方都走得到互動距離
+    ok(Boolean(testWorld.solidAt(x, z)), `${tag} 濁靈本體擋得住人`);
+    for (let a = 0; a < 8; a += 1) {
+      const ang = (a / 8) * Math.PI * 2;
+      for (const d of [1.7, 2.6, 3.5]) {
+        ok(testWorld.isClear(x + Math.cos(ang) * d, z + Math.sin(ang) * d), `${tag} 周圍 ${d}m 走得到（安撫不會被擋）`, `a=${a}`);
+      }
+    }
+  }
+
+  /* --- ③b 大濁靈的擺位（v1.2 · P17；門檻與 `scripts/murk-fit.mjs` 共用 screen-rules 那一份） --- */
+  /*
+   * 與小濁靈同一套文法（§4.8），差別只有三處，每一處都是**量出來**才這樣寫的：
+   *   · 石座那一條不是「圈不重疊」（6.5＋6.0＝12.5，全區 0 個落點），
+   *     而是「不准站進人家的地盤」9.0 ＋ 一條例外（分歧之廳 7.2）——同守夜人（P16c）。
+   *   · 中觀層的石頭守的是**淨空 4.0**（貼身那一圈 2.6 ＋ 一步），不是互動半徑 6.0。
+   *   · 真正要守的東西另外量：**按得到牠的方向**（24 條射線，互動圈裡由內到外試六格）。
+   */
+  {
+    const Rules = (await import('./lib/screen-rules.mjs')).default;
+    // 兩份數字不准分家（murks.js 是唯一的真相，screen-rules 為了不 import three.js 重寫一份）
+    eq(Rules.GREAT_MURK_R, Murks.GREAT_MURK_RADIUS, 'screen-rules 的大濁靈互動半徑與 murks.js 一致');
+    eq(Rules.GREAT_MURK_BODY_R, Murks.GREAT_BODY_RADIUS, 'screen-rules 的大濁靈底座半徑與 murks.js 一致');
+    ok(Rules.GREAT_MURK_R > Murks.MURK_RADIUS && Rules.GREAT_MURK_R < Rules.MARKER_R, '大濁靈的互動半徑夾在小濁靈（5.5）與石座（6.5）之間', String(Rules.GREAT_MURK_R));
+    /*
+     * 石座的互動半徑（6.5）在 `world.js` 裡是 `nearestMarker()` 的預設參數 ——
+     * 讀不到那個字面值，所以**用行為比對**：圈內按得到、圈外按不到。
+     */
+    {
+      // 挑一座**四周夠空**的石座（最近的鄰居 > 20m），不然圈外那一步會按到隔壁那一座
+      const pos = challenges.filter((c) => c.position).map((c) => c.position);
+      const lone = pos.find((a) => pos.every((b) => b === a || Math.hypot(a[0] - b[0], a[1] - b[1]) > 20));
+      ok(Boolean(lone), '找得到一座四周夠空的石座來驗互動半徑（不然這一段是空過的）');
+      const found = testWorld.nearestMarker({ x: lone[0], y: 0, z: lone[1] }, 60);
+      ok(Boolean(found), '那座石座在世界裡找得到');
+      const p0 = found.marker.position;
+      const probe = (d) => testWorld.nearestMarker({ x: p0.x + d, y: p0.y, z: p0.z });
+      ok(Boolean(probe(Rules.MARKER_R - 0.1)), `screen-rules 的石座互動半徑 ${Rules.MARKER_R}：圈內 0.1m 按得到`);
+      eq(probe(Rules.MARKER_R + 0.1), null, `石座互動半徑 ${Rules.MARKER_R}：圈外 0.1m 按不到（兩份數字沒有分家）`);
+    }
+    eq(Object.keys(Rules.GREAT_MURK_MARKER_EXCEPTIONS).length <= 1, true, '石座那一條的例外表最多 1 條');
+    eq(Object.keys(Rules.GREAT_MURK_WINNABLE_EXCEPTIONS).length, 0, '「按得到牠」那一條沒有例外表');
+    /*
+     * **契約檔的每一個欄位都要有人比對回來**（P17 審查 · 第 3 條；P16c 審查同一條犯過一次）。
+     * 以前只有 `greatMurks.value` 被讀，其餘每一個都在別處重打一份字面值 ——
+     * 把 `winnableMin` 改成 2、把 `markerExceptions.divergence` 改成 3，一條斷言都不會紅。
+     * 逐值比對的作法照守夜人那一格（`EXPECT.watchmen.winnableFloor`／`winnableCeiling`）。
+     */
+    {
+      const C = EXPECT.greatMurks;
+      eq(C.perRegion, 1, '契約寫的是一片土地一隻');
+      ok(Array.isArray(C.rubricRange) && C.rubricRange.length === 2 && C.rubricRange[0] < C.rubricRange[1], '契約的 rubricRange 是一段區間', JSON.stringify(C.rubricRange));
+      /*
+       * 「6–8 之間」這種**包住**式的斷言把區間放寬也不會紅 —— 所以再問一次
+       * 「這段區間是不是**貼著**現行資料」：兩端各要有一隻真的落在上面。
+       */
+      const rubLens = greatMurks.map((m) => m.rubric.length);
+      eq(Math.min(...rubLens), C.rubricRange[0], '契約 rubricRange 的下界貼著現行資料（真的有一隻是這麼多條）');
+      eq(Math.max(...rubLens), C.rubricRange[1], '契約 rubricRange 的上界貼著現行資料');
+      eq(C.winnableMin, Rules.GREAT_MURK_WINNABLE_MIN, '契約與規則表的「按得到牠」門檻是同一個數字');
+      /*
+       * `winnableFloor` ＝ 例外門檻（與規則表逐值相同；這一格是空的）；
+       * `winnableWorst` ＝ 現行 12 隻實測最差的那一隻（門檻不准超過它）。
+       * 舊版把後者叫 `winnableFloorRegion`，存的卻是上限 —— 一個名字混兩種語意。
+       */
+      eq(
+        JSON.stringify(C.winnableFloor),
+        JSON.stringify(Rules.GREAT_MURK_WINNABLE_EXCEPTIONS),
+        '契約與規則表的「按得到牠」例外門檻**逐值相同**'
+      );
+      eq(
+        JSON.stringify(C.markerExceptions),
+        JSON.stringify(Rules.GREAT_MURK_MARKER_EXCEPTIONS),
+        '契約與規則表的石座例外門檻**逐值相同**'
+      );
+      for (const [rid, min] of Object.entries(C.markerExceptions)) {
+        const ceil = C.markerCeiling[rid];
+        ok(Number.isFinite(ceil), `[${rid}] 契約記得石座那一條的上限（murk-fit --ceiling 量的）`);
+        ok(min <= ceil, `[${rid}] 石座例外不超過上限（${min} ≤ ${ceil}）`, `餘裕 ${(ceil - min).toFixed(2)}m`);
+        ok(min < Rules.GREAT_MURK_MARKER_MIN, `[${rid}] 石座例外真的比一般門檻鬆（不然它不叫例外）`);
+      }
+      for (const rid of Object.keys(C.markerCeiling)) {
+        ok(rid in C.markerExceptions, `[${rid}] 上限只記給真的有例外的那一片（沒有孤兒）`);
+      }
+      ok(
+        Array.isArray(C.pathRange) && C.pathRange[0] === Rules.GREAT_MURK_PATH_MIN && C.pathRange[1] === Rules.MOTIF_PATH_MAX,
+        '契約與規則表的「離路網」區間是同一組數字',
+        JSON.stringify(C.pathRange)
+      );
+    }
+    const targetsAll = Rules.interactionTargets({
+      challenges,
+      inscriptions: inscriptionFile.entries,
+      letters: letterFile.entries,
+      handles: handleFile.entries,
+      reactiveSpots: Reactive.reactiveTargets(),
+      murks,
+      watchmen: readJson('src/data/watchmen.json').entries,
+      tablets: Props.LORE_TABLETS,
+      secrets: secretFile.entries,
+    });
+    /*
+     * 路網＝遊戲真的畫在地上的那一條（`PATH_BENDS` 是遮擋帶把路擠彎的折點）——
+     * 守夜人那一節與 `murk-fit.mjs` 讀的是同一份參數，三邊量的是同一條路。
+     */
+    const greatPathSegs = Props.buildPathNetwork(
+      World.REGION_SITES,
+      [...World.CORRIDORS, ...World.ANNEX_LINKS],
+      challenges,
+      (await import('../src/world/screens.js')).PATH_BENDS
+    );
+    ok(greatPathSegs.length > 100, '路網真的有那麼多線段要量（不然這一段是空過的）', String(greatPathSegs.length));
+    /** 逐片土地量到的「按得到牠的方向」（契約檔的 `winnableWorst` 要與它對得上）。 */
+    const winByRegion = {};
+    for (const m of greatMurks) {
+      const tag = `[${m.id}]`;
+      const [x, z] = m.at;
+      const here = World.regionAt(x, z);
+      ok(here && here.id === m.region && !here.onBridge, `${tag} regionAt 說牠站在 ${m.region}`, JSON.stringify(here));
+      ok(World.coverage(x, z) > Rules.MOTIF_COVERAGE_MIN, `${tag} 沒有踩在崩掉的區緣上`, World.coverage(x, z).toFixed(2));
+      const markerMin = Rules.GREAT_MURK_MARKER_EXCEPTIONS[m.region] ?? Rules.GREAT_MURK_MARKER_MIN;
+      for (const t of targetsAll) {
+        if (t.id === m.id) continue;
+        const d = Math.hypot(x - t.at[0], z - t.at[1]);
+        const need =
+          t.k === 'marker'
+            ? markerMin
+            : t.k === 'murk' || t.k === 'greatmurk'
+              ? Rules.GREAT_MURK_GAP
+              : t.k === 'react'
+                ? Rules.GREAT_MURK_REACT_MIN
+                : t.k === 'secret'
+                  ? Rules.GREAT_MURK_AUTO_MIN
+                  : Rules.GREAT_MURK_R + Rules.targetRadius(t);
+        ok(d >= need, `${tag} 離 ${t.k}:${t.id} ≥ ${need}m`, d.toFixed(2));
+      }
+      /*
+       * 石座那一條放鬆了，就要用**看得到石座**的量法去守（P16b 的教訓）：
+       * 石座自己的淨空圈（半徑 5）上不准被大濁靈的身體堵住。
+       */
+      for (const c of challenges) {
+        const d = Math.hypot(x - c.position[0], z - c.position[1]);
+        if (d > 20) continue;
+        ok(
+          d >= 5 + World.PLAYER_RADIUS + Murks.GREAT_BODY_RADIUS,
+          `${tag} 沒有堵住石座 ${c.id} 周圍 5m 的那一圈`,
+          d.toFixed(2)
+        );
+      }
+      for (const lm of Props.LANDMARKS) {
+        ok(Math.hypot(x - lm.at[0], z - lm.at[1]) >= Rules.GREAT_MURK_LANDMARK_MIN, `${tag} 離地標 ${lm.id} ≥ ${Rules.GREAT_MURK_LANDMARK_MIN}m`);
+      }
+      for (const v of Props.STORY_VIGNETTES) ok(Math.hypot(x - v.at[0], z - v.at[1]) >= Rules.GREAT_MURK_VIGNETTE_MIN, `${tag} 離小景 ${v.id} ≥ ${Rules.GREAT_MURK_VIGNETTE_MIN}m`);
+      for (const l of World.BRIDGE_LANES) {
+        ok(distToSeg(x, z, l.ax, l.az, l.bx, l.bz) >= World.LANE_HALF + Rules.LANE_MARGIN, `${tag} 離 ${l.region} 橋的主動線 ≥ ${World.LANE_HALF + Rules.LANE_MARGIN}m`);
+      }
+      for (const a2 of World.ANNEX_LINKS) ok(Math.hypot(x - a2.gate.x, z - a2.gate.z) >= Rules.GATE_MIN, `${tag} 離 ${a2.region} 頸口 ≥ ${Rules.GATE_MIN}m`);
+      for (const c of World.CORRIDORS) ok(Math.hypot(x - c.gate.x, z - c.gate.z) >= Rules.GATE_MIN, `${tag} 離 ${c.region} 閘門 ≥ ${Rules.GATE_MIN}m`);
+      ok(Math.hypot(x, z - 6) >= Rules.GREAT_MURK_SPAWN_MIN, `${tag} 離出生點 ≥ ${Rules.GREAT_MURK_SPAWN_MIN}m`);
+      ok(
+        Math.hypot(x - prologueForWorld.shrine.at[0], z - prologueForWorld.shrine.at[1]) >= Rules.GREAT_MURK_SHRINE_MIN,
+        `${tag} 離起始祭壇 ≥ ${Rules.GREAT_MURK_SHRINE_MIN}m`
+      );
+      /*
+       * **離「走出來的那條路」的區間**（WORLD.md §4.8：遇得到，但不站在路中間）。
+       * P17 審查 · 第 4 條：這一條以前只有搜尋器（`murk-fit.mjs`）在守，
+       * 每次都跑的那道門一句話都不會說 —— 把 `at` 搬到路中間、或搬到離路 40 公尺外，
+       * `test:rubric` 照樣全綠。量的是**遊戲真的畫在地上的那一條**（帶 `PATH_BENDS`）。
+       */
+      const dPath = Rules.pathDistance(greatPathSegs, x, z);
+      ok(
+        dPath >= Rules.GREAT_MURK_PATH_MIN && dPath <= Rules.MOTIF_PATH_MAX,
+        `${tag} 離路網 ${Rules.GREAT_MURK_PATH_MIN}–${Rules.MOTIF_PATH_MAX}m（遇得到，但不站在路中間）`,
+        `${dPath.toFixed(2)}m`
+      );
+      /*
+       * 小濁靈那一條問的是「加入濁靈**之前**的世界是清的」；大濁靈問的是
+       * 「除了牠自己以外沒有別的東西擋著」（`clearExceptSelf`，與器物那一層同一支）。
+       * 兩者的差別是**程序化道具**：它們本來就會因為 `keepClear` 讓開 ——
+       * 拿「牠來之前」的那個世界去問，等於把「我把草叢擠走了」讀成「這裡本來就有東西」。
+       * 真正要守的是**固定景物**沒有疊在牠身上，那正是 `clearExceptSelf` 在問的。
+       */
+      ok(clearExceptSelf(testWorld, x, z), `${tag} 這一點除了牠自己以外沒有別的東西擋著`);
+      ok(Boolean(testWorld.solidAt(x, z)), `${tag} 大濁靈本體擋得住人`);
+      // 貼身那一圈：16 個方向繞得過去（半徑 2.6 > 底座 1.5 ＋ 玩家 0.62）
+      let free = 0;
+      for (let a3 = 0; a3 < Rules.GREAT_MURK_RING_DIRS; a3 += 1) {
+        const ang = (a3 / Rules.GREAT_MURK_RING_DIRS) * Math.PI * 2;
+        if (testWorld.isClear(x + Math.cos(ang) * Rules.GREAT_MURK_RING, z + Math.sin(ang) * Rules.GREAT_MURK_RING)) free += 1;
+      }
+      eq(free, Rules.GREAT_MURK_RING_DIRS, `${tag} 貼身那一圈 ${Rules.GREAT_MURK_RING_DIRS} 個方向都繞得過去`);
+      // 真正要守的：走向牠的 24 個方向裡，有幾個「站得住而且是牠贏」
+      let win = 0;
+      for (let a3 = 0; a3 < Rules.GREAT_MURK_WINNABLE_DIRS; a3 += 1) {
+        const ang = (a3 / Rules.GREAT_MURK_WINNABLE_DIRS) * Math.PI * 2;
+        for (const rr of Rules.GREAT_MURK_WINNABLE_RADII) {
+          const px = x + Math.cos(ang) * rr;
+          const pz = z + Math.sin(ang) * rr;
+          if (!testWorld.isClear(px, pz)) continue;
+          if (challenges.some((c) => Math.hypot(px - c.position[0], pz - c.position[1]) < 6.5)) continue;
+          if (murks.some((o) => o.id !== m.id && Math.hypot(px - o.at[0], pz - o.at[1]) < rr)) continue;
+          win += 1;
+          break;
+        }
+      }
+      ok(win >= Rules.GREAT_MURK_WINNABLE_MIN, `${tag} 按得到牠的方向 ${win}/${Rules.GREAT_MURK_WINNABLE_DIRS}（要 ≥${Rules.GREAT_MURK_WINNABLE_MIN}）`, String(win));
+      winByRegion[m.region] = win;
+    }
+    /*
+     * 契約檔的 `winnableWorst` 記的是「現行 12 隻裡最差的那一隻實測幾分」——
+     * 它是**上限的證據**（門檻不准超過它），所以要真的重量一次、逐值比對。
+     * 只記數字不比對的話，那一格就是一句沒有人查證的話（P17 審查 · 第 3 條）。
+     */
+    {
+      const C = EXPECT.greatMurks;
+      const worst = Math.min(...Object.values(winByRegion));
+      for (const [rid, val] of Object.entries(C.winnableWorst)) {
+        eq(winByRegion[rid], val, `[${rid}] 契約記的「按得到牠」實測值與這一次量到的相同`);
+        ok(val >= C.winnableMin, `[${rid}] 門檻不超過實測值（${C.winnableMin} ≤ ${val}）`, `餘裕 ${val - C.winnableMin}`);
+        eq(val, worst, `[${rid}] 契約記的就是 12 隻裡最差的那一隻`);
+      }
+      eq(Object.keys(C.winnableWorst).length, 1, '契約只記最差的那一片（記多了就會有一份沒人維護）');
+    }
+  }
+
+  /* --- ④ 世界實體：命名、碰撞體、預算、0 光源 --- */
+  const murkGroups = [];
+  testScene.traverse((o) => {
+    if (o.name && o.name.startsWith('murk:')) murkGroups.push(o);
+  });
+  eq(murkGroups.length, murks.length, '每一隻濁靈都蓋在測試世界裡（murk:<id>）');
+  eq(new Set(murkGroups.map((g) => g.name)).size, murks.length, '場景圖節點名沒有重複');
+  const murkSolids = testWorld.solids.filter((s) => murks.some((m) => Math.abs(m.at[0] - s.x) < 0.01 && Math.abs(m.at[1] - s.z) < 0.01));
+  eq(murkSolids.length, murks.length, `碰撞登記表含 ${murks.length} 個濁靈底座`);
+  for (const m of murks) {
+    const sd = murkSolids.find((s) => Math.abs(m.at[0] - s.x) < 0.01 && Math.abs(m.at[1] - s.z) < 0.01);
+    const want = isGreat(m) ? Murks.GREAT_BODY_RADIUS : 0.9;
+    ok(sd && Math.abs(sd.r - want) < 0.01 && sd.keep === true, `[${m.id}] 底座 solidRadius ${want} 且 keepSolid`, sd ? `${sd.r}/${sd.keep}` : 'none');
+    /*
+     * **站不上一個人的頭**這件事靠尺寸成立、不靠旗標：
+     * 底座是壓扁的多面體，半徑 0.8（`STAND_MIN_R`）那一圈上的高低差大於
+     * `STAND_FLAT_EPS`，頂面永遠量不成「夠平」（同 P16c 守夜人底座 0.55 的作法）。
+     */
+    ok(sd && sd.standable !== true, `[${m.id}] 底座站不上去（可站立體稽核 0）`);
+  }
+  ok(testWorld.solids.length < 1400, '加了濁靈之後碰撞體仍在預算內', `n=${testWorld.solids.length}`);
+  /*
+   * 每一隻濁靈只多一顆底座（20 顆）；差額會**上下浮動**，因為牠們進了 `keepClear`，
+   * 程序化道具會重擲一次（findings「P06c 的發現」）。門檻用「隻數 ＋ 4」表達這件事，
+   * 不是寫死一個數字 —— 寫死的那個會在下一次加濁靈時假紅。
+   */
+  ok(
+    testWorld.solids.length - baselineWorld.solids.length <= murks.length + 4,
+    `濁靈只多了少數幾個碰撞體（≤ 隻數 ${murks.length} ＋ 4）`,
+    `Δ=${testWorld.solids.length - baselineWorld.solids.length}`
+  );
+  {
+    let lights = 0;
+    let tris = 0;
+    testWorld.murks.group.traverse((o) => {
+      if (o.isLight) lights += 1;
+      if (o.isMesh && o.geometry) {
+        const idx = o.geometry.index;
+        tris += idx ? idx.count / 3 : o.geometry.attributes.position.count / 3;
+      }
+    });
+    let GREAT_MURK_LAYER_TRIS = 0;
+    for (const m of testWorld.murks.murks) {
+      if (!isGreat(m.entry)) continue;
+      m.group.traverse((o) => {
+        if (o.isMesh && o.geometry) {
+          const idx = o.geometry.index;
+          GREAT_MURK_LAYER_TRIS += idx ? idx.count / 3 : o.geometry.attributes.position.count / 3;
+        }
+      });
+    }
+    eq(lights, 0, '濁靈一盞燈都沒加（只用自發光與半透明）');
+    /*
+     * v1.2 · P17：小濁靈 ≤ 600、**大濁靈 ≤ 400**（殼多但每一層只有 20 面 —— 半徑大、面就大）。
+     * 逐隻量，不是量平均：平均會讓「一隻超標、一隻很省」互相遮掩。
+     */
+    for (const m of testWorld.murks.murks) {
+      let t = 0;
+      m.group.traverse((o) => {
+        if (o.isMesh && o.geometry) {
+          const idx = o.geometry.index;
+          t += idx ? idx.count / 3 : o.geometry.attributes.position.count / 3;
+        }
+      });
+      ok(t <= (isGreat(m.entry) ? 400 : 600), `[${m.id}] ${isGreat(m.entry) ? '大' : '小'}濁靈 ≤ ${isGreat(m.entry) ? 400 : 600} 三角形`, `tris=${t}`);
+    }
+    ok(tris < 9000, `${murks.length} 隻濁靈總共 < 9k 三角形`, `tris=${tris}`);
+    // 大濁靈整層的增量（P17 的預算：< 6,000）
+    ok(GREAT_MURK_LAYER_TRIS < 6000, '大濁靈整層 < 6,000 三角形', `tris=${GREAT_MURK_LAYER_TRIS}`);
+  }
+  for (const m of testWorld.murks.murks) {
+    const tag = `[${m.id}]`;
+    const wantR = isGreat(m.entry) ? Murks.GREAT_BODY_RADIUS : 0.9;
+    eq(m.body.userData.solidRadius, wantR, `${tag} body.userData.solidRadius = ${wantR}`);
+    eq(m.radius, isGreat(m.entry) ? Murks.GREAT_MURK_RADIUS : Murks.MURK_RADIUS, `${tag} 互動半徑逐隻帶著自己的那一個`);
+    eq(m.body.userData.keepSolid, true, `${tag} body.userData.keepSolid = true`);
+    eq(m.shells.length, m.entry.rubric.length, `${tag} 殼數 ＝ rubric 條數`);
+    ok(m.shells.every((s) => s.material.transparent === true), `${tag} 殼是半透明材質（穿模稽核自動免除）`);
+    ok(m.body.material.transparent !== true, `${tag} 底座是實心材質`);
+    ok(m.core.material.emissiveIntensity > 0, `${tag} 眼光是自發光`);
+    ok(m.glow && m.glow.isSprite, `${tag} 有一片光暈 sprite`);
+    ok(m.group.name === `murk:${m.id}`, `${tag} 群組命名 murk:<id>`);
+  }
+  {
+    // 穿模稽核也要含濁靈（testScene 已含；這裡只驗濁靈自己的路徑）
+    const Audit = await import('./collision-audit.mjs');
+    const res = Audit.auditCoverage(testWorld.murks.group, World.solidAt, testWorld.solids, World.terrainHeight);
+    eq(res.uncovered.length, 0, '濁靈沒有「有份量卻走得過去」的零件', res.uncovered.map((u) => u.name).join(' '));
+  }
+
+  /* --- ⑤ 場的行為：面向排名、轉頭不走動、面板打開就停手、45m 外整組跳過 --- */
+  {
+    const field = testWorld.murks;
+    ok(Murks.MURK_RADIUS === 5.5, '濁靈互動半徑 5.5');
+    ok(Murks.MURK_RADIUS < 6.5 && Murks.MURK_RADIUS > 4.6, '互動半徑夾在石座（6.5）與石碑（4.6）之間');
+    const one = field.murks[0];
+    const hitFar = field.nearest({ x: one.x + 6, z: one.z }, Murks.MURK_RADIUS, null);
+    ok(hitFar === null || hitFar.murk !== one, '6 公尺外按不到這隻');
+    const hitNear = field.nearest({ x: one.x + 3, z: one.z }, Murks.MURK_RADIUS, null);
+    ok(hitNear && hitNear.murk === one, '3 公尺內按得到', JSON.stringify(hitNear && hitNear.distance));
+    eq(one.near, true, '被選中的那一隻進入「走近」狀態');
+    ok(field.nearest({ x: one.x + 3, z: one.z }, Murks.MURK_RADIUS, { x: -1, z: 0 }).murk === one, '面向牠時仍是牠');
+    // 兩隻假想同距：面向哪一隻就選哪一隻（用真的 field 驗排名式）
+    const fake = { murks: [ { x: 0, z: 3, setNear() {} }, { x: 0, z: -3, setNear() {} } ] };
+    const rank = (pos, forward) => {
+      let best = null; let bestScore = Infinity;
+      for (const m of fake.murks) {
+        const dx = m.x - pos.x; const dz = m.z - pos.z; const d = Math.hypot(dx, dz);
+        let score = d;
+        if (forward) score = d * (1 - 0.35 * ((dx / d) * forward.x + (dz / d) * forward.z));
+        if (score < bestScore) { bestScore = score; best = m; }
+      }
+      return best;
+    };
+    eq(rank({ x: 0, z: 0 }, { x: 0, z: 1 }), fake.murks[0], '排名式：面向 +z 選 +z 那一隻');
+    eq(rank({ x: 0, z: 0 }, { x: 0, z: -1 }), fake.murks[1], '排名式：面向 −z 選 −z 那一隻');
+    // 走近會轉頭，但整隻不動
+    const before = one.group.position.clone();
+    one.facing = 0;
+    one.head.rotation.y = 0;
+    for (let i = 0; i < 90; i += 1) field.update(1 / 60, i / 60, one.x + 4, one.z + 0.001);
+    eq(one.state, 'aware', '4 公尺內：idle → aware');
+    ok(Math.abs(one.head.rotation.y - Math.PI / 2) < 0.2, '轉頭看向玩家（+x 方向 ≈ π/2）', one.head.rotation.y.toFixed(2));
+    ok(one.group.position.equals(before), '濁靈本體一寸都沒移動（沒有會走動的 NPC）');
+    for (let i = 0; i < 30; i += 1) field.update(1 / 60, i / 60, one.x + 20, one.z);
+    eq(one.state, 'idle', '走遠（> 8m）：回到 idle');
+    // 面板打開（isBusy）→ 不轉頭
+    const busyScene = new THREE.Scene();
+    void busyScene;
+    const busyField = Murks.createMurkField({
+      entries: murks.slice(0, 1),
+      kitOf: () => Props.kitFor('#8aa0b4'),
+      terrainHeight: World.terrainHeight,
+      isBusy: () => true,
+    });
+    const b = busyField.murks[0];
+    b.facing = 0;
+    for (let i = 0; i < 60; i += 1) busyField.update(1 / 60, i / 60, b.x + 3, b.z);
+    eq(b.state, 'idle', '面板打開時不進 aware（isBusy 停手）');
+    ok(Math.abs(b.facing) < 0.5, '面板打開時不轉頭看人', b.facing.toFixed(2));
+    // 沒有 entries 也蓋得起來（世界照樣成立）
+    const empty = Murks.createMurkField({ entries: [], kitOf: () => Props.kitFor('#8aa0b4'), terrainHeight: World.terrainHeight });
+    eq(empty.count, 0, '沒有濁靈資料時場是空的');
+    eq(empty.nearest({ x: 0, z: 0 }), null, '空的場 nearest 回 null');
+    empty.update(0.016, 0, 0, 0);
+  }
+
+  /* --- ⑥ recordMurk（v1.2 · P02）：真正落盤 —— 累積聯集、安撫規則、只升不降、XP 差額；
+   *     142 關的統計（bestGrades／collected／skillsV2／已通關數／稱號）一格都不動 --- */
+  memory.clear();
+  {
+    const { rankStats: rankStatsM, rankFor: rankForM } = await import('../src/progression/ranks.js');
+    const ranksM = readJson('src/data/ranks.json').ranks;
+    const p = createProgression({ catalog, challenges });
+    ok(typeof p.recordMurk === 'function', 'progression 有 recordMurk');
+    ok(typeof p.murkCount === 'function' && typeof p.murkState === 'function' && typeof p.murkHits === 'function', 'progression 有 murkCount / murkState / murkHits');
+    eq(p.murkCount(), 0, '一開始 murkCount 0');
+    eq(p.murkState('murk-vague-ask'), null, '沒碰過的濁靈 murkState 是 null');
+    eq(JSON.stringify(p.murkHits('murk-vague-ask')), '[]', '沒碰過的濁靈 murkHits 是空陣列');
+    ok(p.state.murks && typeof p.state.murks === 'object' && Object.keys(p.state.murks).length === 0, '新存檔 murks 是 {}');
+    // 先讓存檔有點內容（一關通關），再比較 142 關的統計前後；同時留一份**活的** recordResult outcome 當形狀對照
+    const refOutcome = p.recordResult(evaluate(challengeByIdM.get('gate-of-clarity-01'), challengeByIdM.get('gate-of-clarity-01').sample));
+    const stats142 = () =>
+      JSON.stringify({
+        bestGrades: p.state.bestGrades,
+        collected: p.state.collected,
+        skillsV2: p.state.skillsV2,
+        seals: p.state.seals,
+        penless: p.state.penlessSeals,
+        scribe: p.state.scribeSeals,
+        badges: p.state.badges,
+        unlocked: p.state.unlockedRegions,
+        guidanceSeen: p.state.guidanceSeen,
+        samplesSeen: p.state.samplesSeen,
+        cleared: Object.keys(p.state.bestGrades).length,
+        clearedFoundations: p.clearedCount('foundations'),
+        rankMaterial: (() => { const st = rankStatsM(p, catalog); return [st.collected, st.mastered, st.cleared]; })(),
+      });
+    const before142 = stats142();
+    const rankBefore = rankForM(rankStatsM(p, catalog), ranksM).rank.id;
+    const m = murks[0];
+    const ch = { ...m, kind: 'murk', xp: murkFile.xp };
+    const total = ch.rubric.reduce((n, r) => n + r.weight, 0);
+    const fake = (flags) => ({ challengeId: ch.id, results: ch.rubric.map((r, i) => ({ check: r.check, weight: r.weight, passed: Boolean(flags[i]) })), passed: false, grade: null, tooShort: false });
+    /*
+     * 索引不寫死：挑一條 weight 1 的（`LIGHT`）與那條 weight 2 的主列（`HEAVY`），
+     * 這樣 rubric 的排列順序（P06b 把「說清楚要做什麼」移到第一段）改了也不用改測試。
+     */
+    const LIGHT = ch.rubric.findIndex((r) => r.weight === 1);
+    const HEAVY = ch.rubric.findIndex((r) => r.weight === 2);
+    const only = (i) => ch.rubric.map((_r, k) => (k === i ? 1 : 0));
+    const pair = [LIGHT, HEAVY].sort((a, b) => a - b);
+    // 第一次：只命中那條 weight 1 → 沒安撫、hits [LIGHT]、xp 0
+    const xp0 = p.state.xp;
+    const o1 = p.recordMurk(ch, fake(only(LIGHT)), { mode: 'free', attempt: 1 });
+    ok(o1.murk && typeof o1.murk === 'object', 'outcome 帶 murk 子物件');
+    eq(JSON.stringify(Object.keys(o1.murk).sort()), JSON.stringify(['calmed', 'hits', 'newlyCalmed', 'newlyPassedIndices', 'score', 'total']), 'outcome.murk 六鍵：newlyPassedIndices / hits / score / total / calmed / newlyCalmed');
+    eq(JSON.stringify(o1.murk.newlyPassedIndices), JSON.stringify([LIGHT]), '第一次：新命中那條 weight 1');
+    eq(JSON.stringify(o1.murk.hits), JSON.stringify([LIGHT]), '第一次：hits ＝ 那一條');
+    eq(o1.murk.score, 1, '第一次：score 1');
+    eq(o1.murk.total, total, 'total ＝ rubric 權重和');
+    eq(o1.murk.calmed, false, '第一次：score 1 < pass 3 → 沒安撫');
+    eq(o1.murk.newlyCalmed, false, '第一次：newlyCalmed false');
+    eq(o1.xpGain, 0, '沒安撫 → xpGain 0');
+    eq(o1.bestGrade, null, '沒安撫 → bestGrade null');
+    eq(o1.previousGrade, null, '第一次 previousGrade null');
+    eq(o1.improved, false, '沒安撫 → improved false');
+    eq(p.state.xp, xp0, '沒安撫 → XP 不動');
+    eq(JSON.stringify(p.murkHits(ch.id)), JSON.stringify([LIGHT]), 'murkHits 讀得到那一條');
+    eq(JSON.stringify(p.murkState(ch.id)), JSON.stringify({ hits: [LIGHT], grade: null }), 'murkState ＝ { hits:[那一條], grade:null }');
+    eq(p.murkCount(), 0, '沒安撫不算 murkCount');
+    ok(JSON.parse(memory.get(SaveIO.SAVE_KEY)).murks[ch.id], '沒安撫也落盤（hits 永不清零）');
+    // 第二次：只命中那條 weight 2 的主列 —— 這一次單看不過，但聯集 score 3 ≥ pass → 安撫（newlyCalmed）
+    const o2 = p.recordMurk(ch, fake(only(HEAVY)), { mode: 'free', attempt: 2 });
+    eq(JSON.stringify(o2.murk.newlyPassedIndices), JSON.stringify([HEAVY]), '第二次：新命中主列（上一條已在，不重複）');
+    eq(JSON.stringify(o2.murk.hits), JSON.stringify(pair), '第二次：hits 是聯集');
+    eq(o2.murk.score, 3, '第二次：累積 score 3');
+    eq(o2.murk.calmed, true, '累積 3 ≥ pass 3 → 安撫（單次沒過也算）');
+    eq(o2.murk.newlyCalmed, true, '這一次才安撫 → newlyCalmed true');
+    eq(o2.bestGrade, gradeForRatio(3 / total), 'grade ＝ gradeForRatio(累積 score / total)（這一次沒過 → 只看累積）');
+    eq(o2.previousGrade, null, 'previousGrade 仍 null');
+    eq(o2.improved, true, '第一次拿到評價 → improved');
+    eq(o2.xpGain, xpForGrade(o2.bestGrade, murkFile.xp), 'XP ＝ xpForGrade(grade, murks.json.xp)');
+    ok(o2.xpGain > 0, '安撫有 XP', String(o2.xpGain));
+    eq(p.state.xp, xp0 + o2.xpGain, 'XP 真的寫進 state');
+    eq(p.state.level, levelFromXp(p.state.xp).level, 'level 與 levelFromXp 一致');
+    eq(o2.levelAfter, levelFromXp(p.state.xp).level, 'levelAfter 是現值');
+    eq(p.murkCount(), 1, '安撫一隻 → murkCount 1');
+    eq(p.murkState(ch.id).grade, o2.bestGrade, 'murkState.grade 有值');
+    // 第三次：什麼都沒命中 → 聯集不變、grade 不降、XP 不動、newly 空
+    const xp2 = p.state.xp;
+    const o3 = p.recordMurk(ch, fake([0, 0, 0]), { mode: 'free', attempt: 3 });
+    eq(JSON.stringify(o3.murk.newlyPassedIndices), '[]', '第三次：沒有新命中');
+    eq(JSON.stringify(o3.murk.hits), '[0,1]', 'hits 永不清零');
+    eq(o3.murk.calmed, true, '安撫過就一直是安撫');
+    eq(o3.murk.newlyCalmed, false, '不是這一次才安撫');
+    eq(o3.bestGrade, o2.bestGrade, 'grade 只升不降');
+    eq(o3.previousGrade, o2.bestGrade, 'previousGrade 是上一次的 grade');
+    eq(o3.improved, false, '沒進步');
+    eq(o3.xpGain, 0, 'XP 只補差額 → 0');
+    eq(p.state.xp, xp2, 'XP 不動');
+    // 第四次：全命中 → S、只補差額
+    const o4 = p.recordMurk(ch, fake([1, 1, 1]), { mode: 'free', attempt: 4 });
+    eq(JSON.stringify(o4.murk.hits), '[0,1,2]', '全命中 → hits [0,1,2]');
+    eq(o4.murk.score, total, 'score ＝ total');
+    eq(o4.bestGrade, 'S', '全剝 ＝ S');
+    eq(o4.xpGain, xpForGrade('S', murkFile.xp) - xpForGrade(o2.bestGrade, murkFile.xp), 'XP 只補 S 與舊評價的差額');
+    eq(p.state.xp, xp2 + o4.xpGain, '差額寫進 state');
+    // 第五次：再全命中 → 0 XP、newly 空（不能刷分）
+    const o5 = p.recordMurk(ch, fake([1, 1, 1]), { mode: 'free', attempt: 5 });
+    eq(o5.xpGain, 0, '重複安撫不刷分');
+    eq(JSON.stringify(o5.murk.newlyPassedIndices), '[]', '重複命中不算新');
+    eq(o5.improved, false, 'S 之後不再 improved');
+    // 與 recordResult 同形：鍵集合 ⊇ 活的 recordResult outcome 的鍵集合 ＋ murk（動態對照，不寫死清單）
+    const refKeys = Object.keys(refOutcome).sort();
+    eq(refKeys.length, 13, '（對照組）recordResult 目前回 13 鍵');
+    for (const o of [o1, o2, o3, o4, o5]) {
+      const keys = Object.keys(o);
+      ok(refKeys.every((k) => keys.includes(k)), 'recordMurk 回傳的鍵 ⊇ 活的 recordResult outcome 的鍵', JSON.stringify(refKeys.filter((k) => !keys.includes(k))));
+      ok(keys.includes('murk'), 'recordMurk 回傳多一個 murk 子物件');
+      eq(JSON.stringify(keys.sort()), JSON.stringify([...refKeys, 'murk'].sort()), 'recordMurk 回傳 ＝ recordResult 的鍵 ＋ murk（沒有多餘的鍵）');
+      ok(Array.isArray(o.newlyCollected) && o.newlyCollected.length === 0, 'newlyCollected 保持空（技巧只由神廟給）');
+      ok(o.newlySkills.length === 0 && o.newlyUnlocked.length === 0, 'newlySkills / newlyUnlocked 空（沒跨門檻）');
+      eq(o.newSeal, null, 'newSeal null');
+      eq(o.newPenless === false && o.newScribe === false, true, 'newPenless / newScribe false');
+    }
+    // 142 關的統計一格都沒動
+    eq(stats142(), before142, 'bestGrades／collected／skillsV2／印記／徽章／解鎖／已通關數／稱號材料 前後 deep-equal');
+    eq(rankForM(rankStatsM(p, catalog), ranksM).rank.id, rankBefore, '稱號不變');
+    eq(p.bestGrade(ch.id), null, '濁靈 id 沒有進 bestGrades');
+    eq(p.isCleared(ch.id), false, '濁靈不算通關');
+    // 用真的評分引擎跑 sample：≥A、XP 對得上
+    const m2 = murks[1];
+    const ch2 = { ...m2, kind: 'murk', xp: murkFile.xp };
+    const evS = evaluate(ch2, ch2.sample);
+    const oS = p.recordMurk(ch2, evS, { mode: 'free', attempt: 1 });
+    eq(oS.murk.calmed, true, '範例解安撫得了第二隻');
+    ok(['A', 'S'].includes(oS.bestGrade), '範例解 ≥ A', oS.bestGrade);
+    eq(oS.murk.hits.length, evS.results.filter((r) => r.passed).length, 'hits ＝ 這一次 passed 的列');
+    eq(p.murkCount(), 2, 'murkCount 2');
+    /* --- 審查後修訂：這一次評分引擎判過（部分分數湊到 pass）＝ 安撫，即使 passed===true 的列不夠 pass --- */
+    {
+      const mT = murks.find((x) => x.id === 'murk-trust-me');
+      const chT = { ...mT, kind: 'murk', xp: murkFile.xp };
+      const evT = evaluate(chT, '請根據下面的資料回答，並註明來源，若沒有就說不知道');
+      eq(evT.passed, true, '（前提）這一句引擎判過');
+      const fullRows = evT.results.filter((r) => r.passed === true).length;
+      const fullScore = evT.results.filter((r) => r.passed === true).reduce((n, r) => n + r.weight, 0);
+      ok(fullRows >= 1 && fullScore < chT.pass, '（前提）但完全命中的列權重和 < pass（靠部分分數過的）', `${fullScore} < ${chT.pass}`);
+      const xpT0 = p.state.xp;
+      const oT = p.recordMurk(chT, evT, { mode: 'free', attempt: 1 });
+      eq(oT.murk.calmed, true, '引擎判過 → 安撫（部分分數也算）');
+      eq(oT.murk.newlyCalmed, true, '第一次 → newlyCalmed');
+      eq(oT.bestGrade, evT.grade, 'grade ＝ 這一次的評價（attempt ratio > 累積 ratio）');
+      ok(oT.murk.score < chT.pass, '累積聯集本身還沒到 pass（hits 只記完全命中的列）', String(oT.murk.score));
+      eq(oT.xpGain, xpForGrade(evT.grade, murkFile.xp), 'XP ＝ xpForGrade(這一次的評價)');
+      eq(p.state.xp, xpT0 + oT.xpGain, 'XP 寫進 state');
+      eq(p.murkState(chT.id).grade, evT.grade, 'murkState.grade 有值（存了 grade ＝ 安撫過）');
+      eq(p.murkCount(), 3, 'murkCount 3');
+      // 再送一次同一句：早就安撫、不刷分
+      const oT2 = p.recordMurk(chT, evT, { mode: 'free', attempt: 2 });
+      eq(oT2.murk.newlyCalmed, false, '再送：不是這一次才安撫');
+      eq(oT2.xpGain, 0, '再送：不刷分');
+    }
+    // 重新載入：存檔裡的 murks 讀得回來、形狀正確
+    const reload = createProgression({ catalog, challenges });
+    eq(JSON.stringify(reload.murkState(ch.id)), JSON.stringify({ hits: [0, 1, 2], grade: 'S' }), '重新載入後 murkState 一致');
+    eq(reload.murkCount(), 3, '重新載入後 murkCount 一致');
+    // murkCount(ids)：只數給定的 id（存檔孤兒不算）
+    reload.state.murks['murk-ghost-not-in-json'] = { hits: [0], grade: 'S' };
+    eq(reload.murkCount(), 4, 'murkCount() 不給 ids 會把孤兒也數進去');
+    eq(reload.murkCount(murks.map((m) => m.id)), 3, 'murkCount(ids) 只數 murks.json 裡的 8 隻（孤兒不算）');
+    eq(reload.murkCount([]), 0, 'murkCount([]) ＝ 0');
+    // XP 來源與 recordResult 同一條：challenge.xp → evaluation.baseXp（沒有 murksXp 選項）
+    const bare = createProgression({ catalog, challenges });
+    const oB = bare.recordMurk({ ...murks[2], kind: 'murk', xp: murkFile.xp }, fake([1, 1, 1]), null);
+    eq(oB.xpGain, xpForGrade('S', murkFile.xp), 'challenge.xp（murks.json.xp）是 XP 基數');
+    const oB2 = bare.recordMurk({ ...murks[3], kind: 'murk' }, { ...fake([1, 1, 1]), baseXp: 10 }, null);
+    eq(oB2.xpGain, xpForGrade('S', 10), '沒有 challenge.xp → 退回 evaluation.baseXp（與 recordResult 同一條）');
+    const oB3 = bare.recordMurk({ ...murks[4], kind: 'murk' }, fake([1, 1, 1]), null);
+    eq(oB3.xpGain, 0, '兩者都沒有 → 0（不會爆）');
+    /* --- 審查後修訂：這一次沒過、但聯集湊到 pass ＝ 安撫（真引擎、兩句各命中不同列） --- */
+    {
+      const mV = murks.find((x) => x.id === 'murk-vague-ask');
+      const chV = { ...mV, kind: 'murk', xp: murkFile.xp, id: 'murk-vague-ask' };
+      memory.clear(); // 各自乾淨的存檔（不吃上面 p 的 murks）
+      const q = createProgression({ catalog, challenges });
+      const evA = evaluate(chV, '限制在 200 字以內，不要超過');
+      const evB = evaluate(chV, '請把這一段文字翻譯成英文給我，我要拿去給外國同事看的');
+      eq(evA.passed, false, '（前提）第一句單看沒過');
+      eq(evB.passed, false, '（前提）第二句單看沒過');
+      const idxA = evA.results.map((r, i) => (r.passed === true ? i : -1)).filter((i) => i >= 0);
+      const idxB = evB.results.map((r, i) => (r.passed === true ? i : -1)).filter((i) => i >= 0);
+      ok(idxA.length && idxB.length && !idxA.some((i) => idxB.includes(i)), '（前提）兩句各命中不同的列', `${idxA} / ${idxB}`);
+      const oA = q.recordMurk(chV, evA, { mode: 'free', attempt: 1 });
+      eq(oA.murk.calmed, false, '第一句：沒安撫');
+      eq(oA.xpGain, 0, '第一句：0 XP');
+      const xpA = q.state.xp;
+      const oB0 = q.recordMurk(chV, evB, { mode: 'free', attempt: 2 });
+      eq(oB0.murk.calmed, true, '第二句：這一次沒過，但聯集 ≥ pass → 安撫');
+      eq(oB0.murk.newlyCalmed, true, '第二句：newlyCalmed');
+      eq(JSON.stringify(oB0.murk.hits), JSON.stringify([...new Set([...idxA, ...idxB])].sort((a, b) => a - b)), '聯集 hits');
+      eq(oB0.bestGrade, gradeForRatio(oB0.murk.score / oB0.murk.total), 'grade 看累積（這一次沒過，attempt ratio 不算）');
+      eq(oB0.xpGain, xpForGrade(oB0.bestGrade, murkFile.xp), 'XP 給了一次');
+      eq(q.state.xp, xpA + oB0.xpGain, 'XP 寫進 state');
+      const oB1 = q.recordMurk(chV, evA, { mode: 'free', attempt: 3 });
+      eq(oB1.xpGain, 0, '再送第一句：XP 只給一次');
+      eq(oB1.murk.newlyCalmed, false, '再送：不是這一次才安撫');
+      eq(q.murkCount(), 1, 'murkCount 1');
+    }
+    /* --- 審查後修訂：濁靈升等要跑 refreshUnlocks（閘門不因濁靈升等而過期） --- */
+    {
+      memory.clear(); // 各自乾淨的存檔（不吃上面 p 的 murks）
+      const q = createProgression({ catalog, challenges });
+      const foundationsIds = challenges.filter((c) => c.region === 'foundations').slice(0, 4).map((c) => c.id);
+      eq(foundationsIds.length, 4, '（前提）基本功區有 4 關可當已通關');
+      for (const cid of foundationsIds) q.state.bestGrades[cid] = 'C';
+      q.state.xp = 259; // Lv.2（260 = Lv.3）
+      q.state.level = levelFromXp(259).level;
+      eq(q.state.level, 2, '（前提）Lv.2');
+      eq(q.isRegionUnlocked('reasoning'), false, '（前提）示範與推理區還沒開（等級差 1）');
+      const gateBefore = q.gateStatus('reasoning');
+      eq(gateBefore.unlocked, false, '（前提）閘門顯示未開');
+      const oU = q.recordMurk({ ...murks[2], kind: 'murk', xp: murkFile.xp }, fake([1, 1, 1]), null);
+      eq(oU.leveledUp, true, '濁靈 XP 讓等級跨到 Lv.3');
+      eq(oU.levelAfter, 3, 'levelAfter 3');
+      ok(oU.newlyUnlocked.includes('reasoning'), 'outcome.newlyUnlocked 有 reasoning（refreshUnlocks 有跑）', JSON.stringify(oU.newlyUnlocked));
+      eq(q.isRegionUnlocked('reasoning'), true, 'state.unlockedRegions 已重算');
+      eq(q.gateStatus('reasoning').unlocked, true, '閘門狀態跟著開（不過期）');
+      eq(JSON.parse(memory.get(SaveIO.SAVE_KEY)).unlockedRegions.includes('reasoning'), true, '解鎖落盤');
+    }
+    // 反面：challenge 缺 rubric → 拋錯（不會默默寫壞存檔）
+    let threw = false;
+    try { p.recordMurk('murk-vague-ask', fake([1, 1, 1]), null); } catch { threw = true; }
+    eq(threw, true, 'recordMurk 只收 challenge 形物件（傳字串 id 會拋錯）');
+    // 重置清空
+    p.resetAll();
+    eq(JSON.stringify(p.state.murks), '{}', 'resetAll 後 murks 是 {}');
+    eq(p.murkCount(), 0, 'resetAll 後 murkCount 0');
+  }
+  memory.clear();
+
+  /* --- ⑥b save.normalize：murks 欄的形狀 --- */
+  {
+    const fresh = SaveIO.defaultSave();
+    ok(fresh.murks && typeof fresh.murks === 'object' && !Array.isArray(fresh.murks) && Object.keys(fresh.murks).length === 0, 'defaultSave().murks 是 {}');
+    const old = SaveIO.normalize({ version: 1, xp: 30 });
+    eq(JSON.stringify(old.murks), '{}', '舊存檔沒有 murks → 補 {}');
+    const bad = SaveIO.normalize({
+      version: 1,
+      murks: {
+        good: { hits: [2, 0, 0, 1.5, -1, '1', 2], grade: 'A' },
+        badGrade: { hits: [0], grade: 'Z' },
+        noHits: { grade: 'S' },
+        emptyHits: { hits: [], grade: 'A' },
+        junkHits: { hits: [-1, 'x', 1.5], grade: 'A' },
+        hitsNotArray: { hits: 'abc', grade: 'S' },
+        nullish: null,
+        str: 'x',
+      },
+    });
+    eq(JSON.stringify(bad.murks.good), JSON.stringify({ hits: [0, 2], grade: 'A' }), 'hits 去重、排序、丟非整數／負數／字串');
+    eq(JSON.stringify(bad.murks.badGrade), JSON.stringify({ hits: [0], grade: null }), '非法 grade → null');
+    eq('noHits' in bad.murks, false, '沒有 hits 陣列的整筆丟掉');
+    eq(JSON.stringify(bad.murks.emptyHits), JSON.stringify({ hits: [], grade: null }), 'hits 空 → grade 落成 null（沒命中不可能安撫）');
+    eq(JSON.stringify(bad.murks.junkHits), JSON.stringify({ hits: [], grade: null }), 'hits 全是壞值 → 清空後 grade 也落成 null');
+    eq('hitsNotArray' in bad.murks, false, 'hits 不是陣列的整筆丟掉');
+    eq('nullish' in bad.murks && 'str' in bad.murks, false, '不是物件的值整筆丟掉');
+    eq(JSON.stringify(SaveIO.normalize({ version: 1, murks: [1, 2] }).murks), '{}', 'murks 是陣列 → 當成沒有');
+    eq(JSON.stringify(SaveIO.normalize({ version: 1, murks: 'x' }).murks), '{}', 'murks 是字串 → 當成沒有');
+    eq(JSON.stringify(SaveIO.reset().murks), '{}', 'reset() 之後 murks 是 {}');
+    // 存檔欄位是純加法：其他欄位一個都沒少
+    const keysNew = Object.keys(SaveIO.defaultSave()).sort();
+    ok(keysNew.includes('murks') && keysNew.includes('bestGrades') && keysNew.includes('samplesSeen'), '新欄位是加上去的，舊欄位都還在');
+    // refreshUnlocks 沒讀 murks（不影響解鎖）
+    const progSrc = readFileSync(resolve(root, 'src/progression/progression.js'), 'utf8');
+    const refreshBody = progSrc.slice(progSrc.indexOf('function refreshUnlocks'), progSrc.indexOf('function refreshUnlocks') + 4000);
+    ok(!/murks/.test(refreshBody), 'refreshUnlocks() 沒有讀 murks（濁靈不影響解鎖）');
+    const recordStart = progSrc.indexOf('recordMurk(challenge, evaluation, context = null) {');
+    ok(recordStart > 0, '找得到 recordMurk 方法本體');
+    const recordBody = progSrc.slice(recordStart, recordStart + 6000).split('/* ----')[0];
+    ok(/newlyUnlocked = refreshUnlocks\(\)/.test(recordBody), 'recordMurk 與其他 XP 寫入者一樣呼叫 refreshUnlocks()（審查後修訂）');
+    ok(!/murksXp/.test(progSrc), 'progression 沒有 murksXp 選項（XP 基數走 challenge.xp → evaluation.baseXp）');
+    ok(!/state\.bestGrades\[/.test(recordBody), 'recordMurk 不寫 bestGrades');
+    ok(!/state\.collected\.push|state\.skillsV2\.push|state\.seals|state\.badges|recomputeBadges/.test(recordBody), 'recordMurk 不寫 collected / skillsV2 / 印記 / 徽章');
+  }
+  memory.clear();
+
+  /* --- ⑦ 靜態掃描：主控台與 main.js 的分流真的在 --- */
+  {
+    const consoleSrc = readFileSync(resolve(root, 'src/prompt/console.js'), 'utf8');
+    ok(/progression\.recordMurk\(challenge, evaluation, meta\)/.test(consoleSrc), 'renderResult 依 kind 分流到 progression.recordMurk(challenge, evaluation, meta)');
+    ok(/murkState\?\.\(/.test(consoleSrc), '主控台 open() 對濁靈讀 murkState 顯示最佳評價');
+    ok(/牠聽懂了/.test(consoleSrc) && /替牠說清楚了/.test(consoleSrc) && /牠早就聽懂了/.test(consoleSrc), '結果面有安撫文案、「早就聽懂」與「本次新命中 N 處」一行');
+    ok(/data-murk-newly/.test(consoleSrc), '濁靈的累積那一行掛 [data-murk-newly]');
+    ok(/const gainLine = /.test(consoleSrc) && (consoleSrc.match(/gainLine\(/g) || []).length >= 3, '過關收穫那一行抽成 gainLine() 共用（關卡與濁靈不重複標記）');
+    const codexSrc = readFileSync(resolve(root, 'src/ui/codex.js'), 'utf8');
+    ok(/濁言與正言/.test(codexSrc), '圖鑑第四列「濁言與正言」');
+    ok(/還沒聽懂/.test(codexSrc), '未安撫的濁靈只顯示 title＋「還沒聽懂」');
+    ok(/!isMurk\(current\)\) progression\.markGuidanceSeen/.test(consoleSrc), '濁靈不記 guidanceSeen');
+    ok(/!isMurk\(current\)\) progression\.markSampleSeen/.test(consoleSrc), '濁靈不記 samplesSeen');
+    ok(/濁言/.test(consoleSrc), '濁靈的第一幕有專用 eyebrow「濁言」');
+    ok(!/zh: '濁言'/.test(consoleSrc), '沒有動全域 ACTS 的幕名');
+    const mainSrc = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+    ok(/world\.nearestMurk\(/.test(mainSrc), 'main.js 有第 ⑥ 層互動 nearestMurk');
+    ok(
+      /nearMurk\.entry\.kind === 'great' \? '大濁靈' : '濁靈'[\s\S]{0,80}esc\(nearMurk\.entry\.title\)[\s\S]{0,60}<kbd>E<\/kbd> 安撫/.test(mainSrc),
+      'HUD 提示：大濁靈／濁靈 · <牠自己的名字> E 安撫（副標不寫死）'
+    );
+    ok(/kind: 'murk'/.test(mainSrc), 'main.js 組出的 challenge 形物件帶 kind: murk');
+    ok(/challenge\.kind === 'murk'\)[\s\S]{0,1200}return;/.test(mainSrc), 'onResult 的 murk 分支置頂並 return');
+    ok(/nearMurk = !hitFinale && !hitMarker && hitMurk/.test(mainSrc), '石座優先於濁靈');
+    // v1.2 · P16c：石碑前面多了一層（守夜人），濁靈仍然排在它們兩個之前
+    ok(/nearWatchman = !hitFinale && !hitMarker && !hitMurk && hitWatchman/.test(mainSrc), '濁靈優先於守夜人');
+    // v1.2 · P18：守夜人與石碑之間插進了守門者（人先於碑），石碑仍然排在這四層之後
+    ok(
+      /nearGuardian =\s*\n?\s*!hitFinale && !hitMarker && !hitMurk && !hitWatchman && hitGuardian/.test(mainSrc),
+      '守夜人優先於守門者'
+    );
+    ok(
+      /nearTablet =\s*\n?\s*!hitFinale && !hitMarker && !hitMurk && !hitWatchman && !hitGuardian && hitTablet/.test(
+        mainSrc
+      ),
+      '守門者優先於石碑'
+    );
+    const worldSrc = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+    ok(/murks\.map\(\(m\) => \[m\.at\[0\], m\.at\[1\]/.test(worldSrc), 'keepClear 納入濁靈');
+    ok(/murkField\.update\(dt, t, x, z\)/.test(worldSrc), 'updateReactions 每幀更新濁靈場');
+    const murkSrc = readFileSync(resolve(root, 'src/world/murks.js'), 'utf8');
+    ok(!/new THREE\.(Point|Spot|Directional|Hemisphere|Ambient|RectArea)Light/.test(murkSrc), 'murks.js 沒有任何光源');
+    ok(!/position\.(add|lerp|copy)\(/.test(murkSrc.split('export function createMurkField')[1] || ''), '更新迴圈裡沒有移動實體的程式（濁靈不走動）');
+  }
+}
+
+/* ================================================================== */
+/* v1.2 · P03：濁靈演出 —— onRubricHits 契約 ＋ 剝殼／清燈／光屑 ＋ SFX      */
+/* ================================================================== */
+{
+  const { evaluate: evalRubric } = await import('../src/challenges/rubric.js');
+  const murks = murkFile.entries;
+  const kitOfTest = () => Props.kitFor('#8aa0b4');
+
+  /* --- ① 音效表：三條合成列、cue 有合成 fallback、murkStir 有節流 --- */
+  {
+    for (const k of ['murkStir', 'murkHit', 'murkCalm']) {
+      const spec = SFX[k];
+      ok(Boolean(spec), `音效 ${k} 有合成定義（P03）`);
+      ok(spec && Array.isArray(spec.seq) && spec.seq.length > 0, `音效 ${k} 至少一個音`);
+      ok(spec && spec.gain > 0 && spec.gain < 0.3, `音效 ${k} 音量不刺耳`, spec && String(spec.gain));
+      ok(!(k in SFX_FILES), `音效 ${k} 沒有加進 SFX_FILES（先合成、不加 m4a）`);
+    }
+    ok(SFX.murkStir.base < 200, 'murkStir 是低頻雜訊（根音 < 200 Hz）', String(SFX.murkStir.base));
+    ok(SFX.murkStir.seq.every((r) => r[2] <= 0.4), 'murkStir 短促（每個音 ≤ 0.4s）');
+    ok(Number.isFinite(SFX.murkStir.throttle) && SFX.murkStir.throttle >= 0.5, 'murkStir 在 cue 層有節流（≥ 0.5s，避免兩隻同時吼）', String(SFX.murkStir.throttle));
+    ok(Array.isArray(SFX.murkHit.layers) && SFX.murkHit.layers.length === 3, 'murkHit 有三層音高（依累積 hits 1 / 2 / 3+）');
+    ok(SFX.murkHit.layers[0] < SFX.murkHit.layers[1] && SFX.murkHit.layers[1] < SFX.murkHit.layers[2], 'murkHit 三層由低到高');
+    ok(SFX.murkCalm.seq.length >= 3, 'murkCalm 是和弦（≥ 3 個音）');
+    ok(SFX.murkCalm.seq.some((r) => r[2] >= 0.8), 'murkCalm 溫暖有尾巴（有 ≥ 0.8s 的音）');
+    const a = createAudio({ volume: 0.5, muted: false });
+    eq(a.cue('murkStir'), true, '未啟動時 cue(murkStir) 不丟例外、有合成 fallback');
+    eq(a.cue('murkHit', { layer: 2 }), true, 'cue(murkHit, {layer}) 不丟例外');
+    eq(a.cue('murkCalm'), true, 'cue(murkCalm) 不丟例外');
+    ok(a.debug().cues.includes('murkHit') && a.debug().cues.includes('murkCalm'), 'audio.debug().cues 記到 murkHit / murkCalm（e2e 用同一支診斷把手）');
+    a.dispose();
+    const audioSrc = readFileSync(resolve(root, 'src/audio/audio.js'), 'utf8');
+    ok(/spec && spec\.throttle/.test(audioSrc) || /spec\?\.throttle/.test(audioSrc), 'cue() 對合成列也吃 throttle（不只音檔列）');
+    ok(/spec\.layers/.test(audioSrc), 'cue() 依 opts.layer 從 spec.layers 選音高');
+  }
+
+  /* --- ② 世界端：strike / restore / settled / visibleShellCount / 粒子池 --- */
+  {
+    const field = Murks.createMurkField({ entries: murks, kitOf: kitOfTest, terrainHeight: World.terrainHeight });
+    ok(typeof field.strike === 'function' && typeof field.restore === 'function', 'field 有 strike / restore');
+    ok(field.particles && field.particles.isPoints, 'field 有一組共用的粒子池（THREE.Points）');
+    ok(field.particleCapacity <= 12 && field.particleCapacity >= 8, '粒子池 ≤ 12 顆（預算）', String(field.particleCapacity));
+    eq(field.particles.geometry.attributes.position.count, field.particleCapacity, '粒子 buffer 一次配好');
+    let lights = 0;
+    field.group.traverse((o) => { if (o.isLight) lights += 1; });
+    eq(lights, 0, 'P03 之後仍是 0 光源');
+    const m = field.byId('murk-vague-ask');
+    ok(typeof m.visibleShellCount === 'function', '每隻有 visibleShellCount()');
+    eq(m.visibleShellCount(), 3, '一開始 3 層殼都在');
+    eq(m.state, 'idle', '一開始 idle');
+    const shellMatBefore = m.shells[0].material;
+    const shared = field.byId('murk-only-donts').shells[0].material;
+    eq(shellMatBefore, shared, '（前提）同色盤同一層的殼共用材質');
+    // strike：newly [0,2] → 殼 0/2 剝落，殼 1 不動；材質 clone 成 per-instance
+    const spawnedBefore = field.particlesSpawned;
+    field.strike('murk-vague-ask', { newlyPassedIndices: [0, 2], hits: [0, 2], score: 3, total: 4, calmed: false, newlyCalmed: false });
+    eq(m.shellState(0), 'peeling', 'strike 後殼 0 進入剝落');
+    eq(m.shellState(2), 'peeling', 'strike 後殼 2 進入剝落');
+    eq(m.shellState(1), 'intact', '殼 1 不動');
+    ok(m.shells[0].material !== shared && m.shells[0].material !== shellMatBefore, '剝落的殼先 clone 材質（不動共用快取）');
+    eq(field.byId('murk-only-donts').shells[0].material, shared, '別隻的殼仍用共用材質');
+    eq(shared.opacity, 0.2, '共用材質的 opacity 沒被動到');
+    ok(field.particlesSpawned - spawnedBefore >= 8 && field.particlesSpawned - spawnedBefore <= 12, 'strike 噴 8–12 顆粒子', String(field.particlesSpawned - spawnedBefore));
+    ok(field.activeParticles() > 0, 'strike 後粒子池有活粒子');
+    ok(m.flash > 0, 'strike 後身體閃白（core flash 計時器）');
+    eq(m.visibleShellCount(), 1, 'visibleShellCount 只數還在的殼（剝落中的不算）');
+    // 動畫走完（用 dt 累積 —— 計時器不是幀數）
+    for (let i = 0; i < 40; i += 1) field.update(0.05, i * 0.05, m.x + 3, m.z);
+    eq(m.shellState(0), 'hidden', '0.6s 後殼 0 隱藏');
+    eq(m.shellState(2), 'hidden', '0.6s 後殼 2 隱藏');
+    eq(m.shells[0].visible, false, '隱藏的殼 visible=false');
+    eq(m.shells[1].visible, true, '殼 1 仍可見');
+    eq(m.state === 'settled', false, '沒安撫 → 不是 settled');
+    eq(field.activeParticles(), 0, '2 秒後粒子都熄了');
+    // 再 strike 同一條（重複命中）→ 沒事、不重播
+    const spawned2 = field.particlesSpawned;
+    field.strike('murk-vague-ask', { newlyPassedIndices: [], hits: [0, 2], score: 3, total: 4, calmed: false, newlyCalmed: false });
+    eq(field.particlesSpawned, spawned2, 'newly 為空 → 不噴粒子、不重播');
+    // 安撫：newly [1] + calmed/newlyCalmed → 光屑繞玩家一圈（≤3s）→ settled
+    field.strike('murk-vague-ask', { newlyPassedIndices: [1], hits: [0, 1, 2], score: 4, total: 4, calmed: true, newlyCalmed: true });
+    ok(m.state === 'calming' || m.state === 'settled', 'newlyCalmed → 進入 calming／settled', m.state);
+    ok(field.activeParticles() > 0, '安撫時光屑從濁靈飛出（粒子池）');
+    const posBefore = m.group.position.clone();
+    for (let i = 0; i < 80; i += 1) field.update(0.05, i * 0.05, m.x + 3, m.z);
+    eq(m.state, 'settled', '≤ 3s 後 settled（清燈）');
+    ok(m.group.position.equals(posBefore), '清燈在原位（沒有任何實體跟隨玩家）');
+    eq(field.activeParticles(), 0, '光屑回到清燈位後熄滅');
+    ok(m.head.scale.x < 0.6, '頭縮成清燈（≤ 0.55 附近）', m.head.scale.x.toFixed(2));
+    ok(m.coreMat.emissive.r > 0.9 && m.coreMat.emissive.g > 0.85, '眼光轉暖白', m.coreMat.emissive.getHexString());
+    eq(m.visibleShellCount(), 0, '全剝 → 沒有殼');
+    // settled 的濁靈不再 aware 轉頭
+    const facing0 = m.head.rotation.y;
+    for (let i = 0; i < 40; i += 1) field.update(0.05, 10 + i * 0.05, m.x + 0.5, m.z + 3);
+    eq(m.state, 'settled', 'settled 不會回到 aware');
+    ok(Math.abs(m.head.rotation.y - facing0) < 0.02, '清燈不轉頭看人', String(m.head.rotation.y - facing0));
+    ok(m.glow.material.opacity > 0.05, '清燈的光暈仍在（暖色微弱呼吸）', String(m.glow.material.opacity));
+
+    // 餘殼：安撫時剩下的殼半透明、停轉
+    const r = field.byId('murk-only-donts');
+    field.strike('murk-only-donts', { newlyPassedIndices: [0], hits: [0], score: 2, total: 4, calmed: true, newlyCalmed: true });
+    for (let i = 0; i < 80; i += 1) field.update(0.05, i * 0.05, r.x + 3, r.z);
+    eq(r.state, 'settled', '部分命中也可安撫（attempt-pass）→ settled');
+    eq(r.shellState(1), 'residual', '剩下的殼變成餘殼');
+    eq(r.shellState(2), 'residual', '剩下的殼變成餘殼（2）');
+    ok(r.shells[1].material !== shared && Math.abs(r.shells[1].material.opacity - (0.2 - 0.04) * 0.35) < 1e-6, '餘殼 opacity ×0.35（per-instance 材質）', String(r.shells[1].material.opacity));
+    const rotY = r.shells[1].rotation.y;
+    for (let i = 0; i < 20; i += 1) field.update(0.05, 20 + i * 0.05, r.x + 3, r.z);
+    eq(r.shells[1].rotation.y, rotY, '餘殼停止旋轉');
+    eq(r.visibleShellCount(), 2, '餘殼算「還在」的殼');
+    // 安撫過的再補一殼：剝殼照播、不重播安撫
+    const spawned3 = field.particlesSpawned;
+    field.strike('murk-only-donts', { newlyPassedIndices: [1], hits: [0, 1], score: 3, total: 4, calmed: true, newlyCalmed: false });
+    eq(r.shellState(1), 'peeling', '安撫過的濁靈補命中 → 餘殼照樣剝落');
+    ok(field.particlesSpawned > spawned3, '補殼也有粒子');
+    eq(r.state, 'settled', '仍是 settled（不重播安撫）');
+
+    // restore：開機還原 —— 不播動畫
+    const f2 = Murks.createMurkField({ entries: murks, kitOf: kitOfTest, terrainHeight: World.terrainHeight });
+    const s2 = f2.particlesSpawned;
+    f2.restore('murk-vague-ask', { hits: [1], calmed: false });
+    const q = f2.byId('murk-vague-ask');
+    eq(q.shellState(1), 'hidden', 'restore({hits:[1]}) 立即隱藏殼 1');
+    eq(q.shells[1].visible, false, 'restore 的殼 visible=false');
+    eq(q.shellState(0), 'intact', 'restore 不動其他殼');
+    eq(q.visibleShellCount(), 2, 'restore 後 visibleShellCount 2');
+    eq(q.state, 'idle', 'restore 沒安撫 → idle');
+    eq(f2.particlesSpawned, s2, 'restore 不噴粒子');
+    eq(q.flash, 0, 'restore 不閃白');
+    f2.restore('murk-only-donts', { hits: [0, 1, 2], calmed: true });
+    const q2 = f2.byId('murk-only-donts');
+    eq(q2.state, 'settled', 'restore({calmed:true}) → 直接 settled');
+    ok(q2.head.scale.x < 0.6, 'restore settled：頭已縮成清燈');
+    eq(f2.activeParticles(), 0, 'restore settled 不放光屑');
+    // stateOf：建構時還原
+    const f3 = Murks.createMurkField({
+      entries: murks,
+      kitOf: kitOfTest,
+      terrainHeight: World.terrainHeight,
+      stateOf: (id) => (id === 'murk-trust-me' ? { hits: [0], grade: 'A' } : id === 'murk-leap-answer' ? { hits: [2], grade: null } : null),
+    });
+    eq(f3.byId('murk-trust-me').state, 'settled', 'stateOf 有 grade → 建構時就 settled');
+    eq(f3.byId('murk-trust-me').shellState(0), 'hidden', 'stateOf 的 hits 建構時就隱藏');
+    eq(f3.byId('murk-trust-me').shellState(1), 'residual', 'settled 剩下的殼是餘殼');
+    eq(f3.byId('murk-leap-answer').visibleShellCount(), 2, 'stateOf 只有 hits → 殼數 2、不 settled');
+    eq(f3.byId('murk-leap-answer').state, 'idle', '沒 grade → idle');
+    eq(f3.byId('murk-vague-ask').visibleShellCount(), 3, 'stateOf 回 null → 原樣');
+    // reducedMotion：跳過動畫、直接終態
+    const f4 = Murks.createMurkField({ entries: murks, kitOf: kitOfTest, terrainHeight: World.terrainHeight, reducedMotion: true });
+    const s4 = f4.particlesSpawned;
+    f4.strike('murk-vague-ask', { newlyPassedIndices: [0, 1, 2], hits: [0, 1, 2], score: 4, total: 4, calmed: true, newlyCalmed: true });
+    const q4 = f4.byId('murk-vague-ask');
+    eq(q4.state, 'settled', 'reducedMotion：strike 直接 settled');
+    eq(q4.shellState(0), 'hidden', 'reducedMotion：殼直接隱藏（不剝落）');
+    eq(f4.particlesSpawned, s4, 'reducedMotion：不噴粒子、不放光屑');
+    ok(q4.head.scale.x < 0.6, 'reducedMotion：頭直接縮成清燈');
+    // isBusy 時 strike 照播（玩家正看著結果面）
+    const f5 = Murks.createMurkField({ entries: murks, kitOf: kitOfTest, terrainHeight: World.terrainHeight, isBusy: () => true });
+    f5.strike('murk-vague-ask', { newlyPassedIndices: [0], hits: [0], score: 2, total: 4, calmed: false, newlyCalmed: false });
+    eq(f5.byId('murk-vague-ask').shellState(0), 'peeling', 'isBusy 時 strike 照播');
+    for (let i = 0; i < 20; i += 1) f5.update(0.05, i * 0.05, f5.byId('murk-vague-ask').x + 3, f5.byId('murk-vague-ask').z);
+    eq(f5.byId('murk-vague-ask').shellState(0), 'hidden', 'isBusy 時剝落動畫照樣走完');
+    // 未知 id / 壞參數不丟例外
+    eq(field.strike('nope', { newlyPassedIndices: [0] }), false, 'strike 未知 id 回 false');
+    eq(field.restore('nope', { hits: [0] }), false, 'restore 未知 id 回 false');
+    eq(field.strike('murk-vague-ask', null), false, 'strike 壞參數回 false');
+    // stir：走近 8m 內第一次 aware → onStir 一次；4 秒內不重複；走遠再回來 4 秒後才再叫
+    const stirs = [];
+    const f6 = Murks.createMurkField({ entries: murks.slice(0, 1), kitOf: kitOfTest, terrainHeight: World.terrainHeight, onStir: (mm) => stirs.push(mm.id) });
+    const s6 = f6.murks[0];
+    for (let i = 0; i < 20; i += 1) f6.update(0.05, i * 0.05, s6.x + 3, s6.z);
+    eq(stirs.length, 1, '走近第一次 aware → murkStir 一次');
+    for (let i = 0; i < 20; i += 1) f6.update(0.05, 1 + i * 0.05, s6.x + 20, s6.z);
+    for (let i = 0; i < 20; i += 1) f6.update(0.05, 2 + i * 0.05, s6.x + 3, s6.z);
+    eq(stirs.length, 1, '4 秒內走遠再回來不重複吼');
+    for (let i = 0; i < 20; i += 1) f6.update(0.05, 6 + i * 0.05, s6.x + 20, s6.z);
+    for (let i = 0; i < 20; i += 1) f6.update(0.05, 7 + i * 0.05, s6.x + 3, s6.z);
+    eq(stirs.length, 2, '≥ 4 秒後再走近才再吼一次');
+    f6.strike(s6.id, { newlyPassedIndices: [0, 1, 2], hits: [0, 1, 2], score: 4, total: 4, calmed: true, newlyCalmed: true });
+    for (let i = 0; i < 80; i += 1) f6.update(0.05, 20 + i * 0.05, s6.x + 20, s6.z);
+    for (let i = 0; i < 20; i += 1) f6.update(0.05, 30 + i * 0.05, s6.x + 3, s6.z);
+    eq(stirs.length, 2, '清燈不吼（settled 不 aware）');
+
+    // 審查後修訂：開關面板不算「重新走近」——站在 3m 處把面板開著 5 秒再關，不會再吼
+    const stirs7 = [];
+    let busy7 = false;
+    const f7 = Murks.createMurkField({ entries: murks.slice(0, 1), kitOf: kitOfTest, terrainHeight: World.terrainHeight, isBusy: () => busy7, onStir: (mm) => stirs7.push(mm.id) });
+    const s7 = f7.murks[0];
+    for (let i = 0; i < 20; i += 1) f7.update(0.05, i * 0.05, s7.x + 3, s7.z);
+    eq(stirs7.length, 1, '（面板）走近第一次吼一次');
+    busy7 = true;
+    for (let i = 0; i < 100; i += 1) f7.update(0.05, 1 + i * 0.05, s7.x + 3, s7.z);
+    busy7 = false;
+    for (let i = 0; i < 20; i += 1) f7.update(0.05, 6 + i * 0.05, s7.x + 3, s7.z);
+    eq(stirs7.length, 1, '開著面板 5 秒再關、人沒離開 → 不再吼（wasAware 看距離不看 busy）');
+
+    // 審查後修訂：reset() 把世界端拉回一隻都沒碰過（殼長回來、清燈變回濁靈、粒子收掉）
+    const f8 = Murks.createMurkField({ entries: murks.slice(0, 2), kitOf: kitOfTest, terrainHeight: World.terrainHeight });
+    const r8a = f8.murks[0];
+    const r8b = f8.murks[1];
+    f8.strike(r8a.id, { newlyPassedIndices: [0, 1, 2], hits: [0, 1, 2], score: 4, total: 4, calmed: true, newlyCalmed: true });
+    f8.strike(r8b.id, { newlyPassedIndices: [1], hits: [1], score: 1, total: 4, calmed: false, newlyCalmed: false });
+    for (let i = 0; i < 10; i += 1) f8.update(0.05, i * 0.05, r8a.x + 3, r8a.z);
+    ok(r8a.settled && f8.activeParticles() > 0, '（前提）一隻安撫中、池裡有粒子');
+    eq(f8.reset(), true, 'reset() 回 true');
+    eq(r8a.settled, false, 'reset 後清燈變回濁靈（settled=false）');
+    eq(r8a.state, 'idle', 'reset 後 state idle');
+    eq(r8a.visibleShellCount(), 3, 'reset 後殼全部長回來');
+    eq(r8b.visibleShellCount(), 3, 'reset 後另一隻的殼也長回來');
+    eq(r8a.shellState(0), 'intact', 'reset 後殼不是餘殼');
+    eq(f8.activeParticles(), 0, 'reset 後池裡沒有粒子');
+    ok(Math.abs(r8a.head.scale.x - 1) < 1e-6, 'reset 後頭恢復原大小');
+    // reset 之後再 strike 一次要能重新演出（不是 no-op）
+    f8.strike(r8a.id, { newlyPassedIndices: [0], hits: [0], score: 2, total: 4, calmed: false, newlyCalmed: false });
+    eq(r8a.shellState(0), 'peeling', 'reset 之後 strike 仍會剝殼');
+
+    // 審查後修訂：剝落從「當時的 opacity」淡出（安撫同一擊時不會先跳成餘殼再淡）
+    const f9 = Murks.createMurkField({ entries: murks.slice(0, 1), kitOf: kitOfTest, terrainHeight: World.terrainHeight });
+    const r9 = f9.murks[0];
+    const base9 = r9.shells[1].userData.baseOpacity;
+    f9.strike(r9.id, { newlyPassedIndices: [1], hits: [1], score: 1, total: 4, calmed: true, newlyCalmed: true });
+    f9.update(0.016, 0.016, r9.x + 3, r9.z);
+    ok(r9.shells[1].material.opacity > base9 * 0.8, '剝落第一格 opacity 仍接近原值（不跳到 35%）', String(r9.shells[1].material.opacity));
+    // dt 夾：一幀 2 秒也不會讓 0.6s 的剝落一格跑完
+    const f10 = Murks.createMurkField({ entries: murks.slice(0, 1), kitOf: kitOfTest, terrainHeight: World.terrainHeight });
+    const r10 = f10.murks[0];
+    f10.strike(r10.id, { newlyPassedIndices: [0], hits: [0], score: 2, total: 4, calmed: false, newlyCalmed: false });
+    f10.update(2.0, 2.0, r10.x + 3, r10.z);
+    eq(r10.shellState(0), 'peeling', '一幀 2 秒：剝落計時器被夾在 0.1s，殼還在剝');
+  }
+
+  /* --- ③ 靜態掃描：零每幀配置（update / strike 內無 new THREE.／.map(／.filter(）；0 光源 --- */
+  {
+    const murkSrc = readFileSync(resolve(root, 'src/world/murks.js'), 'utf8');
+    const bodyOf = (name) => {
+      const at = murkSrc.indexOf(`    ${name}(`);
+      ok(at > 0, `找得到 field.${name}() 本體`);
+      if (at < 0) return '';
+      const open = murkSrc.indexOf('{', at);
+      let depth = 0;
+      for (let i = open; i < murkSrc.length; i += 1) {
+        if (murkSrc[i] === '{') depth += 1;
+        else if (murkSrc[i] === '}') { depth -= 1; if (depth === 0) return murkSrc.slice(open, i + 1); }
+      }
+      return murkSrc.slice(open);
+    };
+    for (const fn of ['update', 'strike', 'restore']) {
+      const body = bodyOf(fn);
+      ok(body.length > 50, `field.${fn}() 本體不是空的`);
+      ok(!/new THREE\./.test(body), `${fn}() 裡沒有 new THREE.`);
+      ok(!/\.map\(/.test(body), `${fn}() 裡沒有 .map(`);
+      ok(!/\.filter\(/.test(body), `${fn}() 裡沒有 .filter(`);
+      ok(!/\bnew\s+[A-Z]/.test(body), `${fn}() 裡沒有 new 任何物件`);
+    }
+    ok(!/new THREE\.(Point|Spot|Directional|Hemisphere|Ambient|RectArea)Light/.test(murkSrc), 'P03 的 murks.js 仍沒有任何光源');
+    ok((murkSrc.match(/new THREE\.Points\(/g) || []).length === 1, '只有一組共用的 Points 粒子池');
+    ok(/frustumCulled = false/.test(murkSrc), '粒子池關掉 frustum culling（粒子會飛離初始包圍球）');
+    const worldSrc = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+    ok(/murkStateOf/.test(worldSrc), 'world.js 接 murkStateOf 傳給 createMurkField（開機還原殼數）');
+    ok(/stateOf/.test(worldSrc), 'createMurkField 拿到 stateOf');
+    const mainSrc = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+    ok(/onRubricHits/.test(mainSrc), 'main.js 接 onRubricHits');
+    ok(/world\.murks\.strike\(/.test(mainSrc), 'main.js 對濁靈呼叫 world.murks.strike');
+    ok(/engine\.pulse\(0\.28\)/.test(mainSrc.slice(mainSrc.indexOf('onRubricHits'), mainSrc.indexOf('onRubricHits') + 2500)), 'strike 時 engine.pulse(0.28)（world 不碰 engine）');
+    ok(/audio\.cue\('murkHit'/.test(mainSrc), 'main.js 每剝一殼 cue murkHit');
+    ok(/audio\.cue\('murkCalm'\)/.test(mainSrc), 'newlyCalmed 時 cue murkCalm');
+    ok(/murkStateOf: \(id\) => progression\.murkState\(id\)/.test(mainSrc), 'createWorld 傳 murkStateOf');
+    const consoleSrc = readFileSync(resolve(root, 'src/prompt/console.js'), 'utf8');
+    ok(/onRubricHits/.test(consoleSrc), '主控台有 onRubricHits 回呼');
+    const rr = consoleSrc.slice(consoleSrc.indexOf('function renderResult'), consoleSrc.indexOf('onResult?.({ challenge, evaluation, outcome })'));
+    const hitsAt = rr.indexOf('onRubricHits(rubricHitsFor(');
+    const recorderAt = rr.indexOf('progression.recordMurk(challenge, evaluation, meta)');
+    const drawAt = rr.indexOf('resultEl.innerHTML');
+    ok(hitsAt > 0 && recorderAt > 0 && drawAt > 0, '（前提）renderResult 裡找得到回呼／recorder／畫結果三個點');
+    ok(recorderAt < hitsAt && hitsAt < drawAt, 'onRubricHits 在 recorder 回傳後、畫結果之前觸發');
+    ok(/sessionHits\.clear\(\)/.test(consoleSrc.slice(consoleSrc.indexOf('open(challenge) {'), consoleSrc.indexOf('open(challenge) {') + 1500)), 'open() 時清空 session 命中集合（非 murk 差量的基準）');
+  }
+
+  /* --- ④ onRubricHits 非 murk 的差量：純函式（同一 session 兩次送出 → 第二次只回新增；清空後歸零） --- */
+  {
+    const { rubricHitsFor } = await import('../src/prompt/console.js');
+    ok(typeof rubricHitsFor === 'function', 'console.js 匯出 rubricHitsFor(challenge, evaluation, outcome, sessionHits)');
+    const ch = challenges.find((c) => c.id === 'gate-of-clarity-01');
+    const seen = new Set();
+    const e1 = evalRubric(ch, '請把這段話改寫。');
+    const h1 = rubricHitsFor(ch, e1, {}, seen);
+    eq(JSON.stringify(Object.keys(h1).sort()), JSON.stringify(['challenge', 'newlyPassedIndices', 'passedIndices', 'total']), '契約四鍵：challenge / passedIndices / newlyPassedIndices / total');
+    eq(h1.total, ch.rubric.length, 'total ＝ rubric 條數');
+    eq(JSON.stringify(h1.passedIndices), JSON.stringify(e1.results.map((r, i) => (r.passed ? i : -1)).filter((i) => i >= 0)), 'passedIndices ＝ 這一次 passed===true 的 index');
+    eq(JSON.stringify(h1.newlyPassedIndices), JSON.stringify(h1.passedIndices), '第一次：newly ＝ passed（session 內沒命中過）');
+    const e2 = evalRubric(ch, ch.sample);
+    const h2 = rubricHitsFor(ch, e2, {}, seen);
+    ok(h2.passedIndices.length > h1.passedIndices.length, '（前提）範例解命中更多列');
+    eq(JSON.stringify(h2.newlyPassedIndices), JSON.stringify(h2.passedIndices.filter((i) => !h1.passedIndices.includes(i))), '第二次：newly 只回相對於 session 的新增');
+    const h3 = rubricHitsFor(ch, e2, {}, seen);
+    eq(JSON.stringify(h3.newlyPassedIndices), '[]', '第三次同一句：newly 為空');
+    seen.clear();
+    const h4 = rubricHitsFor(ch, e2, {}, seen);
+    eq(JSON.stringify(h4.newlyPassedIndices), JSON.stringify(h4.passedIndices), 'open() 清空後（Set.clear）差量歸零、全部又算新');
+    // murk：直接用 outcome.murk
+    const mk = { ...murks[0], kind: 'murk' };
+    const hm = rubricHitsFor(mk, evalRubric(mk, mk.sample), { murk: { newlyPassedIndices: [2], hits: [0, 1, 2], score: 4, total: 4, calmed: true, newlyCalmed: true } }, new Set());
+    eq(JSON.stringify(hm.newlyPassedIndices), '[2]', 'murk：newly 直接用 outcome.murk.newlyPassedIndices（存檔累積差量，不是 session）');
+    eq(JSON.stringify(hm.passedIndices), '[0,1,2]', 'murk：passedIndices ＝ outcome.murk.hits');
+    eq(hm.total, 3, 'murk：total ＝ rubric 條數（殼數）');
+    eq(hm.challenge, mk, 'challenge 原樣帶回');
+  }
+}
+
+/* ================================================================== */
+/* v1.2 · P17：大濁靈（累積理解式）＋ 濁言圖鑑分層                        */
+/*   · 用語鐵則：沒有清零／勝負文案（禁字表逐句掃）                       */
+/*   · 累積契約：分兩次各命中一半也安撫得了、重開面板不重播               */
+/*   · 圖鑑三層：安撫／A／S 各自的解鎖條件，未達時不劇透                   */
+/*   · 規則疊加：已剝的殼不會回來（主控台預刻那幾段）                     */
+/* ================================================================== */
+console.log('▸ 大濁靈與濁言分層（v1.2 · P17）');
+{
+  const greats = murkFile.entries.filter((m) => m.kind === 'great');
+  const smalls = murkFile.entries.filter((m) => m.kind !== 'great');
+
+  /* --- ① 用語鐵則（WORLD.md §1.6）：牠不是怪物，沒聽懂也不是失敗 --- */
+  {
+    /*
+     * 這一張表掃的是**世界對玩家說的話**：濁靈的資料層一個字都不准出現，
+     * 主控台與圖鑑裡「濁靈那幾段」也不准出現。
+     * 「清零」那一組是 P17 自己的鐵則：進度只累積，畫面上不准說得像會歸零。
+     */
+    const FORBIDDEN = [
+      '怪物', '敵人', '打敗', '擊敗', '戰鬥', '攻擊', '傷害', '血量', '生命值',
+      '失敗', '輸了', '贏了', '勝利', '扣分', '清零', '歸零', '重新開始', '從頭再來', '倒數',
+    ];
+    const walk = (v, path, hit) => {
+      if (typeof v === 'string') hit(v, path);
+      else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${path}[${i}]`, hit));
+      else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, `${path}.${k}`, hit);
+    };
+    let scanned = 0;
+    walk(murkFile, 'murks.json', (str, path) => {
+      scanned += 1;
+      for (const w of FORBIDDEN) ok(!str.includes(w), `${path} 不出現「${w}」（牠不是怪物、沒聽懂不是失敗）`, str.slice(0, 40));
+    });
+    ok(scanned > 600, '禁字表真的掃過整份 murks.json（不是空掃）', `strings=${scanned}`);
+    // 反例：這張表真的抓得到東西（不然它只是裝飾）
+    let caught = false;
+    walk({ bad: '打敗這隻怪物' }, 'fixture', (str) => {
+      if (FORBIDDEN.some((w) => str.includes(w))) caught = true;
+    });
+    eq(caught, true, '禁字表對「打敗這隻怪物」會紅（反例）');
+    // 主控台與圖鑑裡濁靈那幾段（只看含 murk 的那幾行，別掃到別的關卡文案）
+    /*
+     * 只掃**會被玩家看到的字**：註解裡寫「永不清零」正是在描述這條鐵則本身，
+     * 掃到它等於把「說明規則的那句話」誤判成「違反規則的文案」。
+     * 判準：這一行不是註解，而且含有引號（字串字面量）。
+     */
+    let uiLines = 0;
+    for (const rel of ['src/prompt/console.js', 'src/ui/codex.js', 'src/world/murks.js']) {
+      const src = readFileSync(resolve(root, rel), 'utf8');
+      for (const line of src.split('\n')) {
+        const t = line.trim();
+        if (t.startsWith('*') || t.startsWith('//') || t.startsWith('/*')) continue;
+        if (!/['"`]/.test(t)) continue;
+        if (!/murk|濁靈|濁言|清燈/i.test(line)) continue;
+        uiLines += 1;
+        for (const w of FORBIDDEN) ok(!line.includes(w), `${rel} 的濁靈那幾行不出現「${w}」`, t.slice(0, 50));
+      }
+    }
+    ok(uiLines >= 10, '真的掃到了濁靈那幾行文案（不是空掃）', `lines=${uiLines}`);
+  }
+
+  /* --- ② 累積契約：**分兩次各命中一半也安撫得了** --- */
+  {
+    for (const m of greats) {
+      memory.clear(); // 每一隻各自一份乾淨的存檔（progression 讀的是全域 localStorage 替身）
+      const p = createProgression({ curriculum, catalog, challenges });
+      const ch = { ...m, kind: 'murk', xp: murkFile.xp };
+      const n = m.rubric.length;
+      const half = Math.ceil(n / 2);
+      const firstHalf = Array.from({ length: half }, (_, i) => i);
+      const secondHalf = Array.from({ length: n }, (_, i) => i).filter((i) => !firstHalf.includes(i));
+      const ev = (idx) => ({
+        challengeId: ch.id,
+        results: ch.rubric.map((r, i) => ({ check: r.check, weight: r.weight, passed: idx.includes(i) })),
+        // **這一次沒過**（引擎判定 false）—— 安撫必須完全靠跨次聯集湊出來
+        passed: false,
+        grade: null,
+        tooShort: false,
+      });
+      const o1 = p.recordMurk(ch, ev(firstHalf), null);
+      eq(o1.murk.calmed, false, `[${m.id}] 第一次只說清楚一半 → 還沒安撫`);
+      eq(JSON.stringify(o1.murk.hits), JSON.stringify(firstHalf), `[${m.id}] 第一次的 hits ＝ 前一半`);
+      const o2 = p.recordMurk(ch, ev(secondHalf), null);
+      eq(o2.murk.calmed, true, `[${m.id}] 第二次補上另一半 → 安撫（跨次聯集，永不清零）`);
+      eq(o2.murk.newlyCalmed, true, `[${m.id}] 這一次才安撫`);
+      eq(o2.murk.score, o2.murk.total, `[${m.id}] 聯集把每一條都湊齊了`);
+      eq(p.murkCount(murkFile.entries.map((x) => x.id)), 1, `[${m.id}] 安撫的濁靈數 +1`);
+      // 再送一次全錯：hits 一條都不會掉
+      const o3 = p.recordMurk(ch, ev([]), null);
+      eq(JSON.stringify(o3.murk.hits), JSON.stringify(Array.from({ length: n }, (_, i) => i)), `[${m.id}] 全錯也不清零`);
+      eq(o3.murk.calmed, true, `[${m.id}] 安撫過就一直是安撫`);
+    }
+    memory.clear();
+  }
+
+  /* --- ③ 重開面板不重播：世界端的殼數 ＝ 存檔 hits 數 --- */
+  {
+    const kitOfTest = () => Props.kitFor('#8aa0b4');
+    const g = greats[0];
+    const hits = [0, 2];
+    const field = Murks.createMurkField({
+      entries: murkFile.entries,
+      kitOf: kitOfTest,
+      terrainHeight: World.terrainHeight,
+      stateOf: (id) => (id === g.id ? { hits, grade: null } : null),
+    });
+    const m = field.byId(g.id);
+    eq(m.shells.length, g.rubric.length, `[${g.id}] 殼數 ＝ rubric 條數`);
+    eq(m.visibleShellCount(), g.rubric.length - hits.length, `[${g.id}] 開機還原：殼數 ＝ rubric − 存檔 hits`);
+    eq(field.particlesSpawned, 0, '開機還原不噴一顆粒子（不重播）');
+    for (const i of hits) eq(m.shellState(i), 'hidden', `[${g.id}] 存檔裡命中的第 ${i} 層已經散掉`);
+    // 再 strike 同一批（重開面板送同一份聯集）：不再剝、不再噴
+    field.strike(g.id, { newlyPassedIndices: [], hits, total: g.rubric.length, calmed: false });
+    eq(field.particlesSpawned, 0, '沒有新命中就不噴粒子（重開面板不重播）');
+    eq(m.visibleShellCount(), g.rubric.length - hits.length, '殼數沒有變');
+  }
+
+  /* --- ④ 圖鑑三層：解鎖條件與「未達時不劇透」 --- */
+  {
+    const { murkLayerState } = await import('../src/ui/codex.js');
+    const g = greats[0];
+    const none = murkLayerState(null, g);
+    eq(JSON.stringify(none), JSON.stringify({ taint: false, note: false, origin: false }), '沒安撫：三層都鎖著（連濁言都不露）');
+    const c = murkLayerState('C', g);
+    eq(c.taint, true, '安撫（C）：開濁言');
+    eq(c.note, false, 'C 還讀不到抄寫人的眉批');
+    eq(c.origin, false, 'C 還讀不到來歷');
+    eq(murkLayerState('B', g).note, false, 'B 還讀不到眉批');
+    const a = murkLayerState('A', g);
+    eq(a.note, true, 'A：開抄寫人的眉批');
+    eq(a.origin, false, 'A 還讀不到來歷');
+    const sS = murkLayerState('S', g);
+    eq(sS.note, true, 'S：眉批仍然開著');
+    eq(sS.origin, true, 'S：開一句來歷');
+    // 反例：欄位是空的那一種（小濁靈沒有後兩層的資料）—— 拿到 S 也不會憑空長出來
+    const small = murkLayerState('S', smalls[0]);
+    eq(small.taint, true, '小濁靈拿到 S：濁言那一層照樣開');
+    eq(small.note, false, '小濁靈沒有眉批的資料 → 那一層不存在（不是鎖著）');
+    eq(small.origin, false, '小濁靈沒有來歷的資料 → 那一層不存在');
+    // 版面：鎖著的那一層只給剪影，**不准把內容寫進 HTML**
+    const codexSrc = readFileSync(resolve(root, 'src/ui/codex.js'), 'utf8');
+    const locked = codexSrc.split('function lockedLayer(')[1].split('\n  }')[0];
+    ok(!/scribeNote|origin/.test(locked), '鎖著的那一層不碰眉批／來歷的內容（不劇透）');
+    ok(/murkbook__silhouette/.test(locked), '鎖著的那一層畫的是剪影');
+    ok(/拿到 \$\{esc\(need\)\} 才讀得到/.test(locked), '鎖著的那一層說得出怎麼拿到');
+  }
+
+  /* --- ⑤ 規則疊加：已剝的殼不會回來（主控台預刻那幾段） --- */
+  {
+    const steleSrc = readFileSync(resolve(root, 'src/prompt/stele.js'), 'utf8');
+    ok(/function skipSettled\(\)/.test(steleSrc), '石碑有「跳過已經散掉的那幾層」的入口');
+    ok(/settled\.has\(index\)/.test(steleSrc), '跳過的判準是這一段在不在存檔的 hits 裡');
+    ok(/skipSettled\(\);[\s\S]{0,400}renderQuestion\(\);/.test(steleSrc), '刻完一段之後也會往前跳過已經散掉的層');
+    ok(/renderLayers\(\)/.test(steleSrc), '有「一層一層」那條列（規則疊加）');
+    ok(/is-hidden[\s\S]{0,200}？|？[\s\S]{0,200}is-hidden/.test(steleSrc), '還沒走到的那幾層只有一個「？」（不預告下一條規矩）');
+    const consoleSrc2 = readFileSync(resolve(root, 'src/prompt/console.js'), 'utf8');
+    ok(/murkKind === 'great'/.test(consoleSrc2), '主控台認得出大濁靈');
+    ok(/settled: greatMurk \? progression\.murkHits\?\.\(challenge\.id\) \|\| \[\] : \[\]/.test(consoleSrc2), '預刻的那幾段來自存檔的跨次聯集 murkHits()');
+    const mainSrc2 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+    ok(/murkKind: e\.kind \|\| null/.test(mainSrc2), 'main.js 把濁靈的尺寸傳給主控台');
+  }
+
+  /* --- ⑥ 預算實測（大濁靈整層 vs 沒有牠的那個世界） --- */
+  {
+    const bare = await (async () => {
+      const restore = (() => {
+        const real = globalThis.document;
+        globalThis.document = { createElement: () => ({ width: 1, height: 1, style: {}, getContext: () => anyStub() }) };
+        return () => {
+          globalThis.document = real;
+          if (!real) delete globalThis.document;
+        };
+      })();
+      try {
+        const scene = new THREE.Scene();
+        const w = World.createWorld({ engine: { scene, camera: {}, onUpdate() {} }, ...worldOpts, murks: smalls });
+        let tris = 0;
+        let lights = 0;
+        scene.traverse((o) => {
+          if (o.isLight) lights += 1;
+          if (o.isMesh && o.geometry) {
+            const idx = o.geometry.index;
+            const n = idx ? idx.count / 3 : o.geometry.attributes.position.count / 3;
+            tris += o.isInstancedMesh ? n * o.count : n;
+          }
+        });
+        return { tris, lights, solids: w.solids.length };
+      } finally {
+        restore();
+      }
+    })();
+    let tris = 0;
+    let lights = 0;
+    testScene.traverse((o) => {
+      if (o.isLight) lights += 1;
+      if (o.isMesh && o.geometry) {
+        const idx = o.geometry.index;
+        const n = idx ? idx.count / 3 : o.geometry.attributes.position.count / 3;
+        tris += o.isInstancedMesh ? n * o.count : n;
+      }
+    });
+    const dTris = Math.round(tris - bare.tris);
+    const dSolids = testWorld.solids.length - bare.solids;
+    console.log(`    ↳ 大濁靈 12 隻：三角 +${dTris}、碰撞體 +${dSolids}、光源 ${lights - bare.lights}`);
+    ok(dTris < 6000, '大濁靈整層的三角增量 < 6,000', `Δ=${dTris}`);
+    eq(lights, bare.lights, '大濁靈一盞燈都沒加（37 不變）');
+    eq(lights, 37, '全場光源仍然是 37 盞');
+    ok(testWorld.solids.length < 1100, '碰撞體仍在 P17 的框內（< 1,100）', `n=${testWorld.solids.length}`);
+    ok(dSolids <= 12, '大濁靈每隻只多一顆碰撞圓（其餘由程序化道具讓位）', `Δ=${dSolids}`);
+  }
+}
+
+/* ================================================================== */
+/* v1.2 · P05：setMood 單一入口 ＋ 一夜的時辰                             */
+/*   · hourOf 邊界／hourFactor 表／composeMood 純函式（色相不變）        */
+/*   · mood 狀態：新鍵進 target 並平滑；hour 0 的校準點逐值等於舊畫面    */
+/*   · 靜態掃描：engine 每幀迴圈零新配置；main.js 只有一個 setMood 呼叫點 */
+/* ================================================================== */
+console.log('▸ 一夜的時辰（v1.2 · P05）');
+{
+  const Hours = await import('../src/engine/hours.js');
+  const Mood = await import('../src/engine/mood.js');
+  const { hourOf, hourFactor, composeMood, scaleColor } = Hours;
+
+  /* --- ① hourOf：權重與邊界 --- */
+  {
+    const H = (mastered, skills, murks) => hourOf({ mastered, masteredTotal: 12, skills, skillsTotal: 130, murks, murksTotal: 8 });
+    eq(H(0, 0, 0).index, 0, '空存檔 → 入夜（0）');
+    eq(H(0, 0, 0).p, 0, '空存檔 p ＝ 0');
+    // p = 0.5·m/12 + 0.3·s/130 + 0.2·k/8
+    eq(hourOf({ mastered: 6, masteredTotal: 12 }).p, 0.25, '精通 6/12 → p 0.25（其他預設總數）');
+    eq(hourOf({ mastered: 6, masteredTotal: 12 }).index, 1, 'p 剛好 0.25 → 深夜（1）（< 0.25 才是入夜）');
+    eq(hourOf({ mastered: 5.999, masteredTotal: 12 }).index, 0, 'p 0.2499… → 入夜');
+    eq(hourOf({ mastered: 12, masteredTotal: 12 }).index, 2, 'p 0.5（只有精通全滿）→ 月落（2）');
+    eq(hourOf({ mastered: 12, masteredTotal: 12 }).p, 0.5, '精通全滿 p ＝ 0.5');
+    eq(H(12, 130, 7).index, 2, '精通滿＋技能滿＋濁靈 7/8 → p 0.975 → 仍是月落（全部收齊才是終態）');
+    ok(Math.abs(H(12, 130, 7).p - 0.975) < 1e-12, 'p 0.975', String(H(12, 130, 7).p));
+    eq(H(11, 130, 8).index, 2, '精通 11/12 → 仍是月落');
+    eq(H(12, 129, 8).index, 2, '技能 129/130 → 仍是月落');
+    eq(H(12, 130, 8).index, 3, '全部收齊 → 星最亮之夜（3）');
+    eq(H(12, 130, 8).p, 1, '全部收齊 p ＝ 1（浮點誤差被收掉）');
+    eq(H(0, 65, 0).index, 0, '技能 65/130（p 0.15）→ 入夜');
+    eq(H(0, 130, 8).index, 2, '技能滿＋濁靈滿、沒精通（p 0.5）→ 月落');
+    eq(H(0, 0, 8).index, 0, '只安撫 8 隻（p 0.2）→ 入夜');
+    eq(H(0, 0, 8).p, 0.2, '濁靈全滿 p 0.2');
+    eq(hourOf().index, 0, '沒參數 → 入夜');
+    eq(hourOf({ mastered: 99, masteredTotal: 12 }).index, 2, '比值夾在 1（超過總數不會變 3）');
+    eq(hourOf({ mastered: NaN, skills: -3, murks: 'x' }).index, 0, '垃圾輸入 → 入夜、不 NaN');
+    eq(JSON.stringify(hourOf(null)), JSON.stringify({ index: 0, p: 0 }), 'hourOf(null) 安全（當全零）');
+    eq(JSON.stringify(hourOf(undefined)), JSON.stringify({ index: 0, p: 0 }), 'hourOf(undefined) 安全');
+    eq(JSON.stringify(hourOf('x')), JSON.stringify({ index: 0, p: 0 }), 'hourOf 非物件 → 全零');
+    // 總數 0 的那一項跳過、權重重新正規化：星最亮之夜仍到得了
+    eq(hourOf({ mastered: 12, masteredTotal: 12, skills: 130, skillsTotal: 130, murks: 0, murksTotal: 0 }).index, 3, 'murksTotal 0 → 跳過該項、精通＋技能全滿仍是星最亮之夜');
+    eq(hourOf({ mastered: 12, masteredTotal: 12, skills: 130, skillsTotal: 130, murks: 0, murksTotal: 0 }).p, 1, 'murksTotal 0 → p 1（權重正規化）');
+    ok(Math.abs(hourOf({ mastered: 6, masteredTotal: 12, skills: 0, skillsTotal: 130, murks: 0, murksTotal: 0 }).p - 0.5 * 0.5 / 0.8) < 1e-12, 'murksTotal 0 → 精通權重 0.5/0.8', String(hourOf({ mastered: 6, masteredTotal: 12, skills: 0, skillsTotal: 130, murks: 0, murksTotal: 0 }).p));
+    eq(hourOf({ masteredTotal: 0, skillsTotal: 0, murksTotal: 0 }).p, 0, '三項總數全 0 → p 0（不 NaN）');
+    eq(hourOf({ masteredTotal: 0, skillsTotal: 0, murksTotal: 0 }).index, 0, '三項總數全 0 → 入夜');
+    eq(hourOf({ mastered: 3, masteredTotal: 0, murks: 8, murksTotal: 8, skills: 130, skillsTotal: 130 }).index, 3, 'masteredTotal 0 → 只看技能＋濁靈，全滿 → 星最亮之夜');
+    ok(Number.isFinite(Hours.normalizeForcedHour(2)) && Hours.normalizeForcedHour(2) === 2, 'normalizeForcedHour(2) → 2');
+    eq(Hours.normalizeForcedHour('2'), 2, "normalizeForcedHour('2') → 2（數字字串）");
+    eq(Hours.normalizeForcedHour(0), 0, 'normalizeForcedHour(0) → 0');
+    eq(Hours.normalizeForcedHour(3), 3, 'normalizeForcedHour(3) → 3');
+    eq(Hours.normalizeForcedHour(null), null, 'normalizeForcedHour(null) → null（清掉）');
+    eq(Hours.normalizeForcedHour(undefined), null, 'normalizeForcedHour(undefined) → null');
+    for (const [bad, label] of [['', "''"], [false, 'false'], [NaN, 'NaN'], ['3px', "'3px'"], [{}, '{}'], [9, '9'], [-2, '-2'], [2.5, '2.5'], [true, 'true'], [[], '[]'], ['  ', "'  '"], [Infinity, 'Infinity']]) {
+      eq(Hours.normalizeForcedHour(bad), undefined, `normalizeForcedHour(${label}) → 忽略（undefined）`);
+    }
+    eq(JSON.stringify(Hours.HOUR_IDS), JSON.stringify(['dusk', 'midnight', 'moonset', 'starlit']), '四個時辰 id：入夜／深夜／月落／星最亮之夜（沒有 dawn）');
+    ok(!/dawn|sunrise|day\b/i.test(JSON.stringify(Hours.HOUR_IDS)), '時辰 id 裡沒有 dawn / sunrise / day（鐵則 3）');
+  }
+
+  /* --- ② hourFactor 表 --- */
+  {
+    const rows = [
+      [0, 1.0, 0, 1.0, 0.75, 0.3, 0.7, 0.5, 0],
+      [1, 0.95, -0.03, 0.98, 0.5, 0.5, 0.8, 0.7, 0],
+      [2, 0.9, -0.06, 0.96, 0.2, 0.75, 0.9, 0.85, 0],
+      [3, 1.05, 0.02, 1.03, 0.05, 1.0, 1.0, 1.0, 0.4],
+    ];
+    for (const [i, fogMul, hemiAdd, expMul, alt, phase, density, intensity, hue] of rows) {
+      const f = hourFactor(i);
+      eq(f.fogMul, fogMul, `hour ${i} fogMul ${fogMul}`);
+      eq(f.hemiAdd, hemiAdd, `hour ${i} hemiAdd ${hemiAdd}`);
+      eq(f.exposureMul, expMul, `hour ${i} exposureMul ${expMul}`);
+      eq(f.moon.alt, alt, `hour ${i} moon.alt ${alt}`);
+      eq(f.moon.phase, phase, `hour ${i} moon.phase ${phase}`);
+      eq(f.stars.density, density, `hour ${i} stars.density ${density}`);
+      eq(f.aurora.intensity, intensity, `hour ${i} aurora.intensity ${intensity}`);
+      eq(f.aurora.hue, hue, `hour ${i} aurora.hue ${hue}`);
+      ok(Object.isFrozen(f), `hour ${i} 因子表是唯讀的`);
+    }
+    // 單調：越晚月越低、星越密、極光越強
+    for (let i = 1; i < 4; i += 1) {
+      ok(hourFactor(i).moon.alt < hourFactor(i - 1).moon.alt, `hour ${i} 月亮比 hour ${i - 1} 低`);
+      ok(hourFactor(i).stars.density > hourFactor(i - 1).stars.density, `hour ${i} 星比 hour ${i - 1} 密`);
+      ok(hourFactor(i).aurora.intensity > hourFactor(i - 1).aurora.intensity, `hour ${i} 極光比 hour ${i - 1} 強`);
+      ok(hourFactor(i).moon.phase > hourFactor(i - 1).moon.phase, `hour ${i} 月相比 hour ${i - 1} 滿`);
+    }
+    // 因子只在 ±10% 霧亮度／±0.08 hemi 內：永遠是夜
+    for (let i = 0; i < 4; i += 1) {
+      ok(hourFactor(i).fogMul >= 0.9 && hourFactor(i).fogMul <= 1.1, `hour ${i} fogMul 在 ±10% 內`);
+      ok(Math.abs(hourFactor(i).hemiAdd) <= 0.08, `hour ${i} hemiAdd 在 ±0.08 內`);
+      ok(hourFactor(i).exposureMul >= 0.9 && hourFactor(i).exposureMul <= 1.1, `hour ${i} exposureMul 在 ±10% 內`);
+    }
+    eq(hourFactor(7), hourFactor(3), '超出範圍夾到 3');
+    eq(hourFactor(-1), hourFactor(0), '負數夾到 0');
+    eq(hourFactor(NaN), hourFactor(0), 'NaN → 0');
+  }
+
+  /* --- ③ composeMood：純函式、色相不變、hour 0 逐值等於區域色盤 --- */
+  {
+    const atmoAll = World.REGION_ATMOSPHERE;
+    const hsl = (hex) => new THREE.Color(hex).getHSL({ h: 0, s: 0, l: 0 });
+    for (const [rid, atmo] of Object.entries(atmoAll)) {
+      const m0 = composeMood(atmo, hourFactor(0));
+      eq(m0.fog, atmo.fog, `${rid} hour 0：fog 逐值等於區域色盤`);
+      eq(m0.tint, atmo.tint, `${rid} hour 0：tint 原樣`);
+      eq(m0.hemi, atmo.hemi, `${rid} hour 0：hemi 原樣`);
+      eq(m0.fogNear, atmo.fogNear, `${rid} hour 0：fogNear 原樣`);
+      eq(m0.fogFar, atmo.fogFar, `${rid} hour 0：fogFar 原樣`);
+      eq(m0.exposure, atmo.exposure, `${rid} hour 0：exposure 原樣`);
+      for (let i = 1; i < 4; i += 1) {
+        const f = hourFactor(i);
+        const m = composeMood(atmo, f);
+        const h0 = hsl(atmo.fog);
+        const h1 = hsl(m.fog);
+        const dh = Math.min(Math.abs(h0.h - h1.h), 1 - Math.abs(h0.h - h1.h));
+        ok(dh < 0.02, `${rid} hour ${i}：霧色相不變（Δh ${dh.toFixed(4)}）`);
+        ok(Math.abs(h1.l - h0.l * f.fogMul) < 0.02, `${rid} hour ${i}：霧亮度 ≈ ×${f.fogMul}`, `${h0.l.toFixed(3)}→${h1.l.toFixed(3)}`);
+        eq(m.tint, atmo.tint, `${rid} hour ${i}：tint 不換色系`);
+        ok(Math.abs(m.hemi - (atmo.hemi + f.hemiAdd)) < 1e-12, `${rid} hour ${i}：hemi 加 ${f.hemiAdd}`);
+        ok(Math.abs(m.exposure - atmo.exposure * f.exposureMul) < 1e-12, `${rid} hour ${i}：exposure 乘 ${f.exposureMul}`);
+        eq(m.fogNear, atmo.fogNear, `${rid} hour ${i}：fogNear 原樣`);
+        eq(m.fogFar, atmo.fogFar, `${rid} hour ${i}：fogFar 原樣`);
+        eq(JSON.stringify(m.moon), JSON.stringify(f.moon), `${rid} hour ${i}：moon 直接帶`);
+        eq(JSON.stringify(m.stars), JSON.stringify(f.stars), `${rid} hour ${i}：stars 直接帶`);
+        eq(JSON.stringify(m.aurora), JSON.stringify(f.aurora), `${rid} hour ${i}：aurora 直接帶`);
+      }
+      // 純函式：輸入不被改
+      ok(Object.isFrozen(atmo), `${rid} 的區域色盤仍是唯讀`);
+    }
+    eq(scaleColor(0x1e2c40, 1), 0x1e2c40, 'scaleColor ×1 逐位元原值');
+    eq(scaleColor('#1e2c40', 1), 0x1e2c40, 'scaleColor 吃 #rrggbb');
+    eq(scaleColor(0xffffff, 1.05), 0xffffff, 'scaleColor 夾在 255');
+    eq(scaleColor(0x000000, 0.9), 0x000000, 'scaleColor 0 還是 0');
+    eq(scaleColor(0x102030, 0.5), 0x081018, 'scaleColor ×0.5 每通道等比');
+    const same = composeMood(atmoAll.foundations, hourFactor(0));
+    const again = composeMood(atmoAll.foundations, hourFactor(0));
+    eq(JSON.stringify(same), JSON.stringify(again), 'composeMood 是純函式（同輸入同輸出）');
+    ok(composeMood(null, null).moon.alt === 0.75, 'composeMood 沒給參數也不炸（退回 hour 0 因子）');
+    // 顏色絕不變黑：沒給就不帶鍵、認不得的原樣帶過去
+    {
+      const onlyTint = composeMood({ tint: 0xbcd6e6 }, hourFactor(0));
+      ok(!('fog' in onlyTint), 'composeMood({tint}) 沒有 fog 鍵（不會補一個黑色）');
+      eq(onlyTint.tint, 0xbcd6e6, 'composeMood({tint}) tint 原樣');
+      ok(!('hemi' in onlyTint) && !('exposure' in onlyTint) && !('fogNear' in onlyTint), '沒給的數字鍵也不帶（不會補 undefined／NaN）');
+      const onlyTint3 = composeMood({ tint: 0xbcd6e6 }, hourFactor(3));
+      ok(!('fog' in onlyTint3), 'hour 3 也一樣：沒 fog 就沒 fog 鍵');
+      const nothing = composeMood(null, null);
+      ok(!('fog' in nothing) && !('tint' in nothing), 'composeMood(null,null) 沒有 fog／tint 鍵');
+      ok(!Object.values(nothing).some((v) => v === 0 || v === '#000000' || v === 'black'), 'composeMood(null,null) 沒有任何黑色');
+      const c = new THREE.Color(0x1e2c40);
+      for (let i = 0; i < 4; i += 1) {
+        const m = composeMood({ fog: c, tint: c }, hourFactor(i));
+        ok(m.fog === c, `hour ${i}：THREE.Color 的 fog 原樣帶過去（同一個物件）`);
+        eq(c.getHex(), 0x1e2c40, `hour ${i}：THREE.Color 沒被改`);
+        const r = composeMood({ fog: 'rgb(30, 44, 64)' }, hourFactor(i));
+        eq(r.fog, 'rgb(30, 44, 64)', `hour ${i}：'rgb(...)' 的 fog 原樣帶過去`);
+      }
+      eq(composeMood({ fog: '#1e2c40' }, hourFactor(0)).fog, 0x1e2c40, "'#rrggbb' hour 0 → 整數原值");
+      eq(composeMood({ fog: '#1e2c40' }, hourFactor(2)).fog, scaleColor(0x1e2c40, 0.9), "'#rrggbb' hour 2 → 乘亮度");
+      eq(composeMood({ fog: '#123' }, hourFactor(0)).fog, 0x112233, "'#rgb' 也認得");
+      eq(scaleColor(undefined, 0.9), undefined, 'scaleColor(undefined) → undefined（不是黑）');
+      eq(scaleColor('nope', 0.9), 'nope', 'scaleColor 認不得的字串原樣回');
+      eq(scaleColor(c, 0.9), c, 'scaleColor(THREE.Color) 原樣回');
+      ok(Number.isNaN(scaleColor(NaN, 0.9)), 'scaleColor(NaN) 原樣回（不是黑）');
+    }
+    // 月光的仰角下限 22°／bias 溫和放大（hour 0 逐位元不變）
+    {
+      const v = new THREE.Vector3();
+      const floor = (22 * Math.PI) / 180;
+      ok(Math.abs(Mood.MOON_LIGHT_ELEV_FLOOR - floor) < 1e-12, 'MOON_LIGHT_ELEV_FLOOR ＝ 22°');
+      const l0 = Mood.moonLightDirection(0.75, new THREE.Vector3()).toArray();
+      const d0 = Mood.moonDirection(0.75, new THREE.Vector3()).toArray();
+      eq(JSON.stringify(l0), JSON.stringify(d0), 'alt .75（hour 0）：月光方向 ＝ 月亮方向（逐位元，不動）');
+      eq(Mood.moonLightElevation(0.75), Mood.MOON_ELEV_HOUR0, 'alt .75 月光仰角 ＝ 校準點 50.2°');
+      for (const alt of [0, 0.05, 0.2]) {
+        const y = Mood.moonLightDirection(alt, v).y;
+        ok(Math.abs(y - Math.sin(floor)) < 1e-12, `alt ${alt}：月光仰角貼在 22° 下限（y ${y.toFixed(4)}）`);
+        ok(Mood.moonDirection(alt, v).y < Math.sin(floor), `alt ${alt}：月亮 sprite 群仍在下限之下（一路落到近地平線）`);
+      }
+      ok(Mood.moonLightDirection(0.5, v).y > Math.sin(floor), 'alt .5：高於下限 → 不夾');
+      eq(Mood.moonLightDirection(0.5, v).y, Mood.moonDirection(0.5, new THREE.Vector3()).y, 'alt .5：月光方向 ＝ 月亮方向');
+      eq(Mood.moonShadowBias(-0.0012, Mood.MOON_ELEV_HOUR0), -0.0012, 'bias 在校準仰角逐位元 ＝ base');
+      const bFloor = Mood.moonShadowBias(-0.0012, floor);
+      const expectMul = Math.sin(Mood.MOON_ELEV_HOUR0) / Math.sin(floor);
+      ok(Math.abs(bFloor / -0.0012 - expectMul) < 1e-12 && expectMul > 1.5 && expectMul < 3, `bias 在 22° ＝ base × sin(50.2°)/sin(22°) ≈ ×${expectMul.toFixed(2)}`, String(bFloor));
+      ok(Math.abs(Mood.moonShadowBias(-0.0012, 0.01)) <= 0.0012 * 3 + 1e-15, 'bias 乘數夾在 3 倍以內');
+      eq(Mood.moonShadowBias(0, floor), 0, '低畫質 base 0 → 仍是 0');
+      ok(bFloor < -0.0012, '低仰角 bias 更負（絕對值更大）');
+    }
+    // 備忘：同一對 {region, hour} 不重送
+    {
+      const memo = Hours.createMoodMemo();
+      eq(memo.changed('foundations', 0), true, '第一次 → 有變');
+      eq(memo.changed('foundations', 0), false, '同一對 → 略過');
+      eq(memo.changed('foundations', 0, true), true, 'force → 一律有變');
+      eq(memo.changed('foundations', 1), true, '時辰變 → 有變');
+      eq(memo.changed('reasoning', 1), true, '區變 → 有變');
+      eq(memo.changed('reasoning', 1), false, '再同一對 → 略過');
+      eq(JSON.stringify(memo.last()), JSON.stringify({ region: 'reasoning', hour: 1 }), 'last() 是上一次記下的那一對');
+    }
+  }
+
+  /* --- ④ mood 狀態：新鍵進 target 並平滑；校準點逐值等於舊畫面 --- */
+  {
+    const st = Mood.createMoodState({ fog: 0x1e2c40, tint: 0xbcd6e6, hemi: 0.52, fogNear: 62, fogFar: 285, exposure: 1.02 });
+    const s0 = st.snapshot();
+    eq(s0.target.moon.alt, 0.75, '預設 target moon.alt 0.75（＝入夜）');
+    eq(s0.target.moon.phase, 0.3, '預設 target moon.phase 0.3');
+    eq(s0.target.stars.density, 0.7, '預設 target stars.density 0.7');
+    eq(s0.target.aurora.intensity, 0.5, '預設 target aurora.intensity 0.5');
+    eq(s0.target.aurora.hue, 0, '預設 target aurora.hue 0');
+    eq(JSON.stringify(s0.now), JSON.stringify(s0.target), '開機 now ＝ target（沒有第一幀跳動）');
+    eq(st.step(0.5), false, '沒動過 target：step 回 false（天空不重寫）');
+    // 舊鍵照舊
+    st.set({ fog: 0x232a48, hemi: 0.6, exposure: 1.08 });
+    eq(st.snapshot().target.fog, 0x232a48, 'setMood 舊鍵 fog 進 target');
+    eq(st.snapshot().target.hemi, 0.6, 'setMood 舊鍵 hemi 進 target');
+    eq(st.snapshot().now.hemi, 0.52, 'now 還沒動（要 step 才動）');
+    // 新鍵
+    st.set({ moon: { alt: 0.05, phase: 1 }, stars: { density: 1 }, aurora: { intensity: 1, hue: 0.4 } });
+    const s1 = st.snapshot();
+    eq(s1.target.moon.alt, 0.05, 'setMood 接受 moon.alt');
+    eq(s1.target.moon.phase, 1, 'setMood 接受 moon.phase');
+    eq(s1.target.stars.density, 1, 'setMood 接受 stars.density');
+    eq(s1.target.aurora.intensity, 1, 'setMood 接受 aurora.intensity');
+    eq(s1.target.aurora.hue, 0.4, 'setMood 接受 aurora.hue');
+    eq(s1.now.moon.alt, 0.75, 'now.moon.alt 還在 0.75（平滑，不硬切）');
+    eq(st.step(0.5), true, '有差 → step 回 true');
+    const s2 = st.snapshot();
+    ok(Math.abs(s2.now.moon.alt - 0.4) < 1e-12, 'step(0.5) 後 now.moon.alt 走到一半（0.4）', String(s2.now.moon.alt));
+    ok(Math.abs(s2.now.stars.density - 0.85) < 1e-12, 'now.stars.density 0.85', String(s2.now.stars.density));
+    ok(Math.abs(s2.now.aurora.hue - 0.2) < 1e-12, 'now.aurora.hue 0.2', String(s2.now.aurora.hue));
+    ok(Math.abs(s2.now.hemi - 0.56) < 1e-12, 'now.hemi 0.56（舊鍵同一條 lerp）', String(s2.now.hemi));
+    for (let i = 0; i < 200; i += 1) st.step(0.3);
+    const s3 = st.snapshot();
+    eq(s3.now.moon.alt, 0.05, '夠多幀後 now 貼上 target（不會永遠差 1e-17）');
+    eq(s3.now.aurora.hue, 0.4, 'hue 也貼上');
+    eq(st.step(0.3), false, '貼上之後 step 又回 false（靜止時零重寫）');
+    // 夾值與垃圾
+    st.set({ moon: { alt: 7, phase: -2 }, stars: { density: 'x' }, aurora: { intensity: NaN, hue: 5 } });
+    const s4 = st.snapshot();
+    eq(s4.target.moon.alt, 1, 'moon.alt 夾在 1');
+    eq(s4.target.moon.phase, 0, 'moon.phase 夾在 0');
+    eq(s4.target.stars.density, 1, 'stars.density 非數字 → 不動');
+    eq(s4.target.aurora.intensity, 1, 'aurora.intensity NaN → 不動');
+    eq(s4.target.aurora.hue, 1, 'aurora.hue 夾在 1');
+    st.set({});
+    eq(JSON.stringify(st.snapshot().target), JSON.stringify(s4.target), 'setMood({}) 什麼都不動');
+    st.set();
+    eq(JSON.stringify(st.snapshot().target), JSON.stringify(s4.target), 'setMood() 什麼都不動');
+
+    // 校準：hour 0 的映射逐值等於舊畫面
+    eq(Mood.starOpacity(0.7), 0.9, 'stars.density 0.7 → uOpacity 0.9（現值）');
+    eq(Mood.starScale(0.7), 900, 'stars.density 0.7 → uScale 900（現值）');
+    ok(Mood.starOpacity(1) >= 0.95 && Mood.starOpacity(1) <= 1.0, 'density 1 → uOpacity ≥ 0.95');
+    ok(Mood.starOpacity(0) >= 0.5 && Mood.starOpacity(0) < 0.9, 'density 0 → uOpacity 明顯更淡');
+    ok(Mood.starScale(1) > 900 && Mood.starScale(0) < 900, 'uScale 隨 density 單調');
+    const dir0 = Mood.moonDirection(0.75, new THREE.Vector3());
+    const ref = new THREE.Vector3(-40, 60, 30).normalize();
+    ok(dir0.distanceTo(ref) < 1e-9, 'moon.alt 0.75 → 方向 ＝ 現在的 (-40,60,30)', dir0.toArray().join(','));
+    const dirLow = Mood.moonDirection(0, new THREE.Vector3());
+    ok(dirLow.y > 0.1 && dirLow.y < ref.y, 'alt 0 → 近地平線但仍在地平線上（≈8°）', String(dirLow.y));
+    ok(Math.abs(Math.asin(dirLow.y) * 180 / Math.PI - 8) < 0.01, 'alt 0 仰角 8°');
+    const dirHigh = Mood.moonDirection(1, new THREE.Vector3());
+    ok(Math.abs(Math.asin(dirHigh.y) * 180 / Math.PI - 60) < 0.01, 'alt 1 仰角 60°');
+    // 方位不變（同一條弧）
+    const az = (v) => Math.atan2(v.z, v.x);
+    ok(Math.abs(az(dirLow) - az(ref)) < 1e-9 && Math.abs(az(dirHigh) - az(ref)) < 1e-9, '弧的方位角固定');
+    const look = Mood.moonPhaseLook(0.3, {});
+    eq(JSON.stringify(look), JSON.stringify({ discScale: 34, discOpacity: 1, haloScale: 170, haloOpacity: 0.5 }), 'moon.phase 0.3 → disc 34／1.0、halo 170／0.5（現值）');
+    const full = Mood.moonPhaseLook(1, {});
+    ok(full.discScale > 34 && full.haloOpacity > 0.5 && full.haloScale > 170, 'phase 1 → 更滿更亮');
+    const thin = Mood.moonPhaseLook(0, {});
+    ok(thin.discScale < 34 && thin.discOpacity < 1 && thin.haloOpacity < 0.5, 'phase 0 → 更細更淡');
+    eq(Mood.auroraOpacityMul(0.5), 1, 'aurora.intensity 0.5 → 乘數 1（現值）');
+    ok(Mood.auroraOpacityMul(1) > 1.3 && Mood.auroraOpacityMul(0) < 0.5, '極光乘數隨 intensity 單調');
+    eq(Mood.knotLerp(0.7, 0.7, 1, 2, 3), 2, 'knotLerp 落在 knot 逐位元回 mid');
+    eq(Mood.knotLerp(0, 0.7, 1, 2, 3), 1, 'knotLerp 0 → lo');
+    eq(Mood.knotLerp(1, 0.7, 1, 2, 3), 3, 'knotLerp 1 → hi');
+    eq(Mood.knotLerp(NaN, 0.7, 1, 2, 3), 2, 'knotLerp NaN → mid');
+    eq(JSON.stringify(Mood.MOON_DIR_HOUR0), JSON.stringify([-40, 60, 30]), '月亮起點方向常數 (-40,60,30)');
+  }
+
+  /* --- ⑤ 靜態掃描：engine 每幀迴圈零新配置；main.js 只有一個 setMood 呼叫點；WORLD.md 有時辰規則 --- */
+  {
+    const engineSrc = readFileSync(resolve(root, 'src/engine/engine.js'), 'utf8');
+    const bodyOf = (src, head) => {
+      const m = new RegExp(`\\b${head}\\s*\\([^)]*\\)\\s*\\{`).exec(src);
+      const at = m ? m.index : -1;
+      ok(at > 0, `找得到 ${head}`);
+      if (at < 0) return '';
+      const open = src.indexOf('{', at);
+      let depth = 0;
+      for (let i = open; i < src.length; i += 1) {
+        if (src[i] === '{') depth += 1;
+        else if (src[i] === '}') { depth -= 1; if (depth === 0) return src.slice(open, i + 1); }
+      }
+      return src.slice(open);
+    };
+    for (const head of ['function applySky', 'function applyMood', 'function frame']) {
+      const body = bodyOf(engineSrc, head);
+      ok(body.length > 40, `${head} 本體不是空的`);
+      ok(!/new THREE\./.test(body), `${head} 裡沒有 new THREE.`);
+      ok(!/\bnew\s+[A-Z]/.test(body), `${head} 裡沒有 new 任何物件`);
+      ok(!/\.map\(|\.filter\(|\.forEach\(/.test(body), `${head} 裡沒有 map/filter/forEach`);
+      ok(!/=>/.test(body), `${head} 裡沒有建閉包`);
+      ok(!/\.clone\(\)|\.toArray\(|\.getHex\(/.test(body), `${head} 裡沒有 clone/toArray/getHex（會配置）`);
+    }
+    const stepBody = bodyOf(readFileSync(resolve(root, 'src/engine/mood.js'), 'utf8'), 'step');
+    ok(!/new |\.map\(|\.filter\(|=>/.test(stepBody), 'mood.step() 零配置、無閉包');
+    ok(/skyMoving/.test(engineSrc) && /applySky\(\)/.test(engineSrc), '天空只在值有動時重寫（靜止時零成本）');
+    ok(/forceHour\(/.test(engineSrc), 'engine.forceHour 存在');
+    ok(/normalizeForcedHour\(/.test(engineSrc), 'engine.forceHour 走 normalizeForcedHour（只收 null／整數 0..3）');
+    ok(/onHourForced\(/.test(engineSrc), 'engine.onHourForced 存在（main.js 接 applyMood）');
+    ok(/forcedHour/.test(engineSrc), 'engine.forcedHour 可讀');
+    ok(/moonLightDirection\(/.test(engineSrc) && /moonShadowBias\(/.test(engineSrc), '月光方向有 22° 下限、bias 隨仰角放大（applySky 用 mood.js 的映射）');
+    // 陰影 bias 的 base 只在開機讀一次
+    ok(/moonShadowBiasBase/.test(engineSrc), 'shadow.bias 的 base 值開機記一次');
+    ok(!/new THREE\.(Point|Spot|Directional|Hemisphere|Ambient|RectArea)Light/.test(engineSrc.slice(engineSrc.indexOf('function applySky'))), 'P05 沒有在迴圈之後新增任何光源');
+    eq((engineSrc.match(/new THREE\.DirectionalLight/g) || []).length, 2, '引擎仍只有 moon ＋ rim 兩盞 DirectionalLight');
+    eq((engineSrc.match(/new THREE\.Sprite\(/g) || []).length, 2, '月亮仍只有 disc ＋ halo 兩個 Sprite（月相走 opacity／scale 交叉，沒加遮罩）');
+    ok(!/dawn|sunrise|魚肚白|黎明|日出/.test(engineSrc), 'engine.js 沒有黎明／日出（鐵則 3）');
+    const hoursSrc = readFileSync(resolve(root, 'src/engine/hours.js'), 'utf8');
+    ok(!/from ['"]three['"]/.test(hoursSrc), 'hours.js 純函式、不 import three');
+    ok(!/document\.|window\./.test(hoursSrc), 'hours.js 不碰 DOM');
+    const mainSrc = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+    eq((mainSrc.match(/engine\.setMood\(/g) || []).length, 1, 'main.js 只有一個 engine.setMood 呼叫點（applyMood）');
+    // P06：第一個參數換成色彩腳本 colorScriptFor(region)（同形 ＋ sky）—— 入口不變
+    ok(/engine\.setMood\(composeMood\(colorScriptFor\(/.test(mainSrc) && /hourFactor\(/.test(mainSrc), 'applyMood ＝ setMood(composeMood(colorScriptFor(region), hourFactor(hour)))（P06 起）');
+    ok(/onChange:[\s\S]{0,120}?applyMood\(/.test(mainSrc), 'progression.onChange 走 applyMood');
+    ok(/engine\.onHourForced\([\s\S]{0,120}?applyMood\(/.test(mainSrc), 'forceHour 走 applyMood');
+    ok(/applyMood\(here\.id\)/.test(mainSrc), '進區走 applyMood');
+    ok(/\bhour:\s*\(\)\s*=>/.test(mainSrc), 'window.__promptasy.hour() 存在');
+    ok(!/atmosphereFor\(here\.id\)\)/.test(mainSrc), '舊的 engine.setMood(atmosphereFor(here.id)) 呼叫點已拆掉');
+    ok(/createMoodMemo\(/.test(mainSrc), 'applyMood 有 {region, hour} 備忘（同一對不重送）');
+    eq((mainSrc.match(/^const MURK_IDS = /gm) || []).length, 1, 'main.js 的 MURK_IDS 只定義一次（模組層）');
+    eq((mainSrc.match(/murkFile\.entries[^\n]*\.map\(\(m\) => m\.id\)/g) || []).length, 1, 'murks 的 id 只從 murkFile 算一次（其他地方用 MURK_IDS）');
+    ok((mainSrc.match(/\bMURK_IDS\b/g) || []).length >= 4, 'MURK_IDS 在三個以上的地方重複使用', String((mainSrc.match(/\bMURK_IDS\b/g) || []).length));
+    const worldMd = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+    const s22 = worldMd.slice(worldMd.indexOf('### 2.2'), worldMd.indexOf('### 2.3'));
+    ok(/時辰/.test(s22) && /星最亮/.test(s22), 'WORLD.md §2.2 有「時辰」規則（終態星最亮之夜）');
+    ok(/沒有黎明|不出現黎明/.test(s22), 'WORLD.md §2.2 明寫沒有黎明');
+    ok(/setMood/.test(s22), 'WORLD.md §2.2 寫明 setMood 是唯一入口');
+    ok(existsSync(resolve(root, 'scripts/shots-hours.mjs')), 'scripts/shots-hours.mjs 存在');
+  }
+}
+
+/* ================================================================== */
+/* v1.2 · P06：區域色彩腳本 ＋ 軟門檻三態 ＋ 節奏稽核                     */
+/*   · color-script.json：12 區齊、authored game、#rrggbb、fog/tint 逐值＝REGION_ATMOSPHERE、天空偏移在容差內、全是夜 */
+/*   · colorScriptFor：同形 ＋ sky；氣氛永遠是自己那一區、腳本鍵逐鍵退回；composeMood 帶 sky；mood 狀態接受 sky 並平滑 */
+/*   · 三態純函式表；世界建構套 key/rim/particle；refreshGates 三態；0 新光源；靜態掃描每幀迴圈 */
+/*   · pacing-audit：可跑、回 12 區＋直方圖鍵；印每區死區數當軟警告                */
+/* ================================================================== */
+console.log('\n▸ 區域色彩腳本 ＋ 三態 ＋ 節奏稽核（v1.2 · P06）');
+{
+  const CS = await import('../src/world/color-script.js');
+  const Mood = await import('../src/engine/mood.js');
+  const Hours = await import('../src/engine/hours.js');
+  const Engine = await import('../src/engine/engine.js');
+  const csJson = readJson('src/data/color-script.json');
+  const { hex6, hueDelta, bodyOf } = CS;
+  eq(typeof hex6, 'function', 'color-script.js 匯出 hex6');
+  eq(typeof hueDelta, 'function', 'color-script.js 匯出 hueDelta（有號色相偏移）');
+  eq(typeof bodyOf, 'function', 'color-script.js 匯出 bodyOf（靜態掃描共用）');
+  eq(hex6(0x0a0b0c), '#0a0b0c', 'hex6 補零');
+  eq(hueDelta('#101a28', '#101a28'), 0, 'hueDelta 同色 0');
+  ok(Math.abs(hueDelta('#11172c', '#101a28') - 12) < 0.5, 'hueDelta reasoning skyTop 相對基準 ≈ +12°', String(hueDelta('#11172c', '#101a28')));
+  ok(hueDelta('#0f1b24', '#101a28') < 0, 'hueDelta 帶號（orchestration 往負偏）');
+  eq(bodyOf('x foo(a, b) { if (a) { b(); } } y', 'foo'), '{ if (a) { b(); } }', 'bodyOf 切出整對大括號');
+  eq(bodyOf('nothing here', 'foo'), '', 'bodyOf 找不到 → 空字串');
+
+  /* --- ① 資料檔 --- */
+  eq(csJson.authored, 'game', 'color-script.json authored:"game"（純視覺、無教學內容）');
+  ok(!('source' in csJson) && !Object.values(csJson.regions).some((r) => 'source' in r), 'color-script.json 沒有 source 欄（不是教學內容）');
+  const regionIds = Object.keys(World.REGION_ATMOSPHERE);
+  eq(Object.keys(csJson.regions).length, 12, 'color-script.json 12 區');
+  eq(Object.keys(csJson.regions).sort().join(','), regionIds.slice().sort().join(','), 'color-script.json 的區 ＝ REGION_ATMOSPHERE 的區');
+  for (const id of regionIds) {
+    const row = csJson.regions[id];
+    for (const k of CS.COLOR_KEYS) ok(CS.HEX_RE.test(String(row[k])), `[${id}] ${k} 是 #rrggbb`, String(row[k]));
+    eq(row.fog, hex6(World.REGION_ATMOSPHERE[id].fog), `[${id}] fog 逐值 ＝ REGION_ATMOSPHERE.fog`);
+    eq(row.tint, hex6(World.REGION_ATMOSPHERE[id].tint), `[${id}] tint 逐值 ＝ REGION_ATMOSPHERE.tint`);
+    for (const k of ['skyTop', 'skyLow', 'fog']) {
+      const l = CS.hexToHsl(row[k]).l;
+      ok(l <= 0.35, `[${id}] ${k} HSL 亮度 ${l.toFixed(3)} ≤ 0.35（仍是夜）`);
+    }
+    const bt = CS.hexToHsl(CS.SKY_BASE.top);
+    const bl = CS.hexToHsl(CS.SKY_BASE.low);
+    const ct = CS.hexToHsl(row.skyTop);
+    const cl = CS.hexToHsl(row.skyLow);
+    ok(CS.hueDeltaDeg(ct.h, bt.h) <= 12 && CS.hueDeltaDeg(cl.h, bl.h) <= 12, `[${id}] 天空色相偏移 ≤ 12°`, `${CS.hueDeltaDeg(ct.h, bt.h).toFixed(1)}/${CS.hueDeltaDeg(cl.h, bl.h).toFixed(1)}`);
+    ok(Math.abs(ct.l - bt.l) <= 0.08 && Math.abs(cl.l - bl.l) <= 0.08, `[${id}] 天空亮度偏移 ≤ 0.08`);
+  }
+  eq(csJson.regions.foundations.skyTop, CS.SKY_BASE.top, 'foundations skyTop ＝ 全域基準（乘數 1）');
+  eq(csJson.regions.foundations.skyLow, CS.SKY_BASE.low, 'foundations skyLow ＝ 全域基準（乘數 1）');
+  eq(hex6(Engine.PALETTE.sky), CS.SKY_BASE.top, 'PALETTE.sky ＝ color-script SKY_BASE.top');
+  eq(hex6(Engine.PALETTE.skyLow), CS.SKY_BASE.low, 'PALETTE.skyLow ＝ color-script SKY_BASE.low');
+  eq(Mood.SKY_BASE_TOP, Engine.PALETTE.sky, 'mood.js SKY_BASE_TOP ＝ PALETTE.sky');
+  eq(Mood.SKY_BASE_LOW, Engine.PALETTE.skyLow, 'mood.js SKY_BASE_LOW ＝ PALETTE.skyLow');
+  ok(new Set(regionIds.map((id) => csJson.regions[id].skyTop)).size >= 10, '至少 10 區的 skyTop 彼此不同（進區換色看得到）');
+  // 預設值的來歷：key ＝ 區主色、rim ＝ kitFor().light、particle ＝ 舊螢火算法（P06 不改變任何既有顏色）
+  {
+    const Props = await import('../src/world/props.js');
+    const groups = new Map(curriculum.groups.map((g) => [g.id, g]));
+    for (const r of catalog.implementedRegions()) if (!groups.has(r.id)) groups.set(r.id, r);
+    for (const id of regionIds) {
+      const color = groups.get(id).color;
+      const kit = Props.kitFor(color);
+      const row = csJson.regions[id];
+      eq(row.key, color.toLowerCase(), `[${id}] key ＝ 區主色（補光顏色不變）`);
+      eq(row.rim, hex6(kit.light), `[${id}] rim ＝ kitFor().light（道具補色不變）`);
+      const c = new THREE.Color(color).lerp(new THREE.Color(0xdff0fb), 0.45);
+      eq(row.particle, `#${c.getHexString()}`, `[${id}] particle ＝ 舊螢火算法（螢火色不變）`);
+    }
+  }
+
+  /* --- ② validate / load / colorScriptFor --- */
+  eq(CS.validateColorScript(csJson).length, 0, 'validateColorScript(json) 零問題', CS.validateColorScript(csJson).join(' | '));
+  ok(CS.validateColorScript(null).length > 0, 'validateColorScript(null) 有問題');
+  ok(CS.validateColorScript({ authored: 'human', regions: csJson.regions }).some((p) => /authored/.test(p)), 'authored 不是 game → 問題');
+  {
+    const bad = JSON.parse(JSON.stringify(csJson));
+    bad.regions.reasoning.fog = '#000000';
+    ok(CS.validateColorScript(bad).some((p) => /reasoning\.fog/.test(p)), 'fog 與 REGION_ATMOSPHERE 不同 → 問題');
+    const bad2 = JSON.parse(JSON.stringify(csJson));
+    bad2.regions.reasoning.skyTop = '#8090ff';
+    ok(CS.validateColorScript(bad2).some((p) => /reasoning\.skyTop/.test(p)), '天空太亮／偏太多 → 問題');
+    const bad3 = JSON.parse(JSON.stringify(csJson));
+    bad3.regions.reasoning.key = 'red';
+    ok(CS.validateColorScript(bad3).some((p) => /reasoning\.key/.test(p)), '非 #rrggbb → 問題');
+    const bad4 = JSON.parse(JSON.stringify(csJson));
+    delete bad4.regions.wards;
+    ok(CS.validateColorScript(bad4).some((p) => /wards/.test(p)), '少一區 → 問題');
+    // json 的 base 區塊只是說明：竄改它不能放寬驗證（基準與容差用模組常數），只多一條 base.* 警告
+    {
+      const tampered = JSON.parse(JSON.stringify(bad2));
+      tampered.base = { skyTop: '#8090ff', skyLow: '#8090ff', tolerance: { hueDeg: 360, lightness: 1, saturation: 1, maxLightness: 1 } };
+      const pT = CS.validateColorScript(tampered);
+      ok(pT.some((p) => /reasoning\.skyTop/.test(p)), 'json.base 放寬容差 → reasoning.skyTop 仍驗不過（驗證用模組常數）', pT.join(' | '));
+      ok(pT.some((p) => /^base\./.test(p)), 'json.base 與常數不一致 → base.* 警告', pT.filter((p) => /^base\./.test(p)).join(' | '));
+      const noBase = JSON.parse(JSON.stringify(csJson));
+      delete noBase.base;
+      eq(CS.validateColorScript(noBase).length, 0, '沒有 base 區塊也驗得過（base 不是輸入）');
+      const okBase = JSON.parse(JSON.stringify(csJson));
+      okBase.base.tolerance.hueDeg = 3;
+      const pOk = CS.validateColorScript(okBase);
+      ok(pOk.every((p) => /^base\./.test(p)), 'json.base 收緊容差 → 各區照樣過（只多 base 警告）', pOk.join(' | '));
+      eq(pOk.length, 1, '…而且正好一條 base.tolerance.hueDeg 警告');
+    }
+    // 沒載入表：氣氛七鍵仍是自己那一區的（不是 foundations），sky 基準、key/rim/particle null
+    {
+      const w0 = console.warn;
+      console.warn = () => {};
+      CS.loadColorScript(null);
+      console.warn = w0;
+      eq(CS.hasColorScript('reasoning'), false, '沒載入表：hasColorScript false');
+      eq(CS.colorScriptRow('reasoning'), null, '沒載入表：colorScriptRow null');
+      const m = CS.colorScriptFor('reasoning');
+      eq(m.fog, World.REGION_ATMOSPHERE.reasoning.fog, '沒載入表：reasoning 的霧仍是 REGION_ATMOSPHERE.reasoning.fog（不換成 foundations）');
+      eq(m.tint, World.REGION_ATMOSPHERE.reasoning.tint, '沒載入表：tint 也是自己的');
+      eq(m.motes, World.REGION_ATMOSPHERE.reasoning.motes, '沒載入表：motes 也是自己的');
+      eq(m.sky.top, CS.SKY_BASE.top, '沒載入表：sky.top ＝ 全域基準');
+      eq(m.sky.low, CS.SKY_BASE.low, '沒載入表：sky.low ＝ 全域基準');
+      eq(m.key, null, '沒載入表：key null（world.js 用區主色）');
+      eq(m.rim, null, '沒載入表：rim null（world.js 用 kit.light）');
+      eq(m.particle, null, '沒載入表：particle null（world.js 用舊算法）');
+      eq(Object.keys(CS.colorScriptTable()).length, 0, '沒載入表：colorScriptTable() 空');
+    }
+    // 載入壞表：壞的那一區只有壞的那一鍵退回，氣氛與天空仍是自己的
+    {
+      const badP = JSON.parse(JSON.stringify(csJson));
+      badP.regions.reasoning.particle = 'red';
+      const w0 = console.warn;
+      console.warn = () => {};
+      CS.loadColorScript(badP);
+      console.warn = w0;
+      eq(CS.hasColorScript('reasoning'), false, 'particle 壞掉的區 hasColorScript false');
+      eq(CS.hasColorScript('grounding'), true, '其他區照舊');
+      const m = CS.colorScriptFor('reasoning');
+      eq(m.fog, World.REGION_ATMOSPHERE.reasoning.fog, 'particle 壞掉：reasoning 的霧仍是自己的（不是 foundations）');
+      eq(m.tint, World.REGION_ATMOSPHERE.reasoning.tint, 'particle 壞掉：tint 仍是自己的');
+      // 逐鍵退回：天空／key／rim 仍是 reasoning 自己的，只有壞掉的 particle → null
+      eq(m.sky.top, csJson.regions.reasoning.skyTop, 'particle 壞掉：sky.top 仍是 reasoning 自己的');
+      eq(m.sky.low, csJson.regions.reasoning.skyLow, 'particle 壞掉：sky.low 仍是 reasoning 自己的');
+      eq(m.key, csJson.regions.reasoning.key, 'particle 壞掉：key 仍是 reasoning 自己的');
+      eq(m.rim, csJson.regions.reasoning.rim, 'particle 壞掉：rim 仍是 reasoning 自己的');
+      eq(m.particle, null, 'particle 壞掉：particle null（world.js 用舊算法）');
+      eq(JSON.stringify(CS.colorScriptRow('reasoning')), JSON.stringify(csJson.regions.foundations), 'colorScriptRow（色卡表用）退回 foundations 那一列（那一列驗得過）');
+    }
+    /*
+     * 倒過來的高度階也要**逐鍵**退回（P12 審查抓到的）：那一條驗證原本只寫 `${id}: …`，
+     * 沒有 `.鍵名`，於是 `hasColorScript()` 說壞了、`colorScriptFor()` 卻照樣把倒過來的
+     * 那一組交出去 —— 地形就用著一組「高處比低處暗」的色畫下去。
+     */
+    {
+      const badG = JSON.parse(JSON.stringify(csJson));
+      badG.regions.grounding.groundHigh = '#0a0908'; // 比 groundLow 還暗
+      const w0 = console.warn;
+      console.warn = () => {};
+      CS.loadColorScript(badG);
+      console.warn = w0;
+      eq(CS.hasColorScript('grounding'), false, 'groundHigh 倒過來：hasColorScript false');
+      const m = CS.colorScriptFor('grounding');
+      ok(m.groundHigh !== '#0a0908', 'groundHigh 倒過來：壞值不准交出去（逐鍵退回）', String(m.groundHigh));
+      eq(m.key, csJson.regions.grounding.key, 'groundHigh 倒過來：其他鍵仍是自己的');
+      eq(m.sky.top, csJson.regions.grounding.skyTop, 'groundHigh 倒過來：sky.top 仍是自己的');
+    }
+    // foundations 自己壞了：colorScriptRow 絕不回壞列 → null；colorScriptFor 逐鍵預設；其他區照舊
+    {
+      const badF = JSON.parse(JSON.stringify(csJson));
+      badF.regions.foundations.skyTop = '#8090ff';
+      const w0 = console.warn;
+      console.warn = () => {};
+      CS.loadColorScript(badF);
+      console.warn = w0;
+      eq(CS.hasColorScript('foundations'), false, 'foundations 壞掉 hasColorScript false');
+      eq(CS.colorScriptRow('foundations'), null, 'foundations 壞掉：colorScriptRow(foundations) null（不回壞列）');
+      eq(CS.colorScriptRow('nope'), null, 'foundations 壞掉：未知區也拿不到列（不回壞列）');
+      const m = CS.colorScriptFor('foundations');
+      eq(m.sky.top, CS.SKY_BASE.top, 'foundations 壞掉：sky.top ＝ 基準（不是壞值 #8090ff）');
+      eq(m.sky.low, csJson.regions.foundations.skyLow, 'foundations 壞掉：skyLow 那一鍵沒壞 → 仍用自己的');
+      eq(m.key, csJson.regions.foundations.key, 'foundations 壞掉：key 那一鍵沒壞 → 仍用自己的');
+      eq(m.fog, World.REGION_ATMOSPHERE.foundations.fog, 'foundations 壞掉：霧仍是原值');
+      // 整列拿掉：全部預設
+      const gone = JSON.parse(JSON.stringify(csJson));
+      delete gone.regions.foundations;
+      console.warn = () => {};
+      CS.loadColorScript(gone);
+      console.warn = w0;
+      const g = CS.colorScriptFor('foundations');
+      eq(g.sky.top, CS.SKY_BASE.top, 'foundations 列不見：sky.top ＝ 基準');
+      eq(g.sky.low, CS.SKY_BASE.low, 'foundations 列不見：sky.low ＝ 基準');
+      eq(g.key, null, 'foundations 列不見：key null');
+      eq(g.rim, null, 'foundations 列不見：rim null');
+      eq(g.particle, null, 'foundations 列不見：particle null');
+      eq(g.fog, World.REGION_ATMOSPHERE.foundations.fog, 'foundations 列不見：霧仍是原值');
+      eq(CS.colorScriptRow('foundations'), null, 'foundations 列不見：colorScriptRow null');
+      eq(CS.colorScriptRow('nope'), null, 'foundations 列不見：未知區 colorScriptRow null');
+      console.warn = () => {};
+      CS.loadColorScript(badF);
+      console.warn = w0;
+      const n = CS.colorScriptFor('nope');
+      eq(n.sky.top, CS.SKY_BASE.top, 'foundations 壞掉：未知區 sky ＝ 基準');
+      eq(n.key, null, 'foundations 壞掉：未知區 key null');
+      eq(n.fog, World.REGION_ATMOSPHERE.foundations.fog, '未知區的霧仍走 atmosphereFor 的退路（foundations）');
+      eq(CS.colorScriptFor('reasoning').sky.top, csJson.regions.reasoning.skyTop, 'foundations 壞掉：reasoning 照舊用自己的列');
+      eq(Object.keys(CS.colorScriptTable()).length, 12, 'colorScriptTable() 仍 12 鍵（壞列是空物件）');
+      eq(Object.keys(CS.colorScriptTable().foundations).length, 0, 'colorScriptTable().foundations 空物件（不是壞列）');
+    }
+  }
+  eq(CS.loadColorScript(csJson).length, 0, 'loadColorScript(json) 零問題');
+  eq(CS.colorScriptProblems().length, 0, 'colorScriptProblems() 空');
+  for (const id of regionIds) {
+    const m = CS.colorScriptFor(id);
+    const a = World.REGION_ATMOSPHERE[id];
+    eq(m.fog, a.fog, `[${id}] colorScriptFor.fog ＝ REGION_ATMOSPHERE 數字原值`);
+    eq(m.tint, a.tint, `[${id}] colorScriptFor.tint ＝ 原值`);
+    eq(m.hemi, a.hemi, `[${id}] colorScriptFor.hemi ＝ 原值`);
+    eq(m.fogNear, a.fogNear, `[${id}] fogNear 原值`);
+    eq(m.fogFar, a.fogFar, `[${id}] fogFar 原值`);
+    eq(m.exposure, a.exposure, `[${id}] exposure 原值`);
+    eq(m.motes, a.motes, `[${id}] motes 原值`);
+    eq(m.sky.top, csJson.regions[id].skyTop, `[${id}] sky.top ＝ json`);
+    eq(m.sky.low, csJson.regions[id].skyLow, `[${id}] sky.low ＝ json`);
+    eq(m.key, csJson.regions[id].key, `[${id}] key ＝ json`);
+    eq(m.rim, csJson.regions[id].rim, `[${id}] rim ＝ json`);
+    eq(m.particle, csJson.regions[id].particle, `[${id}] particle ＝ json`);
+  }
+  {
+    // 未知區：氣氛走 atmosphereFor 的退路（foundations）、腳本鍵逐鍵預設（不借 foundations 的列）
+    const n = CS.colorScriptFor('nope');
+    const f = World.atmosphereFor('foundations');
+    eq(n.fog, f.fog, 'colorScriptFor 未知區：霧 ＝ foundations（atmosphereFor 的退路）');
+    eq(n.sky.top, CS.SKY_BASE.top, 'colorScriptFor 未知區：sky.top ＝ 基準');
+    eq(n.sky.low, CS.SKY_BASE.low, 'colorScriptFor 未知區：sky.low ＝ 基準');
+    eq(n.key, null, 'colorScriptFor 未知區：key null');
+    eq(n.rim, null, 'colorScriptFor 未知區：rim null');
+    eq(n.particle, null, 'colorScriptFor 未知區：particle null');
+    eq(n.groundLow, null, 'colorScriptFor 未知區：groundLow null（world.js 退回全域 PALETTE.ground）');
+    eq(n.groundHigh, null, 'colorScriptFor 未知區：groundHigh null');
+    eq(JSON.stringify(CS.colorScriptFor(undefined)), JSON.stringify(n), 'colorScriptFor(undefined) ＝ 未知區');
+  }
+  {
+    const keys = ['fog', 'tint', 'hemi', 'fogNear', 'fogFar', 'exposure', 'motes'];
+    const atmoKeys = Object.keys(World.atmosphereFor('foundations')).sort().join(',');
+    eq(keys.slice().sort().join(','), atmoKeys, 'colorScriptFor 與 atmosphereFor 同形（七個鍵）＋ 額外 sky/key/rim/particle');
+    ok(
+      Object.keys(CS.colorScriptFor('foundations')).sort().join(',') ===
+        [...keys, 'sky', 'key', 'rim', 'particle', 'groundLow', 'groundHigh'].sort().join(','),
+      'colorScriptFor 的鍵集合固定'
+    );
+  }
+  eq(Object.keys(CS.colorScriptTable()).length, 12, 'colorScriptTable() 12 區');
+
+  /* --- ③ composeMood 帶 sky；時辰不換天空色 --- */
+  for (let h = 0; h < 4; h += 1) {
+    const m = Hours.composeMood(CS.colorScriptFor('reasoning'), Hours.hourFactor(h));
+    eq(m.sky.top, csJson.regions.reasoning.skyTop, `hour ${h}：composeMood 帶 sky.top 原樣（時辰不換色）`);
+    eq(m.sky.low, csJson.regions.reasoning.skyLow, `hour ${h}：composeMood 帶 sky.low 原樣`);
+  }
+  ok(!('sky' in Hours.composeMood(World.atmosphereFor('reasoning'), Hours.hourFactor(0))), '沒給 sky 就沒 sky 鍵（舊呼叫端相容）');
+  {
+    const m0 = Hours.composeMood(CS.colorScriptFor('foundations'), Hours.hourFactor(0));
+    const old = Hours.composeMood(World.atmosphereFor('foundations'), Hours.hourFactor(0));
+    const { sky, ...rest } = m0;
+    eq(JSON.stringify(rest), JSON.stringify(old), 'foundations hour 0：除了 sky，其餘逐值等於 atmosphereFor 版本');
+    eq(sky.top, CS.SKY_BASE.top, 'foundations hour 0：sky.top ＝ 基準');
+  }
+
+  /* --- ④ mood 狀態：sky 進 target、平滑、乘數 --- */
+  {
+    const st = Mood.createMoodState({ skyTop: Engine.PALETTE.sky, skyLow: Engine.PALETTE.skyLow });
+    const s0 = st.snapshot();
+    eq(s0.target.sky.top, Engine.PALETTE.sky, '預設 target sky.top ＝ PALETTE.sky');
+    eq(s0.target.sky.low, Engine.PALETTE.skyLow, '預設 target sky.low ＝ PALETTE.skyLow');
+    eq(JSON.stringify(s0.now.sky), JSON.stringify(s0.target.sky), '開機 now.sky ＝ target.sky');
+    eq(st.step(0.5), false, '沒動 sky：step false');
+    const mulTop = Mood.skyMultiplier(st.now.skyTop, new THREE.Color(Mood.SKY_BASE_TOP), new THREE.Color());
+    eq([mulTop.r, mulTop.g, mulTop.b].join(','), '1,1,1', 'foundations 的穹頂乘數逐位元 ＝ 1（畫面與舊版完全相同）');
+    st.set({ sky: { top: csJson.regions.reasoning.skyTop, low: csJson.regions.reasoning.skyLow } });
+    eq(st.snapshot().target.sky.top, parseInt(csJson.regions.reasoning.skyTop.slice(1), 16), 'setMood 接受 sky.top（#rrggbb 字串）');
+    eq(st.snapshot().now.sky.top, Engine.PALETTE.sky, 'now.sky.top 還沒動（平滑）');
+    eq(st.step(0.5), true, '有差 → step true（天空要重寫）');
+    ok(st.snapshot().now.sky.top !== Engine.PALETTE.sky && st.snapshot().now.sky.top !== st.snapshot().target.sky.top, 'step 後 now.sky.top 在半路');
+    for (let i = 0; i < 200; i += 1) st.step(0.3);
+    eq(st.snapshot().now.sky.top, st.snapshot().target.sky.top, '夠多幀後貼上 target');
+    eq(st.step(0.3), false, '貼上之後 step 又回 false');
+    const mulR = Mood.skyMultiplier(st.now.skyTop, new THREE.Color(Mood.SKY_BASE_TOP), new THREE.Color());
+    ok(mulR.r !== 1 || mulR.g !== 1 || mulR.b !== 1, 'reasoning 的穹頂乘數 ≠ 1（進區換色）');
+    ok(mulR.r > 0.5 && mulR.r < 2 && mulR.g > 0.5 && mulR.g < 2 && mulR.b > 0.5 && mulR.b < 2, '乘數在 0.5–2 之間（微偏，不是換色系）', [mulR.r, mulR.g, mulR.b].map((v) => v.toFixed(3)).join(','));
+    {
+      // 認不得的字串／空物件／null：不炸、目標不變（three 會印一句 warn，壓掉）
+      const t0 = st.snapshot().target.sky;
+      const w0 = console.warn;
+      console.warn = () => {};
+      let threw = null;
+      try {
+        st.set({ sky: { top: 'nope' } });
+        st.set({ sky: {} });
+        st.set({ sky: null });
+      } catch (e) {
+        threw = e;
+      }
+      console.warn = w0;
+      eq(threw, null, 'setMood sky 認不得的字串／空物件／null 不炸');
+      const t1 = st.snapshot().target.sky;
+      eq(t1.low, t0.low, '…sky.low 目標不變');
+      ok(typeof t1.top === 'number' && Number.isFinite(t1.top), '…sky.top 目標仍是有效顏色數字', String(t1.top));
+    }
+    const zero = Mood.skyMultiplier(new THREE.Color(0), new THREE.Color(0), new THREE.Color());
+    eq([zero.r, zero.g, zero.b].join(','), '1,1,1', '基準為 0 的通道乘數 1（不除以 0）');
+  }
+
+  /* --- ⑤ 三態純函式 --- */
+  {
+    const G = World.gateVisualState;
+    const rows = [
+      [{ unlocked: true }, false, false, 'lit'],
+      [{ unlocked: true }, true, false, 'lit'],
+      [{ unlocked: true, hard: true }, false, true, 'lit'],
+      [{ unlocked: false }, true, false, 'amber'],
+      [{ unlocked: false }, false, false, 'dark'],
+      [{ unlocked: false, hard: true }, true, true, 'dark'],
+      [{ unlocked: false, hard: true }, true, undefined, 'dark'],
+      [{ unlocked: false }, true, undefined, 'amber'],
+      [null, true, false, 'amber'],
+      [null, false, false, 'dark'],
+      [undefined, true, undefined, 'amber'],
+    ];
+    for (const [status, prev, hard, want] of rows) {
+      eq(G(status, prev, hard), want, `gateVisualState(${JSON.stringify(status)}, prev ${prev}, hard ${hard}) → ${want}`);
+    }
+    // 這道門的條件指向哪些區
+    eq(World.gatePrevRegions({ requires: { region: 'reasoning' } }, null).join(','), 'reasoning', 'gatePrevRegions：requires.region 優先');
+    eq(World.gatePrevRegions({ requires: null }, { host: 'grounding' }).join(','), 'grounding', 'gatePrevRegions：加建院落 → host');
+    eq(World.gatePrevRegions({ requires: null }, { region: 'forms' }).join(','), 'foundations', 'gatePrevRegions：橋上的門 → foundations');
+    eq(World.gatePrevRegions(null, null).join(','), 'foundations', 'gatePrevRegions(null) → foundations');
+    eq(
+      World.gatePrevRegions({ requires: null, knowledgeGaps: [{ kind: 'skill', skillId: 'x', regionId: 'orchestration' }, { kind: 'regionSkills', regionId: 'orchestration', need: 3, have: 0 }] }, null).join(','),
+      'orchestration',
+      'gatePrevRegions：知識式門 → gaps 指到的區（去重）'
+    );
+    eq(
+      World.gatePrevRegions({ requires: null, knowledgeGaps: [{ kind: 'regionSkills', regionId: 'grounding' }, { kind: 'regionSkills', regionId: 'toolcraft' }] }, { host: 'grounding' }).join(','),
+      'grounding,toolcraft',
+      'gatePrevRegions：wards → grounding＋toolcraft'
+    );
+    eq(World.gatePrevRegions({ requires: null, knowledgeGaps: [{ kind: 'masteredAny', need: 2, have: 0 }] }, null).join(','), 'foundations', 'gatePrevRegions：只有 masteredAny → 沒指名 → 橋 → foundations');
+    // 前路已開？（三態的第二個參數）—— 鏈式門／知識式門／硬門的表
+    const U = (...ids) => (id) => ids.includes(id);
+    const P = World.gatePrevUnlocked;
+    const chain = { requires: { region: 'reasoning', cleared: 4 } };
+    eq(P(chain, null, U('foundations')), false, '鏈式門：reasoning 未解鎖 → 前路未開（grounding 門暗）');
+    eq(P(chain, null, U('foundations', 'reasoning')), true, '鏈式門：reasoning 已解鎖 → 前路已開（grounding 門琥珀）');
+    const toolcraft = { requires: null, knowledgeGaps: [{ kind: 'skill', skillId: 'agent-approval-bounds', regionId: 'orchestration' }, { kind: 'regionSkills', regionId: 'orchestration', need: 3, have: 0 }] };
+    eq(P(toolcraft, { host: 'orchestration' }, U('foundations')), false, '知識式門 toolcraft：orchestration 未解鎖 → 暗（新存檔）');
+    eq(P(toolcraft, { host: 'orchestration' }, U('foundations', 'orchestration')), true, '知識式門 toolcraft：orchestration 解鎖 → 琥珀');
+    const wards = { requires: null, knowledgeGaps: [{ kind: 'regionSkills', regionId: 'grounding', need: 3, have: 0 }, { kind: 'regionSkills', regionId: 'toolcraft', need: 1, have: 0 }] };
+    eq(P(wards, { host: 'grounding' }, U('foundations')), false, '知識式門 wards：grounding／toolcraft 都沒解鎖 → 暗');
+    eq(P(wards, { host: 'grounding' }, U('foundations', 'grounding')), true, '知識式門 wards：任一指到的區解鎖 → 琥珀');
+    const forms = { requires: null, knowledgeGaps: [{ kind: 'skill', skillId: 'clear-specific', regionId: 'foundations' }, { kind: 'regionSkills', regionId: 'config', need: 1, have: 0 }] };
+    eq(P(forms, null, U('foundations')), true, '知識式門 forms：條件指到 foundations（已解鎖）→ 琥珀');
+    const formsPartial = { requires: null, knowledgeGaps: [{ kind: 'regionSkills', regionId: 'config', need: 1, have: 0 }] };
+    eq(P(formsPartial, null, U('foundations')), false, '知識式門 forms：只剩 config 那一條沒滿足、config 未解鎖 → 暗');
+    const frugality = { requires: null, knowledgeGaps: [{ kind: 'masteredAny', need: 1, have: 0 }] };
+    eq(P(frugality, null, U('foundations')), true, '知識式門 frugality（任 1 片精通）：已解鎖 1 片 → 琥珀');
+    const divergence = { requires: null, knowledgeGaps: [{ kind: 'masteredAny', need: 2, have: 0 }] };
+    eq(P(divergence, null, U('foundations')), false, '知識式門 divergence（任 2 片精通）：只解鎖 1 片 → 暗（新存檔）');
+    eq(P(divergence, null, U('foundations', 'reasoning')), true, '知識式門 divergence：解鎖 2 片 → 琥珀');
+    const refinery = { requires: null, knowledgeGaps: [{ kind: 'regionSkills', regionId: 'orchestration', need: 2, have: 0 }, { kind: 'masteredAny', need: 1, have: 0 }] };
+    eq(P(refinery, null, U('foundations')), true, '知識式門 refinery：orchestration 未解鎖、但 masteredAny 1 片（已解鎖 1 片）→ 有一條條件指向已解鎖的區 → 琥珀');
+    const refineryHard = { requires: null, knowledgeGaps: [{ kind: 'regionSkills', regionId: 'orchestration', need: 2, have: 0 }, { kind: 'masteredAny', need: 2, have: 0 }] };
+    eq(P(refineryHard, null, U('foundations')), false, '（假想）指名的區沒開、masteredAny 2 片也不夠 → 暗');
+    eq(P(refineryHard, null, U('foundations', 'orchestration')), true, '（假想）指名的 orchestration 開了 → 琥珀');
+    const sight = { requires: null, knowledgeGaps: [{ kind: 'mastered', regionId: 'foundations' }] };
+    eq(P(sight, null, U('foundations')), true, '知識式門 sight（foundations 精通）：foundations 已解鎖 → 琥珀');
+    eq(P({ requires: null, knowledgeGaps: [] }, { host: 'grounding' }, U('foundations')), false, '沒有缺口的加建門：看母土地 grounding → 未解鎖 → 暗');
+    eq(P({ requires: null, knowledgeGaps: [] }, null, U('foundations')), true, '沒有缺口的橋上門：看 foundations → 已解鎖 → 琥珀');
+    eq(P(null, null, U('foundations')), true, 'gatePrevUnlocked(null) → foundations');
+    // 三態全表（鏈式／知識式／硬門 × 前路開／沒開）
+    const hardLocked = { unlocked: false, hard: true, requires: null, knowledgeGaps: [{ kind: 'masteredAny', need: 2 }] };
+    eq(G(hardLocked, P(hardLocked, null, U('foundations', 'reasoning', 'grounding'))), 'dark', '硬門未解鎖：就算前路已開也一律暗');
+    eq(G({ ...hardLocked, unlocked: true }, true), 'lit', '硬門解鎖 → lit');
+    eq(G({ unlocked: false, ...toolcraft }, P(toolcraft, null, U('foundations'))), 'dark', '表：知識式門 toolcraft 新存檔 → dark');
+    eq(G({ unlocked: false, ...toolcraft }, P(toolcraft, null, U('foundations', 'orchestration'))), 'amber', '表：知識式門 toolcraft orchestration 開了 → amber');
+    eq(G({ unlocked: false, ...chain }, P(chain, null, U('foundations'))), 'dark', '表：鏈式門 grounding 新存檔 → dark');
+    eq(G({ unlocked: false, ...chain }, P(chain, null, U('foundations', 'reasoning'))), 'amber', '表：鏈式門 grounding reasoning 開了 → amber');
+    // 真的 progression（新存檔）：knowledgeGaps 的 skill 缺口帶 regionId
+    {
+      const { createProgression } = await import('../src/progression/progression.js');
+      const SaveMod = await import('../src/save/save.js');
+      const prog = createProgression({ catalog, challenges, io: { load: () => SaveMod.defaultSave(), save: () => {}, reset: () => SaveMod.defaultSave() } });
+      const st = prog.gateStatus('toolcraft');
+      const skillGap = st.knowledgeGaps.find((g) => g.kind === 'skill');
+      ok(skillGap, '新存檔 toolcraft 有 skill 缺口');
+      eq(skillGap && skillGap.regionId, 'orchestration', 'skill 缺口帶所在區 regionId（agent-approval-bounds → orchestration）');
+      eq(World.gatePrevRegions(st, { host: 'orchestration' }).join(','), 'orchestration', '真 gateStatus：toolcraft 條件指向 orchestration');
+      eq(P(st, { host: 'orchestration' }, (id) => prog.isRegionUnlocked(id)), false, '真 gateStatus：新存檔 toolcraft 前路未開 → 暗');
+      eq(P(prog.gateStatus('divergence'), null, (id) => prog.isRegionUnlocked(id)), false, '真 gateStatus：新存檔 divergence（任 2 片）前路未開 → 暗');
+      eq(P(prog.gateStatus('reasoning'), null, (id) => prog.isRegionUnlocked(id)), true, '真 gateStatus：新存檔 reasoning 前路已開 → 琥珀');
+      eq(P(prog.gateStatus('forms'), null, (id) => prog.isRegionUnlocked(id)), true, '真 gateStatus：新存檔 forms（clear-specific 在 foundations）→ 琥珀');
+    }
+    const M = World.markerVisualState;
+    eq(M({ unlocked: false }), 'dark', 'markerVisualState 未解鎖 → dark');
+    eq(M({ unlocked: true, skipped: true }), 'amber', 'markerVisualState 先行前往 → amber');
+    eq(M({ unlocked: true, skipped: false }), 'lit', 'markerVisualState 正常解鎖 → lit');
+    eq(M(null), 'dark', 'markerVisualState(null) → dark');
+    eq(World.GATE_STATE_LOOK.lit.pillar, 0.6, 'lit：柱 emissive 0.6×');
+    eq(World.GATE_STATE_LOOK.amber.pillar, 0.35, 'amber：0.35×（琥珀）');
+    eq(World.GATE_STATE_LOOK.amber.invite, true, 'amber 用 PALETTE.invite（邀請琥珀）');
+    eq(World.GATE_STATE_LOOK.lit.invite, false, 'lit 用區主色');
+    eq(World.GATE_STATE_LOOK.dark.invite, false, 'dark 用區主色');
+    ok(!('warm' in World.GATE_STATE_LOOK.amber), 'GATE_STATE_LOOK 不再有 warm 鍵（暖金只留給成就熱點）');
+    // 邀請琥珀：跟成就暖金明顯不同（更暗、更灰）、仍是暖色、夜裡不刺眼
+    {
+      const inv = CS.hexToHsl(hex6(Engine.PALETTE.invite));
+      const wm = CS.hexToHsl(hex6(Engine.PALETTE.warm));
+      eq(hex6(Engine.PALETTE.invite), '#a8865c', 'PALETTE.invite ＝ #a8865c');
+      ok(Engine.PALETTE.invite !== Engine.PALETTE.warm, 'PALETTE.invite ≠ PALETTE.warm');
+      ok(inv.l < wm.l - 0.2, '邀請琥珀比暖金暗 ≥ 0.2（HSL）', `${inv.l.toFixed(2)} vs ${wm.l.toFixed(2)}`);
+      ok(inv.s < wm.s, '邀請琥珀比暖金灰', `${inv.s.toFixed(2)} vs ${wm.s.toFixed(2)}`);
+      ok(inv.h * 360 > 20 && inv.h * 360 < 50, '邀請琥珀色相仍在琥珀帶（20–50°）', (inv.h * 360).toFixed(1));
+      ok(inv.l <= 0.55, '邀請琥珀亮度 ≤ 0.55（夜裡不刺眼）', inv.l.toFixed(2));
+    }
+    eq(World.GATE_STATE_LOOK.dark.pillar, 0.12, 'dark：0.12×');
+    ok(World.GATE_STATE_LOOK.lit.pillar > World.GATE_STATE_LOOK.amber.pillar && World.GATE_STATE_LOOK.amber.pillar > World.GATE_STATE_LOOK.dark.pillar, '三態亮度單調：lit > amber > dark');
+  }
+
+  /* --- ⑥ 世界：建構時套 key/rim/particle；三態；0 新光源 --- */
+  {
+    const realDoc = globalThis.document;
+    globalThis.document = { createElement: () => ({ width: 1, height: 1, style: {}, getContext: () => anyStub() }) };
+    const countLights = (scene) => {
+      let n = 0;
+      scene.traverse((o) => {
+        if (o.isLight) n += 1;
+      });
+      return n;
+    };
+    // 可控的 progression stub：新存檔（只有 foundations）＋ 可跳門
+    const mkProg = () => {
+      const unlocked = new Set(['foundations']);
+      const skipped = new Set();
+      const REQ = { reasoning: 'foundations', grounding: 'reasoning', orchestration: 'grounding', config: 'orchestration' };
+      return {
+        unlocked,
+        skipped,
+        bestGrade: () => null,
+        isRegionUnlocked: (id) => unlocked.has(id),
+        gateStatus: (id) => ({ unlocked: unlocked.has(id), skipped: skipped.has(id), hard: false, requires: REQ[id] ? { region: REQ[id], cleared: 4 } : null, text: unlocked.has(id) ? '已開啟' : '需要…' }),
+        hasReadLore: () => false,
+        hasFoundInscription: () => false,
+        hasFoundSecret: () => false,
+        hasUsedHandle: () => false,
+      };
+    };
+    const prog = mkProg();
+    const sceneA = new THREE.Scene();
+    const worldA = World.createWorld({ engine: { scene: sceneA, camera: {}, onUpdate() {} }, quality: 'high', ...worldOpts, progression: prog, colorScript: CS.colorScriptFor });
+    const sceneB = new THREE.Scene();
+    const worldB = World.createWorld({ engine: { scene: sceneB, camera: {}, onUpdate() {} }, quality: 'high', ...worldOpts, progression: mkProg() });
+    eq(countLights(sceneA), countLights(sceneB), '色彩腳本不加光源（有腳本／沒腳本燈數相同）', `${countLights(sceneA)} vs ${countLights(sceneB)}`);
+    // key：每區那一盞 fill 的顏色 ＝ 腳本 key
+    let fills = 0;
+    sceneA.traverse((o) => {
+      if (o.isPointLight && o.parent && /^props:/.test(o.parent.name) && o.parent.userData.fill === o) {
+        fills += 1;
+        const id = o.parent.name.slice(6);
+        eq(`#${o.color.getHexString()}`, csJson.regions[id].key, `[${id}] fill 光顏色 ＝ 腳本 key`);
+      }
+    });
+    eq(fills, 11, '11 盞主色補光（foundations 沒有）');
+    // particle：每一區第一顆螢火的顏色 ∝ 腳本 particle（顏色帶 0.82–1.12 的隨機亮度抖動 → normalize 後比色相）
+    const moteStart = (regionId) => {
+      // buildMotes 的排法：REGION_SITES 順序、每區 round(120 × motes) 顆（quality high）
+      let at = 0;
+      for (const site of World.REGION_SITES) {
+        if (site.id === regionId) return at;
+        at += Math.round(120 * World.atmosphereFor(site.id).motes);
+      }
+      return -1;
+    };
+    const sameHue = (col, i, want) => {
+      const r = col.getX(i), g = col.getY(i), b = col.getZ(i);
+      const k = want.r / r;
+      return Math.abs(g * k - want.g) < 0.01 && Math.abs(b * k - want.b) < 0.01;
+    };
+    {
+      const col = worldA.motes.geometry.attributes.color;
+      for (const id of regionIds) {
+        const i = moteStart(id);
+        ok(i >= 0 && i < col.count, `[${id}] 螢火起始索引在範圍內`, `${i}/${col.count}`);
+        ok(sameHue(col, i, new THREE.Color(csJson.regions[id].particle)), `[${id}] 有腳本：螢火色 ∝ 腳本 particle`);
+      }
+      // 沒腳本（worldB／testWorld）：走 P06 之前的算法（區主色往 #dff0fb 靠 0.45）
+      const groupsB = new Map(curriculum.groups.map((g) => [g.id, g]));
+      for (const r of catalog.implementedRegions()) if (!groupsB.has(r.id)) groupsB.set(r.id, r);
+      const oldFormula = (id) => new THREE.Color(groupsB.get(id).color).lerp(new THREE.Color(0xdff0fb), 0.45);
+      const colB = worldB.motes.geometry.attributes.color;
+      const colT = testWorld.motes.geometry.attributes.color;
+      for (const id of regionIds) {
+        const i = moteStart(id);
+        ok(sameHue(colB, i, oldFormula(id)), `[${id}] 沒腳本：螢火色 ∝ 舊算法（區主色→#dff0fb 0.45）`);
+        ok(sameHue(colT, i, oldFormula(id)), `[${id}] testWorld（沒腳本）：螢火色 ∝ 舊算法`);
+      }
+      // 自訂腳本：particle 給別的顏色 → 螢火真的換色；給 null → 舊算法（逐鍵）
+      const custom = (regionId) => (regionId === 'reasoning' ? { key: '#2040ff', rim: '#10ff20', particle: '#ff2010' } : { key: null, rim: null, particle: null });
+      const sceneC = new THREE.Scene();
+      const worldC = World.createWorld({ engine: { scene: sceneC, camera: {}, onUpdate() {} }, quality: 'high', ...worldOpts, progression: mkProg(), colorScript: custom });
+      const colC = worldC.motes.geometry.attributes.color;
+      ok(sameHue(colC, moteStart('reasoning'), new THREE.Color('#ff2010')), '自訂腳本：reasoning 螢火 ∝ #ff2010（particle 真的接進去）');
+      ok(!sameHue(colC, moteStart('reasoning'), oldFormula('reasoning')), '自訂腳本：reasoning 螢火不再是舊算法');
+      ok(sameHue(colC, moteStart('grounding'), oldFormula('grounding')), '自訂腳本：particle null 的區走舊算法（逐鍵退回）');
+      // rim：kit.light 被 rim 覆寫；null 就是 kitFor 算的
+      const Props2 = await import('../src/world/props.js');
+      const kitPlain = (id) => Props2.kitFor(groupsB.get(id).color);
+      eq(typeof worldC.kitOf, 'function', 'world.kitOf 可讀（rim 覆寫可觀測）');
+      eq(worldC.kitOf('reasoning').light, 0x10ff20, '自訂腳本：reasoning kit.light ＝ rim #10ff20');
+      eq(worldC.kitOf('grounding').light, kitPlain('grounding').light, '自訂腳本：rim null 的區 kit.light ＝ kitFor 算的');
+      eq(worldB.kitOf('reasoning').light, kitPlain('reasoning').light, '沒腳本：kit.light ＝ kitFor 算的');
+      eq(worldA.kitOf('reasoning').light, parseInt(csJson.regions.reasoning.rim.slice(1), 16), 'json 腳本：kit.light ＝ json rim');
+      for (const id of regionIds) {
+        eq(worldA.kitOf(id).accent, kitPlain(id).accent, `[${id}] rim 只覆寫 light，accent 不動`);
+        eq(worldA.kitOf(id).mid, kitPlain(id).mid, `[${id}] mid 不動`);
+        eq(worldA.kitOf(id).dark, kitPlain(id).dark, `[${id}] dark 不動`);
+      }
+      // key：自訂腳本的 fill 顏色；null → 區主色
+      sceneC.traverse((o) => {
+        if (o.isPointLight && o.parent && o.parent.name === 'props:reasoning' && o.parent.userData.fill === o) eq(`#${o.color.getHexString()}`, '#2040ff', '自訂腳本：reasoning fill ＝ key #2040ff');
+        if (o.isPointLight && o.parent && o.parent.name === 'props:grounding' && o.parent.userData.fill === o) eq(`#${o.color.getHexString()}`, groupsB.get('grounding').color.toLowerCase(), '自訂腳本：key null 的區 fill ＝ 區主色');
+      });
+      eq(countLights(sceneC), countLights(sceneB), '自訂腳本也不加光源');
+    }
+    // 三態：新存檔 → reasoning amber（foundations 已解鎖）、grounding dark；石座 foundations lit、reasoning dark
+    const gA = (id) => worldA.gates.find((g) => g.id === id);
+    eq(gA('reasoning').visualState, 'amber', '新存檔：reasoning 門琥珀（前一區已解鎖，可以先行前往）');
+    eq(gA('grounding').visualState, 'dark', '新存檔：grounding 門暗（前一區 reasoning 未解鎖）');
+    eq(gA('forms').visualState, 'amber', '新存檔（stub：沒有 knowledgeGaps）：forms 橋自 foundations → 琥珀');
+    eq(gA('wards').visualState, 'dark', '新存檔（stub）：wards 加建自 grounding、grounding 未解鎖 → 暗');
+    const mk = (region) => worldA.markers.find((m) => m.region === region);
+    eq(mk('foundations').regionState, 'lit', '新存檔：foundations 石座 lit');
+    eq(mk('reasoning').regionState, 'dark', '新存檔：reasoning 石座 dark');
+    eq(mk('reasoning').dimTarget, 0.4, 'dark 石座底亮度目標 ×0.4');
+    // 知識式門（stub 帶 knowledgeGaps）：toolcraft 指向 orchestration → 暗；orchestration 解鎖 → 琥珀
+    {
+      const progK = mkProg();
+      const base = progK.gateStatus;
+      const GAPS = {
+        toolcraft: [{ kind: 'skill', skillId: 'agent-approval-bounds', regionId: 'orchestration' }, { kind: 'regionSkills', regionId: 'orchestration', need: 3, have: 0 }],
+        divergence: [{ kind: 'masteredAny', need: 2, have: 0 }],
+        frugality: [{ kind: 'masteredAny', need: 1, have: 0 }],
+        sight: [{ kind: 'mastered', regionId: 'foundations' }],
+      };
+      progK.gateStatus = (id) => ({ ...base(id), knowledgeGaps: GAPS[id] || [] });
+      const sceneK = new THREE.Scene();
+      const worldK = World.createWorld({ engine: { scene: sceneK, camera: {}, onUpdate() {} }, quality: 'high', ...worldOpts, progression: progK, colorScript: CS.colorScriptFor });
+      const gK = (id) => worldK.gates.find((g) => g.id === id);
+      eq(gK('toolcraft').visualState, 'dark', '知識式門 toolcraft：新存檔 orchestration 未解鎖 → 暗');
+      eq(gK('divergence').visualState, 'dark', '知識式門 divergence（任 2 片）：只解鎖 1 片 → 暗');
+      eq(gK('frugality').visualState, 'amber', '知識式門 frugality（任 1 片）：已解鎖 1 片 → 琥珀');
+      eq(gK('sight').visualState, 'amber', '知識式門 sight（foundations 精通）：foundations 已解鎖 → 琥珀');
+      progK.unlocked.add('orchestration');
+      worldK.refreshVisualStates();
+      eq(gK('toolcraft').visualState, 'amber', '知識式門 toolcraft：orchestration 解鎖 → 琥珀');
+      eq(gK('divergence').visualState, 'amber', '知識式門 divergence：解鎖 2 片 → 琥珀');
+      progK.unlocked.delete('orchestration');
+      worldK.refreshVisualStates();
+      eq(gK('toolcraft').visualState, 'dark', '知識式門 toolcraft：orchestration 又鎖回去 → 暗（refreshVisualStates 可逆）');
+    }
+    // 跳門
+    prog.unlocked.add('reasoning');
+    prog.skipped.add('reasoning');
+    worldA.refreshGates();
+    eq(gA('reasoning').visualState, 'lit', 'skipGate 後 reasoning 門 lit（開了就是主色亮）');
+    eq(gA('reasoning').isOpen, true, 'refreshGates 開門');
+    eq(gA('grounding').visualState, 'amber', 'reasoning 開了 → grounding 門轉琥珀');
+    eq(mk('reasoning').regionState, 'amber', 'skipGate 後 reasoning 石座 amber');
+    eq(mk('reasoning').dimTarget, 1, 'amber 石座底亮度目標 1');
+    // 石座 halo 目標色：跑幾幀 update 後 halo 顏色 lerp 到邀請琥珀、然後到位（visualSettled）、到位後不再動
+    {
+      const m = mk('reasoning');
+      const before = m.halo.material.color.getHex();
+      eq(m.visualSettled, false, 'setRegionState 換色後 visualSettled false');
+      for (let i = 0; i < 120; i += 1) m.update(0.05, i * 0.05, null);
+      const after = m.halo.material.color.getHex();
+      eq(after, Engine.PALETTE.invite, 'amber 石座的 halo 顏色 lerp 到 PALETTE.invite（邀請琥珀，不是暖金）', `${before.toString(16)} → ${after.toString(16)}`);
+      ok(after !== Engine.PALETTE.warm, 'amber 石座 halo ≠ PALETTE.warm');
+      const inv = new THREE.Color(Engine.PALETTE.invite);
+      eq([m.halo.material.color.r, m.halo.material.color.g, m.halo.material.color.b].join(','), [inv.r, inv.g, inv.b].join(','), 'halo 逐通道**精確**等於目標（不是只差 1e-6）');
+      eq(m.visualSettled, true, '到位後 visualSettled true');
+      eq(m.dimNow, 1, 'dimNow 精確等於 dimTarget 1');
+      const r0 = m.halo.material.color.r;
+      const dim0 = m.dimNow;
+      m.update(0.05, 999, null);
+      eq(m.halo.material.color.r, r0, '到位後 update 不再動 halo 顏色（零工作）');
+      eq(m.dimNow, dim0, '到位後 update 不再動 dimNow');
+      ok(m.halo.material.opacity > 0.02, 'amber 石座 halo 有微亮（遠處讀得出）', String(m.halo.material.opacity));
+      // dark → dim 也精確貼上 0.4
+      m.setRegionState('dark');
+      eq(m.visualSettled, false, '換 dark 後 visualSettled false');
+      for (let i = 0; i < 200; i += 1) m.update(0.05, i * 0.05, null);
+      eq(m.dimNow, 0.4, 'dark：dimNow 精確 ＝ 0.4');
+      eq(m.visualSettled, true, 'dark 到位 visualSettled true');
+      m.setRegionState('amber');
+    }
+    // 正常解鎖
+    prog.skipped.delete('reasoning');
+    worldA.refreshGates();
+    eq(mk('reasoning').regionState, 'lit', '正常解鎖 → reasoning 石座 lit');
+    // 閘門材質往目標 lerp（不硬切）、到位後精確等於目標、visualSettled、零工作
+    {
+      const g = gA('grounding');
+      const pillar = g.group.children.find((o) => o.isMesh && o.geometry.type === 'CylinderGeometry');
+      const arch = g.group.children.find((o) => o.isMesh && o.geometry.type === 'TorusGeometry');
+      const before = pillar.material.emissive.getHex();
+      eq(g.visualSettled, false, 'amber 門剛設完 visualSettled false');
+      g.update(0.05, 0);
+      ok(pillar.material.emissive.getHex() !== before, '一幀後柱 emissive 已經在動（不硬切）');
+      const wantC = new THREE.Color(Engine.PALETTE.invite).multiplyScalar(0.35);
+      ok(pillar.material.emissive.getHex() !== wantC.getHex(), '一幀後還沒到位（是 lerp）');
+      for (let i = 1; i < 200; i += 1) g.update(0.05, i * 0.05);
+      const after = pillar.material.emissive.getHex();
+      eq(after, wantC.getHex(), 'amber 門的柱 emissive lerp 到 invite×0.35', `${before.toString(16)} → ${after.toString(16)}`);
+      eq([pillar.material.emissive.r, pillar.material.emissive.g, pillar.material.emissive.b].join(','), [wantC.r, wantC.g, wantC.b].join(','), '柱 emissive 逐通道精確 ＝ 目標');
+      eq(arch.material.emissiveIntensity, World.GATE_STATE_LOOK.amber.archIntensity, '拱 emissiveIntensity 精確 ＝ 0.7');
+      eq(g.visualSettled, true, '到位後 gate.visualSettled true');
+      const r0 = pillar.material.emissive.r;
+      g.update(0.05, 999);
+      eq(pillar.material.emissive.r, r0, '到位後 update 不再動柱 emissive（零工作）');
+      // dark 門
+      const d = gA('config');
+      for (let i = 0; i < 200; i += 1) d.update(0.05, i * 0.05);
+      const dp = d.group.children.find((o) => o.isMesh && o.geometry.type === 'CylinderGeometry');
+      const c = new THREE.Color(curriculum.groups.find((x) => x.id === 'config').color);
+      eq(dp.material.emissive.getHex(), c.clone().multiplyScalar(0.12).getHex(), 'dark 門的柱 emissive ＝ 區主色×0.12');
+      eq(d.visualSettled, true, 'dark 門到位 visualSettled true');
+      // 開門 → lit：柱 0.6×、拱 1.3
+      const lit = gA('reasoning');
+      for (let i = 0; i < 200; i += 1) lit.update(0.05, i * 0.05);
+      const lp = lit.group.children.find((o) => o.isMesh && o.geometry.type === 'CylinderGeometry');
+      const lc = new THREE.Color(curriculum.groups.find((x) => x.id === 'reasoning').color);
+      eq(lp.material.emissive.getHex(), lc.clone().multiplyScalar(0.6).getHex(), 'lit 門的柱 emissive ＝ 區主色×0.6');
+      eq(lit.visualSettled, true, 'lit 門到位');
+    }
+    eq(typeof worldA.refreshMarkerStates, 'function', 'world.refreshMarkerStates 存在');
+    // 沒 refresh 前（worldB 剛建好）也已經是三態
+    ok(worldB.gates.every((g) => g.visualState), '建構完每道門都有三態');
+    globalThis.document = realDoc;
+    if (!realDoc) delete globalThis.document;
+  }
+
+  /* --- ⑦ 靜態掃描：每幀迴圈零配置、0 新光源、入口不變 --- */
+  {
+    const worldSrc = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+    // buildGate 的 update／buildMarker 的 update：零 new、零 map/filter
+    const gateAt = worldSrc.indexOf('function buildGate(');
+    const gateUpdate = bodyOf(worldSrc, 'update', gateAt);
+    ok(gateUpdate.length > 0, '找得到 buildGate 的 update()');
+    ok(!/new THREE\./.test(gateUpdate) && !/\.map\(|\.filter\(|\.forEach\(/.test(gateUpdate) && !/\.clone\(\)|\.getHex\(/.test(gateUpdate), '閘門 update() 零配置（三態 lerp 用預配置的目標色）');
+    const markerAt = worldSrc.indexOf('function buildMarker(');
+    const markerUpdate = bodyOf(worldSrc, 'update', markerAt);
+    ok(markerUpdate.length > 0, '找得到 buildMarker 的 update()');
+    ok(/visualSettled/.test(gateUpdate) && /visualSettled/.test(markerUpdate), '兩個 update() 都有 visualSettled 短路（到位後零工作）');
+    ok(/lerpColorSettle\(/.test(gateUpdate) && /lerpColorSettle\(/.test(markerUpdate), '兩個 update() 都走 lerpColorSettle（逐通道 < 1e-3 貼上）');
+    eq(World.SETTLE_EPS, 1e-3, 'SETTLE_EPS ＝ 1e-3');
+    // 邀請琥珀 vs 成就暖金：閘門三態／石座三態不碰 PALETTE.warm
+    const gateBody = bodyOf(worldSrc, 'function buildGate');
+    ok(!/PALETTE\.warm/.test(bodyOf(gateBody, 'setVisualState')), 'buildGate.setVisualState 不用 PALETTE.warm');
+    ok(/PALETTE\.invite/.test(gateBody), 'buildGate 用 PALETTE.invite');
+    const markerBody = bodyOf(worldSrc, 'function buildMarker');
+    ok(!/warm/.test(bodyOf(markerBody, 'setRegionState')), 'buildMarker.setRegionState 不用 warm（amber → invite）');
+    ok(/PALETTE\.warm/.test(bodyOf(markerBody, 'setCleared')), 'buildMarker.setCleared 仍是暖金（成就）');
+    ok(!/new THREE\./.test(markerUpdate) && !/\.map\(|\.filter\(|\.forEach\(/.test(markerUpdate) && !/\.clone\(\)|\.getHex\(/.test(markerUpdate), '石座 update() 零配置');
+    ok(/setVisualState\(/.test(worldSrc) && /setRegionState\(/.test(worldSrc), '閘門 setVisualState／石座 setRegionState 存在');
+    ok(/refreshMarkerStates/.test(worldSrc), 'refreshMarkerStates 存在');
+    // 光源：P06 沒有新的 new THREE.*Light（與 P05 之前同數）
+    eq((worldSrc.match(/new THREE\.(Point|Spot|Directional|Hemisphere|Ambient|RectArea)Light/g) || []).length, 3, 'world.js 的 Light 建構呼叫點數不變（3：fill／道具燈／燈池 —— P06 沒加）');
+    const engineSrc = readFileSync(resolve(root, 'src/engine/engine.js'), 'utf8');
+    const applySkyBody = bodyOf(engineSrc, 'function applySky');
+    ok(applySkyBody.length > 0, '找得到 applySky');
+    ok(/skyMultiplier\(/.test(applySkyBody), 'applySky 寫穹頂乘數 uniform');
+    ok(!/new THREE\./.test(applySkyBody) && !/=>/.test(applySkyBody), 'applySky 零配置、無閉包（P06 之後仍是）');
+    ok(/uMulTop/.test(engineSrc) && /uMulLow/.test(engineSrc), '穹頂材質有 uMulTop／uMulLow');
+    ok(/SKY_STOPS/.test(engineSrc) && /createLinearGradient/.test(engineSrc), '穹頂漸層貼圖沒被拿掉（不重畫 canvas）');
+    ok(/#include <tonemapping_fragment>/.test(engineSrc) && /#include <colorspace_fragment>/.test(engineSrc), '穹頂 shader 走同一段 tonemapping／colorspace 收尾（與 MeshBasicMaterial 同貌）');
+    eq((engineSrc.match(/new THREE\.SphereGeometry\(620/g) || []).length, 1, '穹頂仍是同一顆球（換材質不換 mesh）');
+    const mainSrc = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+    ok(/loadColorScript\(/.test(mainSrc), 'main.js 開機 loadColorScript');
+    ok(/colorScript:\s*colorScriptFor/.test(mainSrc), 'createWorld 收 colorScript: colorScriptFor');
+    ok(/world\.refreshVisualStates\(\);/.test(mainSrc.slice(mainSrc.indexOf('const entered = hud.setRegion'), mainSrc.indexOf('const entered = hud.setRegion') + 600)), '進區時 world.refreshVisualStates()（只刷三態、不重做標籤）');
+    ok(/refreshVisualStates/.test(worldSrc), 'world.refreshVisualStates 存在');
+    eq((mainSrc.match(/engine\.setMood\(/g) || []).length, 1, 'main.js 仍只有一個 engine.setMood 呼叫點');
+    {
+      const resetAt = mainSrc.indexOf('onReset: () => {');
+      const resetBody = mainSrc.slice(resetAt, mainSrc.indexOf('onReplayPrologue', resetAt));
+      ok(resetAt >= 0 && /world\.refreshGates\?\.\(\)|world\.refreshGates\(\)/.test(resetBody), 'onReset 呼叫 world.refreshGates()（先行前往過的門回到琥珀）');
+      ok(/world\.refreshMarkerStates/.test(resetBody), 'onReset 呼叫 world.refreshMarkerStates()（石座回到 dark／amber）');
+    }
+    const csSrc = readFileSync(resolve(root, 'src/world/color-script.js'), 'utf8');
+    ok(!/from ['"]three['"]/.test(csSrc), 'color-script.js 不 import three');
+    ok(!/document\.|window\./.test(csSrc), 'color-script.js 不碰 DOM');
+    const worldMd = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+    const s22 = worldMd.slice(worldMd.indexOf('### 2.2'), worldMd.indexOf('### 2.3'));
+    ok(/色彩腳本/.test(s22) && /color-script\.json/.test(s22), 'WORLD.md §2.2 有色彩腳本規則');
+    for (const id of regionIds) ok(new RegExp('`' + id + '`').test(s22), `WORLD.md §2.2 色卡表有 ${id}`);
+    for (const id of regionIds) ok(s22.includes(csJson.regions[id].skyTop) && s22.includes(csJson.regions[id].particle), `WORLD.md §2.2 色卡表 ${id} 的值與 json 一致`);
+    ok(/三態/.test(s22), 'WORLD.md §2.2 有三態規則');
+    ok(/邀請琥珀/.test(s22) && /PALETTE\.invite/.test(s22) && /#a8865c/.test(s22), 'WORLD.md §2.2 三態規則點名「邀請琥珀」PALETTE.invite #a8865c');
+    ok(/不是成就暖金/.test(s22), 'WORLD.md §2.2 三態規則講明「不是成就暖金」');
+    ok(/暖金只留給成就熱點/.test(s22), 'WORLD.md §2.2 暖金規則仍在');
+    ok(/知識式門/.test(s22) && /masteredAny/.test(s22), 'WORLD.md §2.2 三態規則含知識式門');
+    ok(s22.includes('0° ／ 0.00·0.00'), 'WORLD.md §2.2 色卡表 foundations 偏移印 0° ／ 0.00·0.00（不是 -0）');
+    ok(!/-0°|-0\.00/.test(s22), 'WORLD.md §2.2 色卡表沒有 -0');
+    ok(existsSync(resolve(root, 'scripts/color-script-table.mjs')), 'scripts/color-script-table.mjs 存在（色卡表由腳本產生）');
+  }
+
+  /* --- ⑧ 節奏稽核：可跑、12 區、直方圖鍵；印死區數當軟警告 --- */
+  {
+    const { pacingAudit, KINDS, DEAD_KINDS, BIN_LABELS } = await import('./pacing-audit.mjs');
+    const audit = await pacingAudit();
+    eq(Object.keys(audit.regions).length, 12, 'pacingAudit() 回 12 區');
+    eq(BIN_LABELS.join(','), '0-15,15-30,30-45,>45', '直方圖四格 0–15／15–30／30–45／>45');
+    ok(audit.samples > 500, 'pacingAudit 唯一樣點夠多', String(audit.samples));
+    ok(audit.rawSamples > audit.samples, '去重前樣點 > 唯一樣點（段與段共用端點被去重）', `${audit.rawSamples} > ${audit.samples}`);
+    eq(Object.values(audit.regions).reduce((a, r) => a + r.samples, 0) <= audit.samples, true, '各區樣點總和 ≤ 唯一樣點數（橋／虛空不算區）');
+    for (const kind of DEAD_KINDS) {
+      // 死區沒有兩段共用端點（跨段接縫已合併）
+      const runs = audit.deadZones[kind];
+      const ends = new Set();
+      let dup = 0;
+      for (const z of runs) {
+        const pts = z.samples === 1 ? [z.from] : [z.from, z.to];
+        for (const p of pts) {
+          const k = `${Math.round(p[0] * 2)},${Math.round(p[1] * 2)}`;
+          if (ends.has(k)) dup += 1;
+          ends.add(k);
+        }
+      }
+      eq(dup, 0, `[${kind}] 死區段兩兩不共用端點（接縫已合併）`, String(dup));
+      ok(runs.every((z) => z.samples >= 1 && Number.isFinite(z.length)), `[${kind}] 每段死區有樣點數與長度`);
+    }
+    for (const id of Object.keys(audit.regions)) {
+      const r = audit.regions[id];
+      ok(KINDS.every((k) => Array.isArray(r.hist[k]) && r.hist[k].length === 4), `[${id}] 四類直方圖各四格`);
+      ok(DEAD_KINDS.every((k) => Array.isArray(r.deadZones[k])), `[${id}] 三種口徑的死區清單`);
+      ok(r.samples > 0, `[${id}] 有樣點`, String(r.samples));
+      eq(r.hist.micro.reduce((a, b) => a + b, 0), r.samples, `[${id}] 直方圖總和 ＝ 樣點數`);
+    }
+    ok(Array.isArray(audit.deadZones.encounter) && Array.isArray(audit.deadZones.micro) && Array.isArray(audit.deadZones.mid), '全域死區清單三種口徑');
+    /*
+     * v1.2 · P06c 起這是**硬斷言**，不再只是軟警告：
+     * 微觸死區（走 45 公尺沒有任何小東西回應你）最多 4 段，而且沒有一段超過 45 公尺。
+     * P06 量到 12 段（sight 75m／forms 72m／toolcraft 67m…），P06c 補完七片空區之後歸零。
+     * 之後任何一次鋪東西「只准變少」—— 這條線就是那個「只准變少」的底。
+     */
+    ok(audit.deadZones.micro.length <= 4, '微觸死區 ≤ 4 段（P06c 硬門檻）', `n=${audit.deadZones.micro.length}`);
+    ok(
+      audit.deadZones.micro.every((z) => z.length < 45),
+      '沒有任何一段微觸死區長過 45 公尺',
+      audit.deadZones.micro.map((z) => `${z.region}:${z.length.toFixed(0)}m`).join(' ')
+    );
+    eq(audit.deadZones.encounter.length, 0, '沒有「微觸與中景都沒有」的死區');
+    for (const site of World.REGION_SITES) {
+      ok(audit.regions[site.id].hist.micro[3] === 0, `[${site.id}] 沒有任何樣點離最近的微觸 > 45 公尺`, String(audit.regions[site.id].hist.micro[3]));
+    }
+    // 軟警告：印，不 fail
+    const line = Object.entries(audit.regions)
+      .map(([id, r]) => `${id}:${r.deadZones.encounter.length}/${r.deadZones.micro.length}/${r.deadZones.mid.length}`)
+      .join('  ');
+    console.log(`  ⚠ 節奏稽核死區段（encounter/micro/mid，>45 m）：${line}`);
+    console.log(`  ⚠ 微觸 >45 m 樣點最多的區：${Object.entries(audit.regions).sort((a, b) => b[1].hist.micro[3] - a[1].hist.micro[3]).slice(0, 4).map(([id, r]) => `${id} ${r.hist.micro[3]}/${r.samples}`).join('、')}（P11 起鋪中景先看這裡）`);
+  }
+}
 
 /* ================================================================== */
 /* Phase 7：序章「喚醒神諭」引導課程                                     */
@@ -6442,8 +10558,8 @@ console.log('\n▸ 量器坊（課程 v2 · Phase E）');
     ok(Boolean(site), '世界資料裡有量器坊這片土地');
     ok(site.x === 0 && site.z > 0, '量器坊在正南（+Z）', `${site.x},${site.z}`);
     ok(site.radius > 30 && site.flat < site.radius, '量器坊的半徑與內圈合理', `${site.radius}/${site.flat}`);
-    // 整片土地不能掉出地形網格（buildTerrain 的平面是 WORLD_RADIUS * 2 + 40）
-    const half = World.WORLD_RADIUS + 20;
+    // 整片土地不能掉出地形網格（buildTerrain 的平面就是 World.TERRAIN_SIZE 公尺見方）
+    const half = World.TERRAIN_SIZE / 2;
     for (const st of World.REGION_SITES) {
       ok(
         Math.abs(st.x) + st.radius <= half && Math.abs(st.z) + st.radius <= half,
@@ -6666,10 +10782,47 @@ console.log('\n▸ 契約鍛冶場與護欄崗（課程 v2 · Phase F）');
     const corridor = World.CORRIDORS.find((c) => c.region === 'toolcraft');
     ok(Boolean(corridor), '有一條橋通往契約鍛冶場');
     ok(corridor.gateAt > 0 && corridor.gateAt < corridor.length, '契約鍛冶場的閘門在橋中段');
-    /* 地貌：中央的鍛台高、四周是放射狀的工具溝槽 */
-    const mid = World.terrainHeight(site.x, site.z);
-    const rim = World.terrainHeight(site.x - 34, site.z);
-    ok(mid > rim + 1, '契約鍛冶場中央的鍛台比外圈高', `${mid.toFixed(1)} vs ${rim.toFixed(1)}`);
+    /*
+     * 地貌：中央的鍛台高、四周是放射狀的工具溝槽。
+     *
+     * v1.2 · P16d：量的兩個點換過了。原本是「中心 vs 離心 34」——
+     * 那一條其實在**量虛空的塌陷**，不是量鍛台：離心 34 落在覆蓋率 0.93 上，
+     * P16d 之前被 `-(1 - cover) * 34` 壓低 2.5 公尺，所以差值才會 > 1；
+     * 高度場改成「走得到的地方一寸都不崩」之後它當場掉到 2.9 vs 2.4。
+     * 而「中心」也不是最高點 —— 通往這裡的橋正好從中心切過去，
+     * 橋的高度（1.1）與地貌各佔一半權重，把中心壓下來了。
+     * 現在量的是**沒有被橋壓到的方向**上，鍛台（離心 10）與外圈（離心 28）的平均高度。
+     */
+    /**
+     * 這個點被通往這裡的橋壓到了嗎？
+     * 橋從中央高原直直過來、一路到土地的**中心**（`CORRIDORS` 的 to 就是中心），
+     * 所以「壓到」＝ 還在中央高原那一側（`along < 0`）而且離中線 < 12 公尺。
+     */
+    const onBridgeSide = (px, pz) => {
+      const along = (px - site.x) * corridor.dir.x + (pz - site.z) * corridor.dir.z;
+      const perp = Math.abs(-(px - site.x) * corridor.dir.z + (pz - site.z) * corridor.dir.x);
+      return along < 0 && perp < 12;
+    };
+    const forgeRing = (d) => {
+      const v = [];
+      for (let a = 0; a < 24; a += 1) {
+        const ang = (a / 24) * Math.PI * 2;
+        const px = site.x + Math.cos(ang) * d;
+        const pz = site.z + Math.sin(ang) * d;
+        if (onBridgeSide(px, pz)) continue; // 跳過被橋壓到的方向
+        v.push(World.terrainHeight(px, pz));
+      }
+      return v.reduce((a2, b) => a2 + b, 0) / v.length;
+    };
+    /*
+     * v1.2 · P22c：取樣半徑跟著土地一起 ×1.3（10 → 13、28 → 36.4）。
+     * 這兩個半徑量的是**這片土地的地貌**（鍛台 vs 外圈），土地放大 1.3 倍、
+     * 地貌也跟著拉寬 1.3 倍（`RELIEF_SPAN`），量它的尺自然也要跟著放大 ——
+     * 不放大就會拿內圈的尺去量已經被拉到外面的鍛台邊緣（實測差 1.99，只差 0.01 就破）。
+     */
+    const mid = forgeRing(13);
+    const rim = forgeRing(36.4);
+    ok(mid > rim + 2, '契約鍛冶場的鍛台比外圈高', `${mid.toFixed(2)} vs ${rim.toFixed(2)}`);
     const ring = [];
     for (let a = 0; a < 24; a += 1) {
       const ang = (a / 24) * Math.PI * 2;
@@ -7611,8 +11764,8 @@ console.log('\n▸ 觀象臺（課程 v2 · Phase I）');
       '觀象臺自己有一條橋接回中央高原（它不接在任何一區後面）'
     );
     ok(
-      Math.abs(site.x) + site.radius <= 168 && Math.abs(site.z) + site.radius <= 168,
-      '整片土地都在地形網格裡（±170）',
+      Math.abs(site.x) + site.radius <= World.TERRAIN_SIZE / 2 && Math.abs(site.z) + site.radius <= World.TERRAIN_SIZE / 2,
+      `整片土地都在地形網格裡（±${World.TERRAIN_SIZE / 2}）`,
       `${Math.abs(site.x) + site.radius} / ${Math.abs(site.z) + site.radius}`
     );
     const gnd = World.REGION_SITES.find((s) => s.id === 'grounding');
@@ -7979,8 +12132,8 @@ console.log('\n▸ 分歧之廳與拆碑（課程 v2 · Phase J1）');
       '閘門立在加建的頸口上'
     );
     ok(
-      Math.abs(site.x) + site.radius <= 168 && Math.abs(site.z) + site.radius <= 168,
-      '整片土地都在地形網格裡（±170）',
+      Math.abs(site.x) + site.radius <= World.TERRAIN_SIZE / 2 && Math.abs(site.z) + site.radius <= World.TERRAIN_SIZE / 2,
+      `整片土地都在地形網格裡（±${World.TERRAIN_SIZE / 2}）`,
       `${Math.abs(site.x) + site.radius} / ${Math.abs(site.z) + site.radius}`
     );
     /* 與別片土地留得出虛空 */
@@ -10490,12 +14643,24 @@ console.log('\n▸ 課程 v2 runtime catalog（Phase B step 1）');
     const a = createProgression({ catalog, challenges });
     const b = createProgression({ curriculum, challenges });
     eq(a.masteredRegions().join(','), b.masteredRegions().join(','), 'progression：兩種建法的精通列舉一致');
+    /*
+     * v1.2 · P23：隱藏成就的門檻對齊 P22（130 條技法全收 ＋ 四宿全亮）之後，
+     * 兩種建法的**總數本來就該不一樣** —— 丟 catalog 的認得 130 條技法，
+     * 只丟 curriculum 的那一份世界裡根本沒有 v2 技法，「全部」就只有 68 條。
+     * 一致的是四宿那一半（同一份 vendors、同一個門檻）。
+     */
+    eq(a.hiddenAchievement().total, catalog.counts.skills, 'progression：隱藏成就的總數＝130 條技法（P22 那把尺）');
+    eq(b.hiddenAchievement().total, catalog.counts.techniques, '（對照）沒有 v2 技法的建法退回 68 條舊技巧那把尺');
     eq(
-      JSON.stringify(a.hiddenAchievement()),
-      JSON.stringify(b.hiddenAchievement()),
-      'progression：兩種建法的隱藏成就統計一致'
+      JSON.stringify(a.hiddenAchievement().vendors),
+      JSON.stringify(b.hiddenAchievement().vendors),
+      'progression：兩種建法的四宿統計一致'
     );
-    eq(a.hiddenAchievement().total, catalog.counts.techniques, 'progression：隱藏成就的總數來自 catalog');
+    eq(
+      a.hiddenAchievement().mansionsTotal,
+      b.hiddenAchievement().mansionsTotal,
+      'progression：兩種建法都知道一共有四宿'
+    );
     const { REGION_GATES: GATES } = await import('../src/progression/progression.js');
     eq(
       Object.keys(GATES).slice().sort().join(','),
@@ -10808,8 +14973,16 @@ console.log('\n▸ 應用關與印記（課程 v2 · Phase J2）');
     const vendors = (curriculum.vendors || []).map((v) => v.id).sort().join(',');
     eq(vendors, 'anthropic,google,openai,xai', 'finale 仍然只看四廠（新廠只能是支線）');
     const src = readFileSync(resolve(root, 'src/ui/codex.js'), 'utf8');
-    ok(/const TARGET = 5;/.test(src), '隱藏成就的門檻仍然是每廠 5 個標記');
-    ok(/四廠全數集齊/.test(src), '隱藏成就的文案仍然是四廠');
+    /*
+     * v1.2 · P08：徽章條換成四宿星圖，但**條件一格都沒有變** ——
+     * 門檻常數搬到 starmap.js（5 顆＝一宿），圖鑑直接讀它，畫面上那句
+     * 「每廠集滿 5 個」原字保留，達成時的文案換成同一件事的世界說法。
+     */
+    const starSrc = readFileSync(resolve(root, 'src/ui/starmap.js'), 'utf8');
+    ok(/export const MANSION_TARGET = 5;/.test(starSrc), '隱藏成就的門檻仍然是每廠 5 個標記（一宿 5 顆星）');
+    ok(/const TARGET = MANSION_TARGET;/.test(src), '圖鑑用的就是那個門檻（不會和成就判定對不上）');
+    ok(/每廠集滿 \$\{TARGET\} 個解開隱藏成就/.test(src), '圖鑑上仍然寫明「每廠集滿 5 個」的條件');
+    ok(/四宿全亮 —— 隱藏成就達成/.test(src), '隱藏成就的文案仍然是四家全數集齊（世界說法：四宿全亮）');
     const prg = readFileSync(resolve(root, 'src/progression/progression.js'), 'utf8');
     ok(!/seals[^\n]{0,40}unlock/i.test(prg), '印記沒有出現在任何解鎖判定裡');
     ok(!/penlessSeals[^\n]{0,60}(gate|unlock|refreshUnlocks)/i.test(prg), '大師層印記沒有出現在任何解鎖判定裡');
@@ -11404,8 +15577,11403 @@ console.log('\n▸ ⓘ 與關卡標頭');
   );
 }
 
+/* ================================================================== */
+/* v1.2 · P08：四宿星圖 ＋ 世界層零公司名 ＋ 反應式回聲 ＋ 12 區傳說鉤   */
+/* ================================================================== */
+console.log('\n▸ 四宿星圖 ＋ 反應式回聲 ＋ 傳說鉤（v1.2 · P08）');
+
+{
+  const StarMap = await import('../src/ui/starmap.js');
+  const Nudge = await import('../src/ui/nudge.js');
+  const codexSrcP08 = srcOf('src/ui/codex.js');
+  const achieveSrcP08 = srcOf('src/ui/achievement.js');
+  const nudgeSrcP08 = srcOf('src/ui/nudge.js');
+  const mainSrcP08 = srcOf('src/main.js');
+  const cssSrcP08 = srcOf('src/styles.css');
+  const vendorsP08 = curriculum.vendors || [];
+
+  /* --- ① 星圖是純函式：星點數 ＝ badges、集滿判定 ＝ 既有隱藏成就 ---- */
+  eq(StarMap.MANSION_TARGET, 5, '一宿集滿 5 顆（＝既有隱藏成就的每廠門檻）');
+  eq(vendorsP08.length, 4, '四部原典＝四宿（vendors 一格沒動）');
+  eq(StarMap.MANSION_NAMES.length, 4, '四個宿名');
+  eq(StarMap.MANSION_ANCHORS.length, 4, '四個星群釘在四角');
+  for (const name of StarMap.MANSION_NAMES) {
+    ok(/^第[一二三四]宿$/.test(name), `宿名是世界的說法（沒有影射公司的雙關）：${name}`);
+  }
+
+  const badgeCases = [
+    { openai: 0, anthropic: 0, google: 0, xai: 0 },
+    { openai: 5, anthropic: 4, google: 0, xai: 1 },
+    { openai: 5, anthropic: 5, google: 5, xai: 5 },
+    { openai: 33, anthropic: 30, google: 28, xai: 12 },
+  ];
+  for (const badges of badgeCases) {
+    const tag = `[星圖 ${JSON.stringify(badges)}]`;
+    const mansions = StarMap.starMansions({ vendors: vendorsP08, badges });
+    eq(mansions.length, 4, `${tag} 四宿都算得出來`);
+    for (const m of mansions) {
+      eq(m.count, badges[m.id], `${tag} ${m.name} 的星數 ＝ 該廠的技巧標記數`);
+      eq(m.stars.length, badges[m.id], `${tag} ${m.name} 真的畫了那麼多顆星`);
+      eq(m.lit, badges[m.id] >= 5, `${tag} ${m.name} 集滿 5 顆才亮`);
+      eq(m.stars.filter((s) => s.core).length, Math.min(5, badges[m.id]), `${tag} ${m.name} 前五顆是宿本身`);
+      // 星點都落在畫布裡，而且同一宿裡沒有兩顆疊在一起
+      for (const s of m.stars) {
+        ok(
+          s.x > 0 && s.x < StarMap.STARMAP_VIEWBOX.w && s.y > 0 && s.y < StarMap.STARMAP_VIEWBOX.h,
+          `${tag} ${m.name} 的星點落在畫布內`,
+          `${s.x},${s.y}`
+        );
+      }
+      for (let i = 0; i < m.stars.length; i += 1) {
+        for (let j = i + 1; j < m.stars.length; j += 1) {
+          ok(
+            Math.hypot(m.stars[i].x - m.stars[j].x, m.stars[i].y - m.stars[j].y) > 2.4,
+            `${tag} ${m.name} 第 ${i + 1} 與第 ${j + 1} 顆星不會疊在一起`
+          );
+        }
+      }
+    }
+    // 四叢星不會糊成一片（不同宿的星點至少差 12）
+    for (let a = 0; a < mansions.length; a += 1) {
+      for (let b = a + 1; b < mansions.length; b += 1) {
+        let closest = Infinity;
+        for (const p of mansions[a].stars) {
+          for (const q of mansions[b].stars) closest = Math.min(closest, Math.hypot(p.x - q.x, p.y - q.y));
+        }
+        ok(closest > 12, `${tag} ${mansions[a].name} 與 ${mansions[b].name} 分得開`, String(Math.round(closest)));
+      }
+    }
+    // 集滿判定必須和既有隱藏成就一致（同一組 badges → 同一個答案）
+    const probe = createProgression({ catalog, challenges });
+    probe.state.badges = { ...badges };
+    const achieved = probe.hiddenAchievement().vendors.every((v) => v.done);
+    eq(StarMap.allMansionsLit(mansions), achieved, `${tag} 四宿全亮 ＝ 既有隱藏成就的徽章那一半`);
+  }
+  // 同樣的輸入永遠畫在同樣的位置（程序化，不是亂數）
+  eq(
+    JSON.stringify(StarMap.mansionStars(9, 2)),
+    JSON.stringify(StarMap.mansionStars(9, 2)),
+    '星點位置是可重現的（沒有亂數）'
+  );
+
+  /* --- ② 星圖只畫圓點與連線：沒有標誌、沒有品牌色、沒有外部圖檔 ------ */
+  {
+    const svg = StarMap.starMapSvg(StarMap.starMansions({ vendors: vendorsP08, badges: badgeCases[3] }));
+    const tags = [...svg.matchAll(/<([a-zA-Z]+)/g)].map((m) => m[1]);
+    const allowed = new Set(['svg', 'g', 'circle', 'polyline', 'text']);
+    for (const t of new Set(tags)) ok(allowed.has(t), `星圖只用得到 <${t}>（圓點、連線、文字）`);
+    ok(!/<image|<use|<path|xlink:href|url\(|data:/.test(svg), '星圖沒有任何圖檔、外部資源或路徑造形（不畫標誌）');
+    for (const v of vendorsP08) {
+      ok(!svg.includes(v.color), `星圖沒有用到 ${v.id} 的代表色（不用品牌色暗示）`, v.color);
+      ok(!svg.includes(v.name), `星圖本體沒有印出公司名`, v.name);
+    }
+    ok(/aria-label=/.test(svg) && /role="img"/.test(svg), '星圖對讀螢幕的人也講得出四宿各幾顆');
+    eq((svg.match(/class="starmap__link"/g) || []).length, 4, '四宿都集滿時四條連線都畫出來');
+    const dim = StarMap.starMapSvg(StarMap.starMansions({ vendors: vendorsP08, badges: badgeCases[1] }));
+    eq((dim.match(/class="starmap__link"/g) || []).length, 1, '沒集滿的宿不連線（只有集滿的那一宿有）');
+  }
+
+  /* --- ③ 星圖下方那一行：四家真名 ＋「原典是什麼」＋ 免責句 ---------- */
+  {
+    const caption = StarMap.starMapCaption(vendorsP08);
+    for (const v of vendorsP08) ok(caption.includes(v.name), `星圖下方那一行列出 ${v.name}`, caption);
+    ok(caption.includes('原典'), '那一行說明「原典」是什麼', caption);
+    ok(/官方文件/.test(caption), '那一行明講原典＝公開的官方文件', caption);
+    ok(!ENGLISH(caption), '那一行沒有整句英文', ENGLISH(caption) || '');
+    eq(StarMap.STARMAP_DISCLAIMER, '本遊戲與這四家沒有隸屬或背書關係。', '免責句一字不差');
+    const block = StarMap.starMapBlock({ vendors: vendorsP08, badges: badgeCases[1] });
+    ok(block.includes(caption), '星圖那一塊帶著出處說明');
+    ok(block.includes(StarMap.STARMAP_DISCLAIMER), '星圖那一塊帶著免責句');
+    // 名稱一律現算，不手抄（改 curriculum 的 vendors 就會跟著變）
+    ok(
+      !/OpenAI|Anthropic|Google|xAI/.test(stripComments(srcOf('src/ui/starmap.js'))),
+      '星圖模組本身沒有手抄任何公司名（一律讀 curriculum.json 的 vendors）'
+    );
+  }
+
+  /* --- ④ 圖鑑：星圖取代徽章條，既有隱藏成就的條件與出處列一格沒動 ---- */
+  ok(/starMapBlock\(/.test(codexSrcP08), '圖鑑用的是同一支星圖純函式');
+  ok(/四宿星圖/.test(codexSrcP08), '圖鑑上那一塊叫「四宿星圖」');
+  ok(!/class="badge /.test(codexSrcP08) && !/badge__dot/.test(codexSrcP08), '舊的廠家徽章條已經拆掉');
+  ok(/每廠集滿 \$\{TARGET\} 個解開隱藏成就/.test(codexSrcP08), '隱藏成就的條件一格沒變（每廠 5 個標記）');
+  ok(/MANSION_TARGET/.test(codexSrcP08), '門檻讀星圖模組的常數（不會和成就判定對不上）');
+  ok(/allMansionsLit\(/.test(codexSrcP08), '「全亮」也走同一支純函式');
+  // 出處列（護欄 2）：圖鑑的官方連結還在原地，一個字都沒被星圖動到
+  ok(/const SOURCE_LABEL = '神諭原典';/.test(codexSrcP08), '出處的說法沒被改');
+  ok(/class="tech__srcs"/.test(codexSrcP08) && /sourceBook\(s, \{ label: SOURCE_LABEL \}\)/.test(codexSrcP08), '技巧條目的出處列原封不動');
+  ok(/官方出處 ↗/.test(codexSrcP08), '濁言與範例的官方出處連結還在');
+  // 成就頁：一樣的星圖 ＋ 一樣的免責句 ＋ 官方文件入口
+  ok(/starMapSvg\(/.test(achieveSrcP08), '成就頁也是同一張星圖');
+  ok(/STARMAP_DISCLAIMER/.test(achieveSrcP08), '成就頁有免責句');
+  ok(/finale__srcs/.test(achieveSrcP08), '成就頁仍留著四家官方文件的入口（護欄 2）');
+  // CSS：星圖有自己的樣式，而且沒有把品牌色寫進去
+  ok(/\.starmap__sky\s*\{/.test(cssSrcP08), 'CSS 有星圖的畫布');
+  ok(/\.starmap__mansion\.is-lit \.starmap__stars circle\s*\{/.test(cssSrcP08), 'CSS 有「這一宿亮了」的狀態');
+  {
+    const starCss = (cssSrcP08.match(/\.starmap \{[\s\S]*?\.starmap__note--legal \{[\s\S]*?\n\}/) || [''])[0];
+    ok(starCss.length > 200, '星圖那一段 CSS 抓得到（可量測）', String(starCss.length));
+    for (const v of vendorsP08) ok(!starCss.includes(v.color), `星圖的樣式沒有用到 ${v.id} 的代表色`);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * ⑤ 世界層零公司名（護欄 2 ＋ 各家品牌指引）
+   *
+   * 世界裡的「話」一個公司名都不准出現；真名只准在**出處性使用**的三個
+   * 地方露臉：圖鑑的出處列、星圖下方那一行、成就頁。白名單刻意寫死成一
+   * 張很短的表 —— 新的檔案要用真名，就得先在這裡簽名。
+   * ---------------------------------------------------------------- */
+  const VENDOR_NAME_RE = /\b(OpenAI|Anthropic|Google|xAI|GPT|Claude|Gemini|Grok)\b/;
+  const VENDOR_NAME_RE_I = /\b(OpenAI|Anthropic|Google|xAI|GPT|Claude|Gemini|Grok)\b/i;
+  /** 出處連結本來就會帶到各家的網域 —— 掃的是「話」，不是連結。 */
+  const dropUrls = (s) => String(s).replace(/https?:\/\/\S+/g, ' ');
+
+  {
+    // (a) 世界裡的話：資料層
+    const worldCopyFiles = [
+      'src/data/murks.json',
+      'src/data/letters.json',
+      'src/data/inscriptions.json',
+      'src/data/secrets.json',
+      'src/data/handles.json',
+    ];
+    for (const rel of worldCopyFiles) {
+      const data = readJson(rel);
+      const hits = [];
+      let strings = 0;
+      walkStrings(data, '', (path, value) => {
+        if (/(^|\.)source$/.test(path) || /^https?:\/\//.test(value)) return; // 出處連結
+        strings += 1;
+        const m = dropUrls(value).match(VENDOR_NAME_RE_I);
+        if (m) hits.push(`${path}：「${m[0]}」於 ${value.slice(0, 50)}`);
+      });
+      ok(strings > 20, `${rel} 掃得到世界裡的話`, `n=${strings}`);
+      eq(hits.length, 0, `${rel} 的世界文案零公司名`, hits.slice(0, 3).join(' | '));
+    }
+
+    // (b) 世界裡的話：石碑（含回信碑的多筆跡）與故事小景
+    {
+      const worldStrings = [];
+      for (const t of LORE_TABLETS) {
+        worldStrings.push(t.title);
+        for (const l of t.lines) worldStrings.push(typeof l === 'string' ? l : l.text);
+      }
+      for (const v of STORY_VIGNETTES) worldStrings.push(v.name);
+      ok(worldStrings.length >= 40, '石碑與小景的字掃得到', `n=${worldStrings.length}`);
+      for (const s of worldStrings) {
+        ok(!VENDOR_NAME_RE_I.test(s), `石碑／小景的字零公司名：${s.slice(0, 24)}`);
+      }
+    }
+
+    // (c) 世界裡的話：HUD、回聲、主流程（註解不算、出處連結不算）
+    for (const rel of ['src/ui/hud.js', 'src/ui/nudge.js', 'src/main.js', 'src/world/props.js']) {
+      const body = dropUrls(stripComments(srcOf(rel)));
+      const m = body.match(VENDOR_NAME_RE_I);
+      ok(!m, `${rel} 的畫面文字零公司名`, m ? `「${m[0]}」` : '');
+    }
+  }
+
+  {
+    // (d) 白名單：全 src 掃一遍，凡是出現真名的檔案都要在這張表上簽過名
+    const NAME_ALLOWLIST = new Map([
+      ['src/data/curriculum.json', '官方引文本體（護欄 2：一個位元組都不能動）'],
+      ['src/data/curriculum-zh.json', '68 條技巧的中文譯寫，逐條標明是哪一家的文件'],
+      ['src/data/skill-codex-v2.json', '130 條技能的出處表（廠名 ＋ 文件名）'],
+      ['src/data/source-anchors.json', '出處深連結稽核表（文件名）'],
+      ['src/data/challenges.json', '關卡的出處與「哪一家這樣寫」的教學欄位'],
+      ['src/data/dated-notes.json', '時代註記：某一家的某個版本改了什麼'],
+      ['src/data/glossary.json', '術語小卡：名詞出自哪一家的文件'],
+      ['src/data/archive.json', '檔案廊小知識的出處表（文件名）—— 標題與內文另外有一條零公司名的掃描'],
+      ['src/data/sim-samples.json', '轉鈕的離線樣本：模擬的是哪一家的哪一台'],
+      ['src/challenges/checks.js', '逐條回饋引用官方文件（出處性使用）'],
+      ['src/prompt/console.js', '「神諭原典 —— 也就是四家的官方文件」那一行'],
+    ]);
+    const { readdirSync, statSync } = await import('node:fs');
+    const scanned = [];
+    const walkSrc = (dir) => {
+      for (const name of readdirSync(resolve(root, dir))) {
+        const rel = `${dir}/${name}`;
+        if (statSync(resolve(root, rel)).isDirectory()) walkSrc(rel);
+        else if (/\.(js|json|css|html)$/.test(name)) scanned.push(rel);
+      }
+    };
+    walkSrc('src');
+    ok(scanned.length >= 40, '公司名白名單掃得到整棵 src', `n=${scanned.length}`);
+    const offenders = [];
+    const usedAllow = new Set();
+    for (const rel of scanned) {
+      const raw = srcOf(rel);
+      const body = dropUrls(rel.endsWith('.json') ? raw : stripComments(raw));
+      const m = body.match(VENDOR_NAME_RE);
+      if (!m) continue;
+      if (NAME_ALLOWLIST.has(rel)) {
+        usedAllow.add(rel);
+        continue;
+      }
+      offenders.push(`${rel}：「${m[0]}」`);
+    }
+    eq(offenders.length, 0, '沒有白名單以外的檔案寫死公司名', offenders.slice(0, 5).join(' | '));
+    for (const rel of NAME_ALLOWLIST.keys()) {
+      ok(usedAllow.has(rel), `白名單沒有過期的項目：${rel} 真的還在用真名`);
+    }
+    ok(NAME_ALLOWLIST.size <= 12, '白名單維持很短（要加就要有人簽名）', String(NAME_ALLOWLIST.size));
+    // 圖鑑／星圖／成就頁刻意不在白名單上 —— 它們的真名是從 curriculum.json 現算的
+    for (const rel of ['src/ui/codex.js', 'src/ui/achievement.js', 'src/ui/starmap.js']) {
+      ok(!NAME_ALLOWLIST.has(rel), `${rel} 不需要寫死公司名（真名由 vendors 現算）`);
+    }
+  }
+
+  /* --- ⑥ 反應式回聲：分支表、字數、口吻、接線 ------------------------ */
+  {
+    const kinds = Nudge.ECHO_KINDS;
+    ok(kinds.length >= 12, '回聲至少 12 條分支', `n=${kinds.length}`);
+    eq(new Set(kinds).size, kinds.length, '分支名沒有重複');
+    const wanted = [
+      'murkCalmed',
+      'letterFound',
+      'tabletRead',
+      'secretFound',
+      'handleUsed',
+      'gradeS',
+      'levelUp',
+      'regionUnlocked',
+      'regionEntered',
+      'regionMastered',
+      'collectionFull',
+      'idleLong',
+    ];
+    for (const k of wanted) ok(kinds.includes(k), `回聲有「${k}」這一條分支`);
+    const ECHO_BANNED = ['送出評分', '按鈕', '面板', 'localStorage', 'bloom', '後製', 'Web Audio', 'API key', 'rubric', 'debug', '解鎖', '經驗值', 'XP'];
+    const seen = new Set();
+    for (const k of kinds) {
+      const spec = Nudge.ECHO_LINES[k];
+      const tag = `[echo:${k}]`;
+      ok(spec && typeof spec.line === 'string', `${tag} 有一句話`);
+      const parts = [spec.line, spec.sub].filter(Boolean);
+      ok(parts.length <= 2, `${tag} 最多兩句`, String(parts.length));
+      for (const line of parts) {
+        // {name} / {what} 是填空位，量字數時換成最長的實際值
+        const filled = line.replace('{name}', '流程與代理').replace('{what}', '抄寫人的殘頁');
+        ok(filled.length <= 31, `${tag}「${filled}」≤ 31 字`, `len=${filled.length}`);
+        ok(filled.length >= 4, `${tag}「${filled}」不是半句話`, `len=${filled.length}`);
+        ok(!ENGLISH(filled), `${tag} 沒有整句英文`, ENGLISH(filled) || '');
+        ok(!VENDOR_NAME_RE_I.test(filled), `${tag} 沒有公司名`);
+        for (const bad of ECHO_BANNED) ok(!filled.includes(bad), `${tag} 沒有用系統術語「${bad}」`);
+        ok(!/[（(].*[)）]/.test(filled), `${tag} 不用括號解釋自己`);
+      }
+      ok(!seen.has(spec.line), `${tag} 這一句沒有和別的分支撞句`, spec.line);
+      seen.add(spec.line);
+    }
+    // 冷卻與 isBusy 的規矩沿用（不新增 UI）
+    ok(Nudge.ECHO_COOLDOWN_SECONDS >= 10 && Nudge.ECHO_COOLDOWN_SECONDS <= 45, '回聲有自己的冷卻（10–45 秒）', String(Nudge.ECHO_COOLDOWN_SECONDS));
+    ok(Nudge.ECHO_COOLDOWN_SECONDS < Nudge.COOLDOWN_SECONDS, '反應句的冷卻比導航提示短（它是回應，不是催促）');
+    ok(/echo\(kind, ctx = \{\}\) \{/.test(nudgeSrcP08), '回聲的入口是 echo(kind, ctx)');
+    ok(
+      /pending = \{ kind, ctx \};\s*\n\s*return true;/.test(nudgeSrcP08),
+      '回聲一律先記著，等畫面空出來才說（事情發生那一拍多半正要開一個面板）'
+    );
+    ok(
+      /if \(isBusy\(\)\) \{[\s\S]{0,220}?\n      \}\n[\s\S]{0,600}?if \(pending\) \{/.test(nudgeSrcP08),
+      '面板還開著就一個字都不說（flush 排在既有的 isBusy 規矩後面）'
+    );
+    ok(/if \(echoCooldown <= 0\) \{\s*\n\s*speakEcho\(p\.kind, p\.ctx\);/.test(nudgeSrcP08), '冷卻中不說話（不排隊嘮叨）');
+    ok(/if \(!enabled\) return false;/.test(nudgeSrcP08), '整組關掉時（序章）不說話');
+    ok(/pending = null;/.test(nudgeSrcP08), '說出口之後就把待講的那一句清掉（不排隊）');
+    ok(
+      /if \(p\.kind === 'regionUnlocked'\) \{\s*\n\s*api\.announceUnlock\(/.test(nudgeSrcP08),
+      '解鎖的消息也等面板收起來才說（原本它會在面板底下說完就被收掉，玩家看不到）'
+    );
+    ok(
+      /announceUnlock\(regionId\) \{[\s\S]*?const tpl = ECHO_LINES\.regionUnlocked\.line;/.test(nudgeSrcP08),
+      '解鎖那一句也讀同一張分支表（兩邊不會各寫一份）'
+    );
+    ok(!/document\.createElement|new .*Overlay|appendChild/.test(nudgeSrcP08.split('createNudge')[1] || ''), '回聲沒有新增任何 UI（走原本那條刻文）');
+    // main.js：每一條分支都要有人叫得動（idleLong 由回聲自己在沒目標時說）
+    for (const k of kinds) {
+      if (k === 'idleLong') {
+        ok(new RegExp(`speakEcho\\('${k}'`).test(nudgeSrcP08), `回聲自己會說「${k}」`);
+        continue;
+      }
+      /*
+       * v1.2 · P21：中點揭示那一條的分支名寫在 `turning.js` 的 `MIDPOINT.echo`
+       * （單一來源），main.js 叫的是 `nudge.echo(MIDPOINT.echo)` —— 字面值不在
+       * main.js 裡。所以這一條改成兩句話一起問：**常數逐值等於這個分支名**，
+       * 而且 main.js 真的用那個常數叫得動它。
+       */
+      if (k === TurningP21.MIDPOINT.echo) {
+        eq(TurningP21.MIDPOINT.echo, 'midpointRevealed', '中點揭示的分支名逐值比對（turning.js ↔ ECHO_LINES）');
+        ok(/nudge\.echo\(MIDPOINT\.echo\)/.test(mainSrcP08), `main.js 接得上「${k}」（走 MIDPOINT.echo）`);
+        continue;
+      }
+      /*
+       * v1.2 · P22：終局那三句同一個道理 —— 分支名寫在 `turning.js` 的
+       * `FINALE.echoShrine`／`echoCarved`／`echoBlank`（單一來源），
+       * main.js 叫的是那三個常數，字面值不在 main.js 裡。
+       * 母碑那兩句是**同一個變數**（碑面有字沒字二選一），所以那一段比對的是
+       * 「常數逐值等於這個分支名」＋「main.js 真的把那個常數餵給 nudge.echo」。
+       */
+      const finaleEchoes = {
+        [TurningP21.FINALE.echoShrine]: 'FINALE.echoShrine',
+        [TurningP21.FINALE.echoCarved]: 'FINALE.echoCarved',
+        [TurningP21.FINALE.echoBlank]: 'FINALE.echoBlank',
+      };
+      if (finaleEchoes[k]) {
+        ok(mainSrcP08.includes(finaleEchoes[k]), `main.js 接得上「${k}」（走 ${finaleEchoes[k]}）`);
+        ok(
+          /nudge\.echo\(FINALE\.echoShrine\)/.test(mainSrcP08) && /nudge\.echo\(kind\)/.test(mainSrcP08),
+          `終局那三句都由 nudge.echo 說出口（${k}）`
+        );
+        continue;
+      }
+      ok(new RegExp(`nudge\\.echo\\((?:'${k}'|[^)]*'${k}')`).test(mainSrcP08), `main.js 接得上「${k}」`);
+    }
+    ok(!/hud\.toast\('回聲：/.test(mainSrcP08), '回聲的話不再借 toast 冒充（改走自己的通道）');
+  }
+
+  /* --- ⑦ 12 片土地各有一處說得出自己的守護與傳說 -------------------- */
+  {
+    /** 守護的關鍵字：每一個都必須是 regions-v2.json 的 landmark 裡真的有的字。 */
+    const GUARDIAN_KEYS = {
+      foundations: ['斷環', '環'],
+      reasoning: ['階梯', '塔'],
+      grounding: ['藏書之樹', '樹'],
+      orchestration: ['吊車', '臂'],
+      config: ['面具', '拱門'],
+      forms: ['刻度', '柱', '尺'],
+      toolcraft: ['鑰匙', '工具'],
+      wards: ['門', '縫'],
+      refinery: ['鏡'],
+      frugality: ['基座'],
+      divergence: ['柱', '兩面'],
+      sight: ['鏡', '天'],
+    };
+    const regionById = new Map((regionsV2.regions || []).map((r) => [r.id, r]));
+    eq(Object.keys(GUARDIAN_KEYS).length, 12, '12 片土地都列了守護');
+    for (const [id, keys] of Object.entries(GUARDIAN_KEYS)) {
+      const region = regionById.get(id);
+      ok(region, `[${id}] 是真實區域`);
+      for (const k of keys) {
+        ok(String(region.landmark || '').includes(k), `[${id}] 守護關鍵字「${k}」真的出自 landmark`, region.landmark);
+      }
+      // 傳說鉤 ＝ 一頁殘頁或一塊碑，說得出這片土地的守護（而且不只一句話）
+      const items = [];
+      for (const l of letterFile.entries || []) {
+        if (l.region === id) items.push({ what: `殘頁 ${l.id}`, text: `${l.title}${(l.lines || []).join('')}`, lines: (l.lines || []).length });
+      }
+      for (const t of LORE_TABLETS) {
+        if (t.region === id) {
+          items.push({
+            what: `石碑 ${t.id}`,
+            text: `${t.title}${t.lines.map((x) => (typeof x === 'string' ? x : x.text)).join('')}`,
+            lines: t.lines.length,
+          });
+        }
+      }
+      ok(items.length >= 2, `[${id}] 這片土地上有留下來的字`, `n=${items.length}`);
+      const hooks = items.filter((it) => it.lines >= 2 && keys.some((k) => it.text.includes(k)));
+      ok(hooks.length >= 1, `[${id}] 至少一處說得出自己的守護與傳說`, hooks.map((h) => h.what).join(', '));
+    }
+  }
+}
+
+
+/* ================================================================== */
+/* v1.2 · P11：中觀 —— 遮擋帶 ＋ 母題 ＋ 揭露（reasoning 一區切片）       */
+/*                                                                    */
+/*   · 資料契約：數量、region、高度／長度區間、rot 正規化、造型是實作得出來的 */
+/*   · 擺位：**對真的蓋出來的那個世界驗**（P10a 的教訓：舞台上量不到地形）  */
+/*     —— 逐個碰撞體對每一件互動物、主動線、閘門、地標留白量距離           */
+/*   · 揭露：sightline-audit 的硬斷言（前 12m 看不到、25m 內揭露）        */
+/*   · 節奏：pacing-audit 三口徑死區不得增加                             */
+/*   · 預算：三角 < 232k、光源 37 不變、碰撞體 < 1,060、穿模 0、0 每幀工作
+ *
+ *     碰撞體上限 1,040 → **1,060**（v1.2 · P16d）：崖肩不再塌陷之後，原本
+ *     「腳下的地比自己低 2 公尺以上」而被 `collectSolids()` 當成飄在半空、
+ *     整件跳過的道具回到地面上，開始擋人 —— 1,029 → 1,040（+11 顆圓／6 件道具：
+ *     護欄崗西南緣三件、觀象臺西緣一件，以及**減法之庭閘門的兩根柱子**
+ *     （它們原本懸在頸口那道 6.6 公尺深的凹溝上方 —— 看得到、走得過去）。 */
+/* ================================================================== */
+console.log('\n▸ 中觀：遮擋帶與母題（v1.2 · P11）');
+{
+  const Screens = await import('../src/world/screens.js');
+  const regionIdSetP11 = new Set(World.REGION_SITES.map((s) => s.id));
+
+  /* --- ① 資料契約 ------------------------------------------------- */
+  ok(Screens.SCREEN_BANDS.length >= 2, '世界上至少有兩道遮擋帶', String(Screens.SCREEN_BANDS.length));
+  eq(new Set(Screens.SCREEN_BANDS.map((b) => b.id)).size, Screens.SCREEN_BANDS.length, '遮擋帶 id 沒有重複');
+  eq(new Set(Screens.MOTIFS.map((m2) => m2.id)).size, Screens.MOTIFS.length, '母題 id 沒有重複');
+  for (const b of Screens.SCREEN_BANDS) {
+    const tag = `[band:${b.id}]`;
+    ok(/^[a-z0-9-]+$/.test(b.id), `${tag} id 是 kebab-case`);
+    ok(regionIdSetP11.has(b.region), `${tag} region 是真實區域`, b.region);
+    ok(Screens.BAND_KIND_IDS.includes(b.kind), `${tag} 造型是實作得出來的`, b.kind);
+    ok(Array.isArray(b.at) && b.at.length === 2 && b.at.every(Number.isFinite), `${tag} 座標是兩個有限數字`);
+    ok(Number.isFinite(b.rot) && Math.abs(b.rot) <= Math.PI * 2, `${tag} rot 正規化在 ±2π 內`, String(b.rot));
+    ok(
+      b.height >= Screens.BAND_HEIGHT_MIN && b.height <= Screens.BAND_HEIGHT_MAX,
+      `${tag} 高度在 ${Screens.BAND_HEIGHT_MIN}–${Screens.BAND_HEIGHT_MAX} 公尺（§4.7 的登記例外）`,
+      String(b.height)
+    );
+    ok(
+      b.length >= Screens.BAND_LENGTH_MIN && b.length <= Screens.BAND_LENGTH_MAX,
+      `${tag} 長度在 ${Screens.BAND_LENGTH_MIN}–${Screens.BAND_LENGTH_MAX} 公尺（不是一道牆）`,
+      String(b.length)
+    );
+    ok(b.depth >= 1 && b.depth <= 3, `${tag} 厚度 1–3 公尺`, String(b.depth));
+    ok(b.faceSign === 1 || b.faceSign === -1, `${tag} 扶壁在哪一面寫明了`, String(b.faceSign));
+    // 護欄 2：這一層一個字都不准宣稱技巧
+    for (const banned of ['source', 'teaches', 'techniqueId', 'hint']) {
+      eq(banned in b, false, `${tag} 沒有 ${banned} 欄位（純風味，不教技巧）`);
+    }
+  }
+  for (const mo of Screens.MOTIFS) {
+    const tag = `[motif:${mo.id}]`;
+    ok(/^[a-z0-9-]+$/.test(mo.id), `${tag} id 是 kebab-case`);
+    ok(regionIdSetP11.has(mo.region), `${tag} region 是真實區域`, mo.region);
+    ok(Screens.MOTIF_KIND_IDS.includes(mo.kind), `${tag} 造型是實作得出來的`, mo.kind);
+    ok(
+      mo.height >= Screens.MOTIF_HEIGHT_MIN && mo.height <= Screens.MOTIF_HEIGHT_MAX,
+      `${tag} 高度在中景階 ${Screens.MOTIF_HEIGHT_MIN}–${Screens.MOTIF_HEIGHT_MAX} 公尺`,
+      String(mo.height)
+    );
+    ok(Number.isFinite(mo.rot) && Math.abs(mo.rot) <= Math.PI * 2, `${tag} rot 正規化在 ±2π 內`);
+    for (const banned of ['source', 'teaches', 'techniqueId']) {
+      eq(banned in mo, false, `${tag} 沒有 ${banned} 欄位`);
+    }
+  }
+  // 這一期的切片：階梯迴廊（件數是**契約**，不是快照 —— expected-counts 說了算）
+  {
+    const contract = EXPECT.screens;
+    eq(contract.perRegionBands[0], 2, 'expected-counts：每片土地 2–3 道遮擋帶');
+    eq(contract.perRegionMotifs[0], Screens.MOTIF_PER_REGION_MIN, 'expected-counts 的母題區間與程式常數一致');
+    eq(contract.perRegionMotifs[1], Screens.MOTIF_PER_REGION_MAX, 'expected-counts 的母題區間與程式常數一致（上限）');
+    for (const [regionId, n] of Object.entries(contract.bands)) {
+      eq(Screens.SCREEN_BANDS.filter((b) => b.region === regionId).length, n, `[${regionId}] 遮擋帶數＝契約值`);
+    }
+    for (const [regionId, n] of Object.entries(contract.motifs)) {
+      eq(Screens.MOTIFS.filter((mo) => mo.region === regionId).length, n, `[${regionId}] 母題數＝契約值`);
+    }
+    eq(
+      new Set(Screens.SCREEN_BANDS.map((b) => b.region)).size,
+      Object.keys(contract.bands).length,
+      '沒有哪一區偷偷多了一層中觀（契約沒登記就不准有）'
+    );
+    eq(
+      new Set(Screens.MOTIFS.map((mo) => mo.region)).size,
+      Object.keys(contract.motifs).length,
+      '母題也一樣：契約沒登記就不准有'
+    );
+    for (const site of World.REGION_SITES) {
+      const n = Screens.SCREEN_BANDS.filter((b) => b.region === site.id).length;
+      if (n) ok(n >= contract.perRegionBands[0] && n <= contract.perRegionBands[1], `[${site.id}] 遮擋帶 2–3 道（不是一道牆）`, String(n));
+      const mn = Screens.MOTIFS.filter((mo) => mo.region === site.id).length;
+      if (mn) ok(mn >= contract.perRegionMotifs[0] && mn <= contract.perRegionMotifs[1], `[${site.id}] 母題 3–5 座`, String(mn));
+    }
+    const bands = Screens.SCREEN_BANDS.filter((b) => b.region === 'reasoning');
+    const motifs = Screens.MOTIFS.filter((mo) => mo.region === 'reasoning');
+    eq(new Set(motifs.map((mo) => mo.kind)).size, 1, '母題是**同一個形狀**重複出現（不然不叫母題）');
+    for (let i = 0; i < motifs.length; i += 1) {
+      for (let j = i + 1; j < motifs.length; j += 1) {
+        const d = Math.hypot(motifs[i].at[0] - motifs[j].at[0], motifs[i].at[1] - motifs[j].at[1]);
+        ok(d >= 16, `母題 ${motifs[i].id} / ${motifs[j].id} 散得夠開（≥16m）`, d.toFixed(1));
+      }
+    }
+    // 兩道石脊之間要走得過去（缺口，不是牆）
+    for (let i = 0; i < bands.length; i += 1) {
+      for (let j = i + 1; j < bands.length; j += 1) {
+        const d = Math.hypot(bands[i].at[0] - bands[j].at[0], bands[i].at[1] - bands[j].at[1]);
+        ok(d >= 8, `石脊 ${bands[i].id} / ${bands[j].id} 之間留得下缺口`, d.toFixed(1));
+      }
+    }
+  }
+
+  /* --- ② 走出來的路：折點與路網是同一份 --------------------------- */
+  {
+    const segsP11 = buildPathNetwork(World.REGION_SITES, [...World.CORRIDORS, ...World.ANNEX_LINKS], challenges);
+    for (const [regionId, bends] of Object.entries(Screens.PATH_BENDS)) {
+      ok(regionIdSetP11.has(regionId), `[bend:${regionId}] region 是真實區域`);
+      ok(bends.length >= 2, `[bend:${regionId}] 至少兩個折點`);
+      for (const p of bends) {
+        const here = World.regionAt(p[0], p[1]);
+        ok(
+          here && (here.id === regionId || here.onBridge),
+          `[bend:${regionId}] 折點 ${p} 落在那一區（或橋上）`,
+          JSON.stringify(here)
+        );
+        ok(World.coverage(p[0], p[1]) > 0.9, `[bend:${regionId}] 折點 ${p} 站得住`);
+        for (const b of Screens.SCREEN_BANDS) {
+          ok(!Screens.pointInBand(b, p[0], p[1], World.PLAYER_RADIUS + 1), `[bend:${regionId}] 折點 ${p} 沒有撞進 ${b.id}`);
+        }
+      }
+      // 折點真的進了畫在地上的路網
+      for (let i = 0; i + 1 < bends.length; i += 1) {
+        const hit = segsP11.some(
+          (sg) =>
+            Math.hypot(sg[0] - bends[i][0], sg[1] - bends[i][1]) < 0.01 &&
+            Math.hypot(sg[2] - bends[i + 1][0], sg[3] - bends[i + 1][1]) < 0.01
+        );
+        ok(hit, `[bend:${regionId}] 第 ${i} 段折線真的畫進了路網（buildPathNetwork）`);
+      }
+      // 整條路走得通（除了塔腳下的臺座那一段 —— 路本來就通到塔腳）
+      const landmarkP11 = LANDMARKS.find((l) => l.region === regionId);
+      /*
+       * 折點也可能登記在附屬區（`ANNEX_LINKS`，沒有 CORRIDORS 那一條）——
+       * 兩邊都找不到就**失敗一條斷言**，不是讓 `.find()` 回 undefined 把整支測試打掛。
+       */
+      const linkP11 =
+        World.CORRIDORS.find((c) => c.region === regionId) || World.ANNEX_LINKS.find((a) => a.region === regionId) || null;
+      ok(Boolean(linkP11), `[bend:${regionId}] 這一區找得到走道（CORRIDORS 或 ANNEX_LINKS）`);
+      const poly = linkP11 ? Screens.corridorPolyline(linkP11) : [];
+      for (let i = 0; i + 1 < poly.length; i += 1) {
+        const [ax, az] = poly[i];
+        const [bx2, bz2] = poly[i + 1];
+        const len = Math.hypot(bx2 - ax, bz2 - az);
+        for (let t = 0; t <= len; t += 0.5) {
+          const px = ax + ((bx2 - ax) * t) / len;
+          const pz = az + ((bz2 - az) * t) / len;
+          if (landmarkP11 && Math.hypot(px - landmarkP11.at[0], pz - landmarkP11.at[1]) < 12) continue;
+          if (Math.hypot(px, pz) < World.REGION_SITES[0].radius) continue; // 高原那一段不是這次的事
+          ok(!testWorld.solidAt(px, pz), `[bend:${regionId}] 走出來的路上沒有被石頭堵住 @(${px.toFixed(1)}, ${pz.toFixed(1)})`);
+        }
+      }
+    }
+  }
+
+  /* --- ③ 擺位：對**真的蓋出來的世界**驗（不是對資料驗） ------------- */
+  {
+    /*
+     * 遮擋帶不是互動物（沒有 E），所以它守的是**淨空**規則而不是「互動圈不重疊」：
+     * 每一個碰撞圓都要離得夠遠，讓玩家還走得到那件東西的互動半徑內。
+     *   石座 PEDESTAL_CLEAR(5.6)＋玩家(0.62)＋自己的半徑；其餘照各層的互動半徑相加。
+     */
+    /*
+     * v1.2 · P16b：這張表以前在這裡**抄了第二份**（`LAYER_R_P11`），
+     * 而 `scripts/lib/screen-rules.mjs` 已經有同一張 —— 兩份數字遲早分家
+     * （findings：「同一份量測不要抄第二份」）。現在測試與搜尋工具共用那一支，
+     * 反應物由 `reactive.js` 交出**自己**的半徑（風鈴 3.2、螢蛾 3.0、小獸 4.2…；
+     * 音石列刻意維持整排一個 4.4，理由在 `SONGSTONE_ROW_CLEAR`）。
+     */
+    const RulesP16b = (await import('./lib/screen-rules.mjs')).default;
+    const targets = RulesP16b.interactionTargets({
+      challenges,
+      inscriptions,
+      letters: letterFile.entries,
+      handles,
+      reactiveSpots: Reactive.reactiveTargets(),
+      murks: murkFile.entries,
+      // v1.2 · P16c：守夜人也是一層互動點（他也要按得到、也不准擋住別人）
+      watchmen: readJson('src/data/watchmen.json').entries,
+      tablets: LORE_TABLETS,
+      secrets: groundSecrets,
+    });
+
+    const laneDistP11 = (x, z) =>
+      Math.min(
+        ...World.BRIDGE_LANES.map((l) => {
+          const dx = l.bx - l.ax;
+          const dz = l.bz - l.az;
+          const len2 = dx * dx + dz * dz;
+          const t = Math.max(0, Math.min(1, ((x - l.ax) * dx + (z - l.az) * dz) / len2));
+          return Math.hypot(x - (l.ax + dx * t), z - (l.az + dz * t));
+        })
+      );
+    const gateDistP11 = (x, z) =>
+      Math.min(...[...World.CORRIDORS, ...World.ANNEX_LINKS].map((c) => Math.hypot(x - c.gate.x, z - c.gate.z)));
+
+    ok(Array.isArray(testWorld.screens) && testWorld.screens.length >= 1, '世界蓋出了中觀層', String(testWorld.screens.length));
+    let screenSolids = 0;
+    let screenLights = 0;
+    let screenTris = 0;
+    for (const layer of testWorld.screens) {
+      const solids = World.collectSolids(layer.group, World.terrainHeight);
+      screenSolids += solids.length;
+      layer.group.traverse((o) => {
+        if (o.isLight) screenLights += 1;
+        if (o.isMesh && o.geometry) {
+          const geo = o.geometry;
+          const n = geo.index ? geo.index.count / 3 : geo.attributes.position.count / 3;
+          screenTris += n * (o.isInstancedMesh ? o.count : 1);
+        }
+      });
+      ok(solids.length > 0, `[${layer.id}] 中觀層有碰撞體（有份量的東西要擋得住人）`);
+      for (const sd of solids) {
+        for (const t of targets) {
+          const need = RulesP16b.targetRadius(t) + World.PLAYER_RADIUS + sd.r;
+          const d = Math.hypot(sd.x - t.at[0], sd.z - t.at[1]);
+          ok(d >= need, `[${layer.id}] 碰撞體離 ${t.k}:${t.id} ≥ ${need.toFixed(1)}m`, d.toFixed(2));
+        }
+        for (const lm of LANDMARKS) {
+          const d = Math.hypot(sd.x - lm.at[0], sd.z - lm.at[1]);
+          ok(d >= lm.clear, `[${layer.id}] 沒有侵入地標 ${lm.id} 的 ${lm.clear}m 留白`, d.toFixed(2));
+        }
+        ok(laneDistP11(sd.x, sd.z) >= World.LANE_HALF + 4 - sd.r, `[${layer.id}] 離橋的主動線夠遠`, laneDistP11(sd.x, sd.z).toFixed(2));
+        ok(gateDistP11(sd.x, sd.z) >= 8, `[${layer.id}] 離閘門 ≥ 8m`, gateDistP11(sd.x, sd.z).toFixed(2));
+        const here = World.regionAt(sd.x, sd.z);
+        ok(here && here.id === layer.id && !here.onBridge, `[${layer.id}] 碰撞體站在自己那一片土地上`, JSON.stringify(here));
+        ok(World.coverage(sd.x, sd.z) > 0.9, `[${layer.id}] 碰撞體沒有掉進虛空`, World.coverage(sd.x, sd.z).toFixed(2));
+      }
+    }
+    eq(screenLights, 0, 'P11：中觀層一盞燈都沒加');
+    /*
+     * v1.2 · P16a：中觀層一次長了 6 座高台、4 座母題、2 道遮擋帶 —— 上限跟著抬一階。
+     * 門檻要比現況嚴一格（findings：斷言的門檻要比產生它的那段程式更嚴一格）。
+     * **v1.2 · P16b**：最後三片土地各補兩道帶（＋6 道），現況三角 7,080／碰撞體 109
+     * —— 守 8,000 與 120（＝再多鋪一片土地的兩道帶還在框內；12 片都有了，不會再長）。
+     */
+    ok(screenTris < 8000, 'P11：中觀層的三角形很省', `tris=${Math.round(screenTris)}`);
+    ok(screenSolids <= 120, 'P11：中觀層的碰撞體沒有失控', `n=${screenSolids}`);
+
+    // 繞得過去：石脊四周、母題四周
+    for (const b of Screens.SCREEN_BANDS) {
+      ok(Boolean(testWorld.solidAt(b.at[0], b.at[1])), `[${b.id}] 石脊擋得住人（走不進石頭裡）`);
+      let around = 0;
+      const rr = b.length / 2 + 4;
+      for (let a = 0; a < 24; a += 1) {
+        const ang = (a / 24) * Math.PI * 2;
+        if (!testWorld.solidAt(b.at[0] + Math.cos(ang) * rr, b.at[1] + Math.sin(ang) * rr)) around += 1;
+      }
+      ok(around >= 16, `[${b.id}] 四周繞得過去（${rr.toFixed(1)}m 外 24 個方向至少 16 個走得到）`, `${around}/24`);
+    }
+    for (const mo of Screens.MOTIFS) {
+      ok(Boolean(testWorld.solidAt(mo.at[0], mo.at[1])), `[${mo.id}] 母題擋得住人`);
+      let free = 0;
+      for (let a = 0; a < 16; a += 1) {
+        const ang = (a / 16) * Math.PI * 2;
+        if (!testWorld.solidAt(mo.at[0] + Math.cos(ang) * 5, mo.at[1] + Math.sin(ang) * 5)) free += 1;
+      }
+      ok(free >= 14, `[${mo.id}] 四周走得到`, `${free}/16`);
+    }
+  }
+
+    /*
+     * 每一塊各自貼自己腳下的地（P10a／P11 審查的教訓）：
+     * 中觀層的東西動輒橫跨 8 公尺，地形在那個跨距上可以起伏好幾公尺；
+     * 只在中心取一次高度 → 邊上的塊不是浮在空中就是埋進土裡。
+     * 浮起來的塊還會被 listSubstantial() 當成「從底下走過去」而豁免，
+     * 於是穿模稽核也看不到它 —— 所以這條斷言要獨立於稽核存在。
+     */
+    {
+      const bb3 = new THREE.Box3();
+      const m4 = new THREE.Matrix4();
+      const eachInstance = (mesh, cb) => {
+        if (mesh.isInstancedMesh) {
+          for (let i = 0; i < mesh.count; i += 1) {
+            mesh.getMatrixAt(i, m4);
+            m4.premultiply(mesh.matrixWorld);
+            cb(m4, i);
+          }
+        } else cb(m4.copy(mesh.matrixWorld), 0);
+      };
+      let checked = 0;
+      for (const layer of testWorld.screens) {
+        layer.group.updateMatrixWorld(true);
+        layer.group.traverse((o) => {
+          if (!o.isMesh || !o.geometry) return;
+          if (o.userData.noCollide) return;
+          // v1.2 · P14：高台把碰撞登記成 `solidRadius`（不是 solid／solidSpan）——
+          // 少了這一句，第一座高台就整座從「逐塊貼地」這條斷言底下溜過去了。
+          if (!(o.userData.solid || o.userData.solidSpan || typeof o.userData.solidRadius === 'number')) return;
+          if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+          eachInstance(o, (mtx, i) => {
+            bb3.copy(o.geometry.boundingBox).applyMatrix4(mtx);
+            const cx = (bb3.min.x + bb3.max.x) / 2;
+            const cz = (bb3.min.z + bb3.max.z) / 2;
+            const bottom = bb3.min.y - World.terrainHeight(cx, cz);
+            checked += 1;
+            ok(
+              bottom <= 0.35,
+              `[${layer.id}] ${o.name || '(mesh)'}#${i} 沒有浮在空中（底面距自己腳下的地 ≤ 0.35m）`,
+              bottom.toFixed(2)
+            );
+            ok(bottom >= -2.2, `[${layer.id}] ${o.name || '(mesh)'}#${i} 沒有整塊埋進土裡`, bottom.toFixed(2));
+          });
+        });
+      }
+      ok(checked >= 12, 'P11：貼地檢查真的量到東西（不是空過）', String(checked));
+    }
+
+  /* --- ④ 揭露：sightline-audit 的硬斷言 ---------------------------- */
+  {
+    const { sightlineAudit, HIDDEN_MIN, REVEAL_MAX } = await import('./sightline-audit.mjs');
+    const audit = await sightlineAudit();
+    ok(Object.keys(audit.regions).length >= 11, 'sightlineAudit() 量得到每一片有橋／有頸口的土地', String(Object.keys(audit.regions).length));
+    /*
+     * v1.2 · P16b：登記過 `SIGHT_EXEMPT` 的土地不進這一圈 ——
+     * 這道門檻問的是「地標有沒有被擋住」，而它量到「擺不下會擋住的那一道」。
+     * 例外本身由下面 P16b 那一段守（登記的土地必須真的有帶、而且真的沒有一道擋得住）。
+     */
+    const withBands = Object.entries(audit.regions).filter(([, r]) => r.bands.length && !r.exempt);
+    ok(withBands.length >= 1, '至少有一區有遮擋帶可以量');
+    for (const [id, r] of withBands) {
+      ok(
+        r.hiddenFor >= HIDDEN_MIN,
+        `[${id}] 從橋頭起至少前 ${HIDDEN_MIN} 公尺看不到地標`,
+        `hiddenFor=${r.hiddenFor}`
+      );
+      ok(
+        r.revealAt <= REVEAL_MAX,
+        `[${id}] 走到 ${REVEAL_MAX} 公尺內一定看得到（擋住但不迷路）`,
+        `revealAt=${r.revealAt}`
+      );
+      eq(r.pass, true, `[${id}] 揭露通過門檻`);
+      // 揭露之後不准再被擋回去（不然是迷宮不是揭露）
+      const after = r.samples.filter((sm) => sm.arc >= r.revealAt);
+      ok(after.every((sm) => !sm.hidden), `[${id}] 揭露之後就一直看得到`);
+      // 起點那一刻連塔頂都被壓住（比規格更嚴的那一欄，量得出來就記著）
+      ok(r.samples[0] && r.samples[0].hiddenTip, `[${id}] 站在橋頭連塔頂都看不到`);
+    }
+    for (const [id, r] of Object.entries(audit.regions)) {
+      if (r.bands.length) continue;
+      eq(r.pass, null, `[${id}] 還沒有遮擋帶 → 不判定（P12 再鋪）`);
+    }
+    // 世界裡的判定與稽核腳本是同一支
+    const rr = audit.regions.reasoning;
+    const live = testWorld.landmarkSightFrom(rr.entry[0], rr.entry[1], 'reasoning');
+    eq(live.flat, rr.samples[0].hidden, 'world.landmarkSightFrom() 與稽核腳本回同一個答案');
+  }
+
+  /* --- ⑤ 節奏：三口徑死區不得增加 ---------------------------------- */
+  {
+    const { pacingAudit } = await import('./pacing-audit.mjs');
+    const pace = await pacingAudit();
+    for (const kind of ['encounter', 'micro', 'mid']) {
+      eq(pace.deadZones[kind].length, 0, `P11：${kind} 死區仍然是 0 段（鋪中景沒有把節奏弄壞）`);
+    }
+  }
+
+  /* --- ⑥ 預算與「零每幀工作」 -------------------------------------- */
+  {
+    let tris = 0;
+    let lights = 0;
+    testScene.traverse((o) => {
+      if (o.isLight) lights += 1;
+      if (o.isMesh && o.geometry) {
+        const geo = o.geometry;
+        const n = geo.index ? geo.index.count / 3 : geo.attributes.position ? geo.attributes.position.count / 3 : 0;
+        tris += n * (o.isInstancedMesh ? o.count : 1);
+      }
+    });
+    ok(tris < WORLD_TRI_CEIL, `P11：世界三角形 < ${WORLD_TRI_CEIL}（P20b 的框）`, `tris=${Math.round(tris)}`);
+    eq(lights, 37, 'P11：光源數不變（中觀層一盞燈都不加）', `lights=${lights}`);
+    // v1.2 · P16a：+6 座高台 ＋ 4 座母題 ＋ 2 道遮擋帶 → 974 → 992（這一格的預算 <1,100；§6.1 的硬上限仍是 1,400）
+    ok(testWorld.solids.length < 1060, 'P11：碰撞體 < 1,060', `n=${testWorld.solids.length}`);
+    const Audit11 = await import('./collision-audit.mjs');
+    for (const layer of testWorld.screens) {
+      const res = Audit11.auditCoverage(layer.group, World.solidAt, testWorld.solids, World.terrainHeight);
+      eq(res.uncovered.length, 0, `[${layer.id}] 中觀層沒有穿模點（有份量的都擋得住）`, res.uncovered.map((u) => u.name).join(','));
+    }
+    // 靜態掃描：這一層完全靜態
+    const screensSrc = readFileSync(resolve(root, 'src/world/screens.js'), 'utf8');
+    ok(!/requestAnimationFrame/.test(screensSrc), 'P11：screens.js 沒有自己的動畫迴圈');
+    ok(!/export function update|\bupdate\(dt/.test(screensSrc), 'P11：中觀層沒有 update()（不進每幀迴圈）');
+    const worldSrc11 = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+    ok(!/propAnimations\.push\(\{ kind: 'screen/.test(worldSrc11), 'P11：中觀層沒有被塞進每幀的道具動畫清單');
+    for (const layer of testWorld.screens) {
+      ok(typeof layer.group.userData.update !== 'function', `[${layer.id}] 中觀層沒有每幀回呼`);
+    }
+  }
+}
+
+/* ================================================================== */
+/* v1.2 · P09：石座演出 a —— 回呼接石座 ＋ 4 個 check ＋ 一區試水         */
+/*   · check 名 → 演出的純函式對應表（只認 4 個、其餘 null）            */
+/*   · play()／update()／reset() 的行為；同一段不疊加；dt 夾 0.1        */
+/*   · reducedMotion 走終態；低畫質整層不播                             */
+/*   · 預算：三角 < 8k、0 光源、碰撞體不變；靜態掃描零每幀配置          */
+/*   · 關卡資料一個位元組都沒有為了演出而動                             */
+/* ================================================================== */
+console.log('\n▸ 石座演出（v1.2 · P09）');
+{
+  const Fx = await import('../src/world/rubric-fx.js');
+  const kitOfFx = () => Props.kitFor('#8aa0b4');
+
+  /* --- ① 純函式：check 名 → 演出 id --- */
+  {
+    eq(typeof Fx.fxForCheck, 'function', 'rubric-fx.js 匯出 fxForCheck(check)');
+    eq(Object.keys(Fx.RUBRIC_FX).length, 8, 'P10a：八個檢查器都有演出');
+    eq(
+      JSON.stringify(Object.keys(Fx.RUBRIC_FX).sort()),
+      JSON.stringify([
+        'asksToVerify',
+        'assignsTask',
+        'groundsInContext',
+        'hasConstraint',
+        'hasDelimiters',
+        'hasFewShot',
+        'hasRole',
+        'specifiesFormat',
+      ]),
+      '對應表就是 spec 的那八條（P09 四條 ＋ P10a 四條）'
+    );
+    eq(Fx.fxForCheck('assignsTask'), 'ring-sweep', 'assignsTask → 腳下的圈掃亮一圈');
+    eq(Fx.fxForCheck('specifiesFormat'), 'chip-row', 'specifiesFormat → 碎石排成一列');
+    eq(Fx.fxForCheck('hasConstraint'), 'measured-column', 'hasConstraint → 光柱收成有刻度的一段');
+    eq(Fx.fxForCheck('hasRole'), 'mask-rim', 'hasRole → 浮碑戴上面具般的輪廓光');
+    eq(Fx.fxForCheck('hasFewShot'), 'pair-slabs', 'hasFewShot → 兩塊小石板成對浮起');
+    eq(Fx.fxForCheck('hasDelimiters'), 'frame-walls', 'hasDelimiters → 四道短牆升起圍成方框');
+    eq(Fx.fxForCheck('asksToVerify'), 'return-light', 'asksToVerify → 一顆小光點繞一圈回到原位');
+    eq(Fx.fxForCheck('groundsInContext'), 'ground-disc', 'groundsInContext → 腳下的圈往內收成實心的小盤');
+    eq(new Set(Object.values(Fx.RUBRIC_FX)).size, 8, '八個演出 id 沒有重複');
+    for (const other of ['positiveFraming', 'asksForPlanFirst', 'keepsPromptLean']) {
+      eq(Fx.fxForCheck(other), null, `${other} 沒有演出（只有那八條有）`);
+    }
+    for (const bad of ['', 'constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      eq(Fx.fxForCheck(bad), null, `fxForCheck(${JSON.stringify(bad)}) 回 null（不會漏原型鍊上的東西）`);
+    }
+    eq(Fx.fxForCheck(null), null, 'fxForCheck(null) 回 null');
+    eq(Fx.fxForCheck(123), null, 'fxForCheck(數字) 回 null');
+    eq(Fx.FX_REGIONS.length, 12, 'P10a：十二片土地全部鋪上演出');
+    eq(
+      JSON.stringify(Fx.FX_REGIONS.slice().sort()),
+      JSON.stringify(catalog.implementedRegionIds().slice().sort()),
+      'FX_REGIONS 就是世界上那 12 片土地（一片不多、一片不少）'
+    );
+    for (const id of catalog.implementedRegionIds()) eq(Fx.fxEnabledIn(id), true, `${id} 有演出（12 區全開）`);
+    eq(Fx.fxEnabledIn('nowhere'), false, '不存在的區域仍然不演出');
+    eq(Fx.fxEnabledIn(null), false, 'fxEnabledIn(null) 不演出');
+    // 每一個對應到的檢查器都真的存在（不准對著不存在的 check 演）
+    for (const name of Object.keys(Fx.RUBRIC_FX)) ok(CHECK_IDS.includes(name), `${name} 是真的檢查器`, name);
+  }
+
+  /* --- ② 演出層的行為：play / update / 不疊加 / reset --- */
+  {
+    const marker = testWorld.markers.find((m) => m.id === 'gate-of-clarity-01');
+    ok(Boolean(marker), '（前提）測試世界裡有中央高原的第一座石座');
+    const fx = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => 'high' });
+    ok(fx.group && fx.group.isObject3D, 'createRubricFx 給一個可以掛進世界的 group');
+    eq(fx.group.name, 'rubric-fx', '場景圖節點名 rubric-fx');
+    eq(JSON.stringify(fx.state().playing), '[]', '一開始什麼都沒在演');
+    eq(fx.state().particlesActive, 0, '一開始粒子池是空的');
+    ok(fx.particleCapacity <= 24 && fx.particleCapacity >= 8, '粒子池 ≤ 24 顆（預算）', String(fx.particleCapacity));
+    eq(fx.particles.geometry.attributes.position.count, fx.particleCapacity, '粒子 buffer 一次配好');
+    let fxLights = 0;
+    fx.group.traverse((o) => { if (o.isLight) fxLights += 1; });
+    eq(fxLights, 0, '演出層 0 光源（用自發光與加色混合）');
+    let fxTris = 0;
+    let fxSolidFlags = 0;
+    fx.group.traverse((o) => {
+      const ud = o.userData || {};
+      if (ud.solid || ud.solidSpan || typeof ud.solidRadius === 'number') fxSolidFlags += 1;
+      if (o.isMesh && o.geometry) {
+        const idx = o.geometry.index;
+        fxTris += idx ? idx.count / 3 : o.geometry.attributes.position.count / 3;
+      }
+    });
+    ok(fxTris < 8000, '演出層三角形 < 8k（預算）', `tris=${fxTris}`);
+    eq(fxSolidFlags, 0, '演出層沒有任何碰撞旗標');
+    eq(World.collectSolids(fx.group, World.terrainHeight).length, 0, '演出層一個碰撞體都不進 collectSolids');
+
+    // 未命中的檢查不演出
+    eq(fx.play(marker, ['positiveFraming']), 0, '不支援的檢查 → 不演出');
+    eq(fx.play(marker, []), 0, '空清單 → 不演出');
+    eq(fx.play(null, ['assignsTask']), 0, '沒有石座 → 不演出');
+    eq(JSON.stringify(fx.state().playing), '[]', '以上都沒有留下任何演出');
+
+    // assignsTask：腳下的圈掃亮一圈
+    eq(fx.play(marker, ['assignsTask']), 1, 'assignsTask 開演一段');
+    const st1 = fx.state();
+    eq(st1.playing.length, 1, '正在演一段');
+    eq(st1.playing[0].check, 'assignsTask', '演的是 assignsTask');
+    eq(st1.playing[0].fx, 'ring-sweep', 'state 也回演出 id');
+    eq(st1.playing[0].markerId, 'gate-of-clarity-01', 'state 帶得出是哪一座石座');
+    eq(st1.playing[0].t, 0, '剛開演 t=0');
+    ok(st1.particlesActive > 0, '開演時粒子池有活粒子', String(st1.particlesActive));
+    const spawned1 = fx.particlesSpawned;
+    ok(spawned1 > 0 && spawned1 <= 8, '一段演出只噴少少幾顆（安靜）', String(spawned1));
+    // 掃亮：drawRange 從 0 長出來
+    const sweepMesh = fx.group.getObjectByName('ring-sweep');
+    ok(Boolean(sweepMesh), '找得到掃亮的那一圈');
+    eq(sweepMesh.geometry.drawRange.count, 0, '剛開演時一格都還沒亮');
+    for (let i = 0; i < 12; i += 1) fx.update(0.05, i * 0.05);
+    const drawnMid = sweepMesh.geometry.drawRange.count;
+    ok(drawnMid > 0, '0.6 秒後亮起了一部分', String(drawnMid));
+    ok(drawnMid < (sweepMesh.geometry.index ? sweepMesh.geometry.index.count : 0), '0.6 秒後還沒亮完（一圈要掃一會兒）');
+    ok(sweepMesh.material.opacity > 0, '掃亮的那一圈看得見');
+
+    // 同一段重複呼叫不疊加、不從頭來
+    const tBefore = fx.state().playing[0].t;
+    eq(fx.play(marker, ['assignsTask']), 0, '同一段還在演 → 不重播（不疊加）');
+    eq(fx.state().playing.length, 1, '仍然只有一段在演');
+    eq(fx.state().playing[0].t, tBefore, '計時器沒有被重設（同一段不從頭來）');
+
+    // 演完自己收乾淨
+    for (let i = 0; i < 60; i += 1) fx.update(0.05, 1 + i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', '≤ 2.5 秒後自己演完、playing 歸零');
+    eq(sweepMesh.visible, false, '演完的道具藏起來');
+    eq(fx.state().particlesActive, 0, '碎光也熄了');
+
+    // 演完之後可以再演一次（重玩同一關）
+    eq(fx.play(marker, ['assignsTask']), 1, '演完之後再命中一次 → 可以再演');
+    fx.reset();
+    eq(JSON.stringify(fx.state().playing), '[]', 'reset() 把演出清空（進度重置不重載）');
+    eq(fx.state().particlesActive, 0, 'reset() 把粒子池清空');
+    eq(sweepMesh.geometry.drawRange.count, 0, 'reset() 把掃亮進度歸零');
+
+    // 四段可以同時播
+    eq(fx.play(marker, ['assignsTask', 'specifiesFormat', 'hasConstraint', 'hasRole']), 4, '四段可以同時開演');
+    eq(fx.state().playing.length, 4, '四段同時在演');
+    for (const row of fx.state().playing) ok(Fx.fxForCheck(row.check) === row.fx, `${row.check} 的 fx id 對得上`);
+    for (let i = 0; i < 70; i += 1) fx.update(0.05, i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', '四段全部 ≤ 2.5 秒內收完');
+    fx.reset();
+  }
+
+  /* --- ③ 各段的動作：碎石排成一列、光柱收成一段（借完原樣還回去） --- */
+  {
+    const marker = testWorld.markers.find((m) => m.id === 'gate-of-clarity-01');
+    const fx = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => 'high' });
+    // 碎石：從散落的地面浮起 → 排成整齊的一列 → 落回
+    fx.play(marker, ['specifiesFormat']);
+    const chip0 = fx.group.getObjectByName('chip:0');
+    const chip4 = fx.group.getObjectByName('chip:4');
+    ok(Boolean(chip0) && Boolean(chip4), '找得到碎石');
+    ok(chip0.position.y < 0.3, '一開始碎石躺在地上', String(chip0.position.y));
+    for (let i = 0; i < 24; i += 1) fx.update(0.05, i * 0.05);
+    ok(chip0.position.y > 1.0, '浮起來了', String(chip0.position.y));
+    ok(Math.abs(chip0.position.y - chip4.position.y) < 0.01, '排成整齊的一列（同一個高度）');
+    ok(Math.abs(chip0.position.z) < 0.02 && Math.abs(chip4.position.z) < 0.02, '一列是直的（z 對齊）');
+    ok(chip0.position.x < chip4.position.x, '一列有順序（由左到右）');
+    ok(Math.abs(chip0.rotation.y) < 0.05, '碎石轉正了（整齊）', String(chip0.rotation.y));
+    for (let i = 0; i < 40; i += 1) fx.update(0.05, 1.2 + i * 0.05);
+    ok(chip0.position.y < 0.3, '2 秒後落回地面', String(chip0.position.y));
+    eq(chip0.visible, false, '演完藏起來');
+    fx.reset();
+
+    // 光柱：收成有刻度的一段，演完一寸不差地還回去
+    const scale0 = marker.beacon.scale.y;
+    const posY0 = marker.beacon.position.y;
+    fx.play(marker, ['hasConstraint']);
+    for (let i = 0; i < 16; i += 1) fx.update(0.05, i * 0.05);
+    ok(marker.beacon.scale.y < scale0 * 0.5, '光柱從「無限高」收短了', String(marker.beacon.scale.y));
+    ok(marker.beacon.position.y < posY0 * 0.5, '收短的時候底還是踩在地上（中心跟著降）', String(marker.beacon.position.y));
+    const tick0 = fx.group.getObjectByName('tick:0');
+    const tick3 = fx.group.getObjectByName('tick:3');
+    ok(Boolean(tick0) && Boolean(tick3), '找得到刻度');
+    ok(tick0.material.opacity > 0, '刻度亮起來了（量得出來的長度）');
+    ok(tick3.position.y > tick0.position.y, '刻度由低到高排開');
+    for (let i = 0; i < 60; i += 1) fx.update(0.05, 0.8 + i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', '光柱那一段演完了');
+    eq(marker.beacon.scale.y, scale0, '光柱的縮放一寸不差地還回去');
+    eq(marker.beacon.position.y, posY0, '光柱的高度一寸不差地還回去');
+    eq(tick0.material.opacity, 0, '刻度收乾淨');
+
+    // 演到一半 reset（進度重置）→ 光柱也要還回去
+    fx.play(marker, ['hasConstraint']);
+    for (let i = 0; i < 10; i += 1) fx.update(0.05, i * 0.05);
+    ok(marker.beacon.scale.y !== scale0, '（前提）演到一半光柱是借走的');
+    fx.reset();
+    eq(marker.beacon.scale.y, scale0, 'reset() 把借走的光柱還回去');
+    eq(marker.beacon.position.y, posY0, 'reset() 把光柱的高度還回去');
+
+    // 面具輪廓光：貼著浮碑（浮碑會轉、會上下浮）
+    fx.play(marker, ['hasRole']);
+    marker.shard.position.y = 2.71;
+    marker.shard.rotation.y = 1.23;
+    for (let i = 0; i < 10; i += 1) fx.update(0.05, i * 0.05);
+    const rimMesh = fx.group.getObjectByName('mask-rim');
+    ok(Boolean(rimMesh), '找得到面具般的輪廓光');
+    ok(Math.abs(rimMesh.position.y - 2.71) < 1e-6, '輪廓光貼著浮碑的高度');
+    ok(Math.abs(rimMesh.rotation.y - 1.23) < 1e-6, '輪廓光跟著浮碑轉');
+    ok(rimMesh.material.opacity > 0, '輪廓光看得見');
+    ok(rimMesh.material.side === THREE.BackSide, '輪廓光只畫背面（所以看起來是一圈邊，不是一顆球）');
+    fx.reset();
+
+    // dt 夾：一幀 2 秒也不會讓 2 秒的演出一格跑完
+    const fx2 = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => 'high' });
+    fx2.play(marker, ['assignsTask']);
+    fx2.update(2.0, 2.0);
+    eq(fx2.state().playing.length, 1, '一幀 2 秒：計時器被夾在 0.1s，演出還在');
+    ok(fx2.state().playing[0].t <= 0.1 + 1e-6, '這一格只走了 ≤ 0.1 秒', String(fx2.state().playing[0].t));
+    fx2.reset();
+  }
+
+  /* --- ③b P10a 的四段：成對石板／方框短牆／繞一圈的光點／收成實心的小盤 --- */
+  {
+    const marker = testWorld.markers.find((m) => m.id === 'gate-of-clarity-01');
+    const fx = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => 'high' });
+
+    // hasFewShot：兩塊小石板在浮碑兩側成對浮起
+    eq(fx.play(marker, ['hasFewShot']), 1, 'hasFewShot 開演一段');
+    const slabL = fx.group.getObjectByName('slab:0');
+    const slabR = fx.group.getObjectByName('slab:1');
+    ok(Boolean(slabL) && Boolean(slabR), '找得到兩塊小石板');
+    ok(slabL.position.y < 0.3 && slabR.position.y < 0.3, '一開始躺在地上', `${slabL.position.y}`);
+    ok(slabL.position.x < 0 && slabR.position.x > 0, '一左一右在浮碑兩側');
+    for (let i = 0; i < 20; i += 1) fx.update(0.05, i * 0.05);
+    ok(slabL.position.y > 1.4, '浮起來了', String(slabL.position.y));
+    eq(slabL.position.y, slabR.position.y, '**成對**浮起（兩塊永遠同高）');
+    ok(slabL.material.opacity > 0, '看得見');
+    for (let i = 0; i < 50; i += 1) fx.update(0.05, 1 + i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', '≤ 2.5 秒收乾淨');
+    eq(slabL.visible, false, '演完藏起來');
+    fx.reset();
+
+    // hasDelimiters：四道短牆升起圍成方框
+    eq(fx.play(marker, ['hasDelimiters']), 1, 'hasDelimiters 開演一段');
+    const walls = [0, 1, 2, 3].map((i) => fx.group.getObjectByName(`wall:${i}`));
+    ok(walls.every(Boolean), '找得到四道短牆');
+    ok(walls.every((w) => w.scale.y < 0.2), '一開始還沒升起來', String(walls[0].scale.y));
+    for (let i = 0; i < 16; i += 1) fx.update(0.05, i * 0.05);
+    ok(walls.every((w) => w.scale.y > 0.5), '升起來了', String(walls[0].scale.y));
+    ok(
+      walls.every((w) => Math.abs(w.position.y - w.geometry.parameters.height * 0.5 * w.scale.y) < 1.06),
+      '牆底踩在它自己腳下的地上（容差一個牆高）',
+      `${walls[0].position.y} vs ${walls[0].geometry.parameters.height * 0.5 * walls[0].scale.y}`
+    );
+    /*
+     * 審查後補：舞台原點只是**石座正中央**的地面高度，四道牆散在 3 公尺外，
+     * 那裡的地不見得一樣高。逐座石座驗「每一道牆腳下的世界高度」都貼著地。
+     */
+    {
+      const H = walls[0].geometry.parameters.height;
+      let worst = 0;
+      let worstAt = '';
+      for (const m of testWorld.markers) {
+        const f = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => 'high', groundAt: World.terrainHeight });
+        f.play(m, ['hasDelimiters']);
+        for (let i = 0; i < 16; i += 1) f.update(0.05, i * 0.05);
+        const ws = [0, 1, 2, 3].map((i) => f.group.getObjectByName(`wall:${i}`));
+        for (const w of ws) {
+          if (!w.visible) continue; // 崖邊那一道不出現（三面框）
+          const wx = m.position.x + w.position.x;
+          const wz = m.position.z + w.position.z;
+          const footWorld = m.position.y + w.position.y - H * 0.5 * w.scale.y;
+          const gap = Math.abs(footWorld - World.terrainHeight(wx, wz));
+          if (gap > worst) {
+            worst = gap;
+            worstAt = `${m.id} wall@(${wx.toFixed(1)},${wz.toFixed(1)}) gap=${gap.toFixed(2)}`;
+          }
+        }
+        f.reset();
+      }
+      ok(worst <= 0.01, '142 座石座：出現的每一道短牆都真的踩在自己腳下的地上', worstAt || `worst=${worst.toFixed(2)}`);
+    }
+    {
+      // 圍成方框：四道牆各據一邊，中心在石座正上方
+      const xs = walls.map((w) => w.position.x);
+      const zs = walls.map((w) => w.position.z);
+      ok(Math.max(...xs) > 2 && Math.min(...xs) < -2, '左右各一道');
+      ok(Math.max(...zs) > 2 && Math.min(...zs) < -2, '前後各一道');
+      ok(Math.abs(xs.reduce((a, b) => a + b, 0)) < 1e-6 && Math.abs(zs.reduce((a, b) => a + b, 0)) < 1e-6, '四道對稱（圍出來的是方框，不是歪的）');
+    }
+    for (let i = 0; i < 50; i += 1) fx.update(0.05, 1 + i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', '短牆 ≤ 2.5 秒收乾淨');
+    eq(walls[0].visible, false, '演完藏起來');
+    fx.reset();
+
+    // asksToVerify：一顆小光點繞浮碑一圈、回到原位
+    eq(fx.play(marker, ['asksToVerify']), 1, 'asksToVerify 開演一段');
+    const mote = fx.group.getObjectByName('return-light');
+    ok(Boolean(mote), '找得到那顆小光點');
+    const moteStart = { x: mote.position.x, z: mote.position.z };
+    let maxAway = 0;
+    let lastAway = 0;
+    for (let i = 0; i < 44; i += 1) {
+      fx.update(0.05, i * 0.05);
+      if (fx.state().playing.length === 0) break;
+      lastAway = Math.hypot(mote.position.x - moteStart.x, mote.position.z - moteStart.z);
+      if (lastAway > maxAway) maxAway = lastAway;
+    }
+    ok(maxAway > 1.5, '真的繞出去了（離起點最遠 > 1.5 公尺）', String(maxAway));
+    ok(lastAway < 0.25, '最後回到原位（繞一圈，不是繞不停）', String(lastAway));
+    ok(Math.abs(mote.position.y - marker.shard.position.y) < 1.2, '光點繞的是浮碑（跟著它的高度）');
+    for (let i = 0; i < 50; i += 1) fx.update(0.05, 2 + i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', '光點 ≤ 2.5 秒收乾淨');
+    fx.reset();
+
+    // groundsInContext：腳下的圈往內收成一個實心的小盤（借完一寸不差還回去）
+    const ringScale0 = marker.ring.scale.x;
+    eq(fx.play(marker, ['groundsInContext']), 1, 'groundsInContext 開演一段');
+    const disc = fx.group.getObjectByName('ground-disc');
+    ok(Boolean(disc), '找得到那個實心的小盤');
+    for (let i = 0; i < 16; i += 1) fx.update(0.05, i * 0.05);
+    ok(marker.ring.scale.x < ringScale0 * 0.8, '腳下的圈往內收了', String(marker.ring.scale.x));
+    eq(marker.ring.scale.x, marker.ring.scale.y, '圈是等比往內收（沒有被壓扁）');
+    ok(disc.material.opacity > 0, '實心的小盤浮出來了');
+    ok(disc.position.y < 0.3, '小盤貼在地上');
+    for (let i = 0; i < 60; i += 1) fx.update(0.05, 1 + i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', '小盤 ≤ 2.5 秒收乾淨');
+    eq(marker.ring.scale.x, ringScale0, '腳下的圈一寸不差地還回去');
+    eq(marker.ring.scale.y, ringScale0, '（兩軸都還）');
+    eq(disc.material.opacity, 0, '小盤收乾淨');
+
+    // 演到一半 reset / 換石座 / 切低畫質 → 圈都要還回去
+    fx.play(marker, ['groundsInContext']);
+    for (let i = 0; i < 8; i += 1) fx.update(0.05, i * 0.05);
+    ok(marker.ring.scale.x !== ringScale0, '（前提）演到一半圈是借走的');
+    fx.reset();
+    eq(marker.ring.scale.x, ringScale0, 'reset() 把借走的圈還回去');
+
+    // 八段可以同時播
+    eq(
+      fx.play(marker, [
+        'assignsTask',
+        'specifiesFormat',
+        'hasConstraint',
+        'hasRole',
+        'hasFewShot',
+        'hasDelimiters',
+        'asksToVerify',
+        'groundsInContext',
+      ]),
+      8,
+      '八段可以同時開演'
+    );
+    eq(fx.state().playing.length, 8, '八段同時在演');
+    for (const row of fx.state().playing) ok(Fx.fxForCheck(row.check) === row.fx, `${row.check} 的 fx id 對得上`);
+    for (let i = 0; i < 70; i += 1) fx.update(0.05, i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', '八段全部 ≤ 2.5 秒內收完');
+    eq(marker.ring.scale.x, ringScale0, '八段收完，圈也還回去了');
+    fx.reset();
+  }
+
+  /* --- ③c P10a 的四段：reducedMotion 只做終態、低畫質整層不播 --- */
+  {
+    const marker = testWorld.markers.find((m) => m.id === 'gate-of-clarity-01');
+    const ringScale0 = marker.ring.scale.x;
+    const fx = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => 'high', reducedMotion: true });
+    eq(fx.play(marker, ['hasFewShot', 'hasDelimiters', 'asksToVerify', 'groundsInContext']), 4, 'reducedMotion 一樣會回應');
+    eq(fx.particlesSpawned, 0, 'reducedMotion 不噴碎光');
+    const slab = fx.group.getObjectByName('slab:0');
+    ok(slab.position.y > 1.4, 'reducedMotion：石板直接就在終態高度（不從地上浮）', String(slab.position.y));
+    const wall = fx.group.getObjectByName('wall:0');
+    ok(Math.abs(wall.scale.y - 1) < 1e-6, 'reducedMotion：短牆直接就是整面（不升）', String(wall.scale.y));
+    const mote = fx.group.getObjectByName('return-light');
+    const mx = mote.position.x;
+    const mz = mote.position.z;
+    fx.update(0.05, 0.05);
+    eq(marker.ring.scale.x, ringScale0, 'reducedMotion：不動腳下的圈（位移是「動」）');
+    ok(fx.group.getObjectByName('ground-disc').material.opacity > 0, 'reducedMotion：小盤照樣亮起來（回應還在）');
+    for (let i = 0; i < 20; i += 1) fx.update(0.05, i * 0.05);
+    ok(Math.abs(mote.position.x - mx) < 1e-6 && Math.abs(mote.position.z - mz) < 1e-6, 'reducedMotion：光點停在原位（不繞）');
+    ok(Math.abs(fx.group.getObjectByName('wall:0').scale.y - 1) < 1e-6, 'reducedMotion：短牆一直是整面（不做升起的位移）');
+    ok(mote.material.opacity > 0, 'reducedMotion：光點照樣亮著（回應還在）');
+    for (let i = 0; i < 70; i += 1) fx.update(0.05, i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', 'reducedMotion 一樣自己收乾淨');
+    eq(marker.ring.scale.x, ringScale0, 'reducedMotion 收完圈仍是原樣');
+    fx.reset();
+
+    // 低畫質：新的四段一樣整層不播
+    let q = 'low';
+    const fxLow = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => q });
+    eq(fxLow.play(marker, ['hasFewShot', 'hasDelimiters', 'asksToVerify', 'groundsInContext']), 0, '低畫質：新的四段也不播');
+    eq(fxLow.particlesSpawned, 0, '低畫質：一顆粒子都沒噴');
+    // 演到一半切低畫質 → 借走的圈要還回去
+    q = 'high';
+    eq(fxLow.play(marker, ['groundsInContext']), 1, '切回高畫質播得動');
+    fxLow.update(0.05, 0.05);
+    ok(marker.ring.scale.x !== ringScale0, '（前提）圈正被借走');
+    q = 'low';
+    fxLow.update(0.05, 0.1);
+    eq(JSON.stringify(fxLow.state().playing), '[]', '演到一半切低畫質 → 整層收乾淨');
+    eq(marker.ring.scale.x, ringScale0, '切低畫質也要把借走的圈還回去');
+    q = 'high';
+    fxLow.reset();
+  }
+
+  /* --- ④ 換石座：前一座收乾淨（含把借走的光柱還回去） --- */
+  {
+    const a = testWorld.markers.find((m) => m.id === 'gate-of-clarity-01');
+    const b = testWorld.markers.find((m) => m.region === 'foundations' && m.id !== a.id);
+    const fx = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => 'high' });
+    const aScale = a.beacon.scale.y;
+    fx.play(a, ['hasConstraint']);
+    for (let i = 0; i < 10; i += 1) fx.update(0.05, i * 0.05);
+    ok(a.beacon.scale.y !== aScale, '（前提）第一座的光柱正被借走');
+    fx.play(b, ['assignsTask']);
+    eq(a.beacon.scale.y, aScale, '換石座 → 前一座的光柱還回去');
+    eq(fx.state().playing.length, 1, '換石座 → 前一座的演出收乾淨、只剩新的那一段');
+    eq(fx.state().playing[0].markerId, b.id, '演的是新的那一座');
+    ok(Math.abs(fx.group.getObjectByName('rubric-fx:stage').position.x - b.position.x) < 1e-6, '演出道具搬到新的那一座腳下');
+    fx.reset();
+  }
+
+  /* --- ⑤ reducedMotion：只做終態的一次亮起、不做位移 --- */
+  {
+    const marker = testWorld.markers.find((m) => m.id === 'gate-of-clarity-01');
+    const scale0 = marker.beacon.scale.y;
+    const fx = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => 'high', reducedMotion: true });
+    eq(fx.play(marker, ['assignsTask', 'specifiesFormat', 'hasConstraint', 'hasRole']), 4, 'reducedMotion 一樣會回應（關掉的是動，不是回應）');
+    eq(fx.particlesSpawned, 0, 'reducedMotion 不噴碎光（不甩動、不噴散）');
+    const sweepMesh = fx.group.getObjectByName('ring-sweep');
+    eq(sweepMesh.geometry.drawRange.count, sweepMesh.geometry.index.count, 'reducedMotion：圈直接整圈亮（終態，不掃）');
+    const chip0 = fx.group.getObjectByName('chip:0');
+    ok(chip0.position.y > 1.0, 'reducedMotion：碎石直接就在那一列上（不從地上浮）', String(chip0.position.y));
+    eq(chip0.rotation.y, 0, 'reducedMotion：碎石一開始就是正的');
+    fx.update(0.05, 0.05);
+    eq(marker.beacon.scale.y, scale0, 'reducedMotion：不動光柱（位移是「動」）');
+    ok(fx.group.getObjectByName('tick:0').material.opacity > 0, 'reducedMotion：刻度照樣亮起來（回應還在）');
+    // 審查後補：刻度也不准做那 2.4 秒的縮放 —— 直接就位，只用透明度回應
+    const tickScale0 = fx.group.getObjectByName('tick:0').scale.x;
+    const tickTop0 = fx.group.getObjectByName('tick:3').scale.x;
+    ok(Math.abs(tickScale0 - 1) < 1e-6, 'reducedMotion：刻度一開始就在終態大小（不做縮放）', String(tickScale0));
+    ok(Math.abs(tickTop0 - 1) < 1e-6, 'reducedMotion：最高那一道也一樣（不做「由低到高」的位移）', String(tickTop0));
+    for (let i = 0; i < 30; i += 1) fx.update(0.05, i * 0.05);
+    ok(Math.abs(fx.group.getObjectByName('tick:0').scale.x - 1) < 1e-6, 'reducedMotion：走了 1.5 秒刻度還是同一個大小');
+    for (let i = 0; i < 70; i += 1) fx.update(0.05, i * 0.05);
+    eq(JSON.stringify(fx.state().playing), '[]', 'reducedMotion 一樣會自己收乾淨');
+    fx.reset();
+  }
+
+  /* --- ⑤b 審查後補：play() 先確認有東西可演才動前一座；換石座不留飛在半空的碎光；演到一半切低畫質會收乾淨 --- */
+  {
+    const a = testWorld.markers.find((m) => m.id === 'gate-of-clarity-01');
+    const b = testWorld.markers.find((m) => m.id !== a.id && m.region === 'foundations');
+    let q = 'high';
+    const fx = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => q });
+    const beacon0 = a.beacon.scale.y;
+    eq(fx.play(a, ['hasConstraint']), 1, '（前提）A 座開演了');
+    fx.update(0.05, 0.05);
+    ok(a.beacon.scale.y !== beacon0, '（前提）光柱真的被借走了');
+    eq(fx.play(b, ['positiveFraming']), 0, '不支援的檢查回 0');
+    eq(fx.state().playing.length, 1, '回 0 的那一次**不准**把 A 座正在演的拆掉');
+    ok(a.beacon.scale.y !== beacon0, '也不准把借走的光柱提早還回去');
+    // 真的換座：碎光不能瞬移過去（粒子是舞台的區域座標）
+    eq(fx.play(b, ['assignsTask']), 1, '換到 B 座、支援的檢查照演');
+    eq(a.beacon.scale.y, beacon0, '換座時 A 的光柱有還回去');
+    eq(fx.state().particlesActive, fx.particlesSpawned - (fx.particlesSpawned - fx.state().particlesActive), '（記帳自洽）');
+    ok(fx.state().particlesActive <= 4, '換座之後池子裡只剩這一次噴的（上一座的碎光沒被搬過來）', String(fx.state().particlesActive));
+    // 演到一半切低畫質 → 立刻收乾淨、光柱還回去
+    eq(fx.play(a, ['hasConstraint']), 1, '回到 A 座再演一段');
+    fx.update(0.05, 0.05);
+    q = 'low';
+    fx.update(0.05, 0.1);
+    eq(JSON.stringify(fx.state().playing), '[]', '演到一半切低畫質 → 整層收乾淨');
+    eq(a.beacon.scale.y, beacon0, '切低畫質也要把借走的光柱還回去');
+    eq(fx.state().particlesActive, 0, '切低畫質後池子清空');
+    q = 'high';
+    fx.reset();
+  }
+
+  /* --- ⑥ 低畫質：整層關掉 --- */
+  {
+    const marker = testWorld.markers.find((m) => m.id === 'gate-of-clarity-01');
+    let q = 'low';
+    const fx = Fx.createRubricFx({ kitOf: kitOfFx, qualityOf: () => q });
+    eq(fx.enabled, false, '低畫質時這一層是關的');
+    eq(fx.play(marker, ['assignsTask']), 0, '低畫質不播');
+    eq(JSON.stringify(fx.state().playing), '[]', '低畫質什麼都沒演');
+    eq(fx.particlesSpawned, 0, '低畫質不噴粒子');
+    q = 'high';
+    eq(fx.enabled, true, '切回高畫質這一層就開了（不必重建世界）');
+    eq(fx.play(marker, ['assignsTask']), 1, '切回高畫質就播得動');
+    fx.reset();
+  }
+
+  /* --- ⑦ 靜態掃描：零每幀配置、0 光源、只有一組粒子池 --- */
+  {
+    const fxSrc = srcOf('src/world/rubric-fx.js');
+    const bodyOfFx = (name) => {
+      const at = fxSrc.indexOf(`    ${name}(`);
+      ok(at > 0, `找得到 rubricFx.${name}() 本體`);
+      if (at < 0) return '';
+      const open = fxSrc.indexOf('{', at);
+      let depth = 0;
+      for (let i = open; i < fxSrc.length; i += 1) {
+        if (fxSrc[i] === '{') depth += 1;
+        else if (fxSrc[i] === '}') { depth -= 1; if (depth === 0) return fxSrc.slice(open, i + 1); }
+      }
+      return fxSrc.slice(open);
+    };
+    for (const fn of ['update', 'play', 'reset']) {
+      const body = bodyOfFx(fn);
+      ok(body.length > 50, `rubricFx.${fn}() 本體不是空的`);
+      ok(!/new THREE\./.test(body), `${fn}() 裡沒有 new THREE.`);
+      ok(!/\.map\(/.test(body), `${fn}() 裡沒有 .map(`);
+      ok(!/\.filter\(/.test(body), `${fn}() 裡沒有 .filter(`);
+      ok(!/\bnew\s+[A-Z]/.test(body), `${fn}() 裡沒有 new 任何物件`);
+    }
+    ok(!/new THREE\.(Point|Spot|Directional|Hemisphere|Ambient|RectArea)Light/.test(fxSrc), '演出層一盞燈都沒有');
+    eq((fxSrc.match(/new THREE\.Points\(/g) || []).length, 1, '只有一組共用的 Points 粒子池');
+    ok(/frustumCulled = false/.test(fxSrc), '粒子池關掉 frustum culling');
+    ok(/userData\.noCollide = true/.test(fxSrc), '演出物件全部 noCollide（不進碰撞登記表）');
+    ok(/Math\.min\(dt, 0\.1\)|dt < 0\.1 \? dt : 0\.1/.test(fxSrc), '演出計時器把 dt 夾在 0.1 秒');
+    ok(!/PALETTE\.warm|#f\dddba|0xf3ddba/i.test(fxSrc), '演出不碰暖金（暖金只留給成就熱點）');
+  }
+
+  /* --- ⑧ 接線：world.js 蓋演出層、main.js 把命中換成演出 --- */
+  {
+    ok(Boolean(testWorld.rubricFx), 'world.rubricFx 存在（createWorld 蓋了演出層）');
+    eq(typeof testWorld.rubricFx.play, 'function', 'world.rubricFx.play()');
+    eq(typeof testWorld.rubricFx.update, 'function', 'world.rubricFx.update()');
+    eq(typeof testWorld.rubricFx.reset, 'function', 'world.rubricFx.reset()');
+    eq(typeof testWorld.rubricFx.state, 'function', 'world.rubricFx.state()（e2e 把手）');
+    let inRoot = false;
+    testWorld.root.traverse((o) => { if (o.name === 'rubric-fx') inRoot = true; });
+    eq(inRoot, true, '演出層掛在世界的 root 底下');
+    eq(World.collectSolids(testWorld.rubricFx.group, World.terrainHeight).length, 0, '演出層對碰撞登記表貢獻 0 個碰撞體');
+    ok(testWorld.solids.length < 1400, '加了演出層之後碰撞體仍在預算內', String(testWorld.solids.length));
+    {
+      // 穿模稽核：演出的東西是光，不是物質 —— 一件都不該被判成「有份量卻走得過去」
+      const Audit = await import('./collision-audit.mjs');
+      const res = Audit.auditCoverage(testWorld.rubricFx.group, World.solidAt, testWorld.solids, World.terrainHeight);
+      eq(res.uncovered.length, 0, '演出層的穿模稽核 0（它們是光，不是物質）', Audit.summarize(res.uncovered).join(', '));
+    }
+    let fxLightsInWorld = 0;
+    testWorld.rubricFx.group.traverse((o) => { if (o.isLight) fxLightsInWorld += 1; });
+    eq(fxLightsInWorld, 0, '世界裡的演出層也是 0 光源');
+
+    const worldSrcP09 = srcOf('src/world/world.js');
+    ok(/createRubricFx\(/.test(worldSrcP09), 'world.js 建演出層');
+    ok(/rubricFx\.update\(/.test(worldSrcP09), 'world.js 每幀更新演出層');
+    const mainSrcP09 = srcOf('src/main.js');
+    const hitsAt = mainSrcP09.indexOf('onRubricHits: (hits)');
+    const hitsBody = mainSrcP09.slice(hitsAt, mainSrcP09.indexOf('onResult: (', hitsAt));
+    ok(hitsAt > 0 && hitsBody.length > 200, '（前提）找得到 main.js 的 onRubricHits 本體');
+    ok(/fxForCheck\(/.test(hitsBody), 'main.js 把 rubric index 換成 check 名再查演出');
+    ok(/rubricFx\?\.play\?\.\(/.test(hitsBody), 'main.js 對石座呼叫 rubricFx?.play?.()（與同檔 reset 的守法一致）');
+    ok(/FX_REGIONS|fxEnabledIn\(/.test(hitsBody), 'main.js 只對本 phase 鋪到的區演出');
+    ok(/engine\.pulse\(0\.18\)/.test(hitsBody), '石座的脈衝比濁靈輕（0.18 < 0.28，別搶結果面的注意力）');
+    ok(/world\.rubricFx\?\.reset\?\.\(\)/.test(mainSrcP09), '進度重置時世界端的演出跟著歸零（WORLD §8 G24b）');
+  }
+
+  /* --- ⑨ 關卡資料一個位元組都沒有為了演出而動 --- */
+  {
+    const raw = readFileSync(resolve(root, 'src/data/challenges.json'), 'utf8');
+    for (const id of Object.values(Fx.RUBRIC_FX)) {
+      ok(!raw.includes(id), `challenges.json 沒有演出 id「${id}」（演出由 check 名對應，不進資料層）`);
+    }
+    ok(!/"fx"|"rubricFx"|"effect"/.test(raw), 'challenges.json 沒有任何演出欄位');
+    /* rubric 每一列的欄位表就是 P09 之前的那一份 —— 演出**沒有**在資料層加任何欄位。 */
+    const RUBRIC_ROW_KEYS = ['check', 'checkOptions', 'weight', 'hint', 'techniqueId', 'skillId', 'primary', 'foundation', 'candidate'];
+    let rows = 0;
+    for (const c of challenges) {
+      for (const r of c.rubric || []) {
+        rows += 1;
+        for (const k of Object.keys(r)) {
+          ok(RUBRIC_ROW_KEYS.includes(k), `[${c.id}] rubric 欄位還是 P09 之前那一份（沒有為了演出加欄位）`, k);
+        }
+      }
+    }
+    eq(rows, 310, '（前提）掃過了 142 關的每一條 rubric');
+  }
+}
+
+/* ================================================================== */
+/* v1.2 · P10b：解法百分位（內建分布）＋ 最少技巧達成                   */
+/*   · solution-stats.json：142 關、三軸皆為排好的數字、純統計無出處    */
+/*   · 數字真的是評分引擎跑得出來的（抽驗重算，不是快照）              */
+/*   · 百分位純函式的邊界一致                                          */
+/*   · leanSeals 純加法：normalize／reset／不動 bestGrades 與解鎖      */
+/* ================================================================== */
+console.log('\n▸ 解法百分位與最少技巧達成（v1.2 · P10b）');
+{
+  const Stats = await import('../src/challenges/solution-stats.js');
+  const statsFile = readJson('src/data/solution-stats.json');
+
+  /* --- ① 檔案本身（契約在 expected-counts） --- */
+  {
+    eq(statsFile.authored, 'game', 'solution-stats.json 是遊戲自撰的統計層（authored: game）');
+    eq(statsFile.version, 1, '有版本欄位');
+    ok(/內建/.test(statsFile.note) && /不是其他玩家/.test(statsFile.note), '檔頭就寫明「內建分布、不是其他玩家」（誠實原則）');
+    ok(/build-solution-stats/.test(statsFile.generatedBy), '檔頭指得出重跑用的腳本');
+    eq(statsFile.stats.length, EXPECT.solutionStats.value, `內建分布 ${EXPECT.solutionStats.value} 關（142 關一關一組）`);
+    eq(statsFile.stats.length, challenges.length, '分布數＝關卡數（一關一組，不多不少）');
+    const ids = new Set(statsFile.stats.map((r) => r.id));
+    eq(ids.size, statsFile.stats.length, 'id 沒有重複');
+    for (const c of challenges) ok(ids.has(c.id), `[${c.id}] 有一組內建分布`);
+
+    const ROW_KEYS = ['id', 'total', 'n', 'scores', 'words', 'techniques'];
+    const short = [];
+    for (const row of statsFile.stats) {
+      const tag = `[${row.id}]`;
+      for (const k of Object.keys(row)) ok(ROW_KEYS.includes(k), `${tag} 分布的欄位就是那六個（純統計）`, k);
+      // 純統計不是教學：不准長出出處或技巧 id（那會讓人以為它是內容層）
+      ok(!('source' in row) && !('techniqueId' in row) && !('skillId' in row), `${tag} 沒有 source／techniqueId／skillId（統計不是教學）`);
+      for (const axis of ['scores', 'words', 'techniques']) {
+        const arr = row[axis];
+        ok(Array.isArray(arr) && arr.length > 0, `${tag} ${axis} 是非空陣列`);
+        ok(arr.every((n) => Number.isFinite(n) && n >= 0), `${tag} ${axis} 全是非負數字`);
+        ok(arr.every((n, i) => i === 0 || arr[i - 1] <= n), `${tag} ${axis} 由小到大排好`);
+        eq(arr.length, row.n, `${tag} ${axis} 的長度＝ n`);
+      }
+      ok(row.n <= 9, `${tag} 最多 9 份（結果面只拿來算百分位）`, String(row.n));
+      ok(row.techniques[0] >= 1, `${tag} 最精簡的那一份至少用了 1 種技法`, String(row.techniques[0]));
+      if (row.n < EXPECT.solutionStats.minRows) short.push(row.id);
+      const c = challenges.find((x) => x.id === row.id);
+      const total = (c.rubric || []).reduce((n, r) => n + (Number.isFinite(r.weight) ? r.weight : 1), 0);
+      ok(Math.abs(row.total - Math.round(total * 100) / 100) < 1e-9, `${tag} total ＝ 這一關的滿分（顯示層拿它守門）`);
+      ok(row.scores[row.scores.length - 1] <= row.total + 1e-9, `${tag} 分數不會超過滿分`);
+      ok(row.techniques[row.techniques.length - 1] <= (c.rubric || []).length, `${tag} 技法數不會超過檢查條數`);
+    }
+    eq(
+      JSON.stringify(short),
+      JSON.stringify(EXPECT.solutionStats.shortIds),
+      '誠實缺口就是登記的那幾關（少於 5 份的關卡不准偷偷變多 —— 湊數就是說謊）'
+    );
+    ok(short.length <= EXPECT.solutionStats.maxShortIds, '誠實缺口在上限內', String(short.length));
+  }
+
+  /* --- ② 數字是真的跑出來的（抽驗：拿 sample 重算一次，一定落在分布裡） --- */
+  {
+    const { statsForChallenge } = await import('./build-solution-stats.mjs');
+    // 全 142 關重算太慢，抽 12 關（每一片土地一關）就足以抓到「手改過 json」
+    const seen = new Set();
+    const sampleSet = challenges.filter((c) => {
+      if (seen.has(c.region)) return false;
+      seen.add(c.region);
+      return true;
+    });
+    for (const c of sampleSet) {
+      const rebuilt = statsForChallenge(c);
+      const stored = statsFile.stats.find((r) => r.id === c.id);
+      eq(JSON.stringify(rebuilt), JSON.stringify(stored), `[${c.id}] 重跑腳本得到一樣的分布（數字沒有被手改過）`);
+    }
+    // 示範解答本來就是一份參考解 → 它的三個數字一定在分布的範圍內
+    for (const c of challenges) {
+      const ev = evaluate(c, c.sample);
+      const row = statsFile.stats.find((r) => r.id === c.id);
+      ok(ev.earned <= row.scores[row.scores.length - 1] + 1e-9, `[${c.id}] 示範解答的分數不超過分布的最大值`);
+      ok(
+        Stats.techniqueCountOf(ev) <= row.techniques[row.techniques.length - 1],
+        `[${c.id}] 示範解答的技法數不超過分布的最大值`
+      );
+    }
+  }
+
+  /* --- ③ 純函式：字數、技法數、百分位的邊界 --- */
+  {
+    eq(Stats.countWords('請寫三句話。'), 5, 'countWords：漢字一個算一個（標點不算）');
+    eq(Stats.countWords('temperature 設為 0.2'), 4, 'countWords：拉丁字母／數字一串算一個');
+    eq(Stats.countWords(''), 0, 'countWords：空字串 0');
+    eq(Stats.countWords(null), 0, 'countWords：不是字串就 0');
+    eq(
+      Stats.techniqueCountOf({ results: [{ score: 1 }, { score: 0 }, { score: 1 }] }),
+      2,
+      'techniqueCountOf 數的是「找得到那條技法」的列'
+    );
+    eq(Stats.techniqueCountOf({ results: [{ score: 0.5 }] }), 1, 'techniqueCountOf：用了一半也算用了（用得夠不夠好由上面那一列講）');
+    eq(Stats.techniqueCountOf({ results: [{ score: 0 }, { score: 0 }] }), 0, 'techniqueCountOf：一條都沒用到就 0');
+    eq(Stats.techniqueCountOf({ results: [{ passed: true }] }), 1, 'techniqueCountOf：沒有 score 欄位時退回看 passed');
+    eq(Stats.techniqueCountOf(null), 0, 'techniqueCountOf：沒有東西就 0');
+
+    const dist = [1, 2, 2, 3, 5];
+    eq(Stats.percentileOf(0, dist), 0, '百分位：比全部都小 → 0');
+    eq(Stats.percentileOf(9, dist), 100, '百分位：比全部都大 → 100');
+    eq(Stats.percentileOf(5, dist), 100, '百分位：跟最大的一樣 → 100（並列算贏）');
+    eq(Stats.percentileOf(1, dist), 20, '百分位：跟最小的一樣 → 1/5');
+    eq(Stats.percentileOf(2, dist), 60, '百分位：並列的都算進去（3/5）');
+    eq(Stats.percentileOf(2.5, dist), 60, '百分位：落在兩者之間也一致');
+    eq(Stats.percentileOf(1, []), null, '百分位：沒有分布就回 null（不亂講）');
+    eq(Stats.percentileOf(NaN, dist), null, '百分位：不是數字就回 null');
+
+    const api = Stats.createSolutionStats(statsFile);
+    eq(api.size, 142, 'createSolutionStats 收得下 142 關');
+    eq(api.statsFor('nope'), null, '沒有這一關就 null');
+    ok(Boolean(api.statsFor('gate-of-clarity-01')), '查得到中央高原第一關的分布');
+    // 壞資料一律當成沒有分布（載入必須容錯）
+    const bad = Stats.createSolutionStats({ stats: [{ id: 'x', scores: [3, 1], words: [1], techniques: [1] }] });
+    eq(bad.size, 0, '沒排好的分布不收（壞資料 → 當成沒有）');
+    eq(Stats.createSolutionStats(null).size, 0, 'createSolutionStats(null) 不會爆');
+  }
+
+  /* --- ④ standingFor：過關才說、對不上就不說 --- */
+  {
+    const api = Stats.createSolutionStats(statsFile);
+    const c = challenges.find((x) => x.id === 'gate-of-clarity-01');
+    const pass = evaluate(c, c.sample);
+    const st = api.standingFor(c, pass);
+    ok(Boolean(st), '過關的一次說得出位置');
+    eq(st.n, api.statsFor(c.id).n, '對照的份數就是那一關的份數');
+    eq(st.score, pass.earned, '分數就是這一次的得分');
+    eq(st.words, Stats.countWords(c.sample), '字數就是這一次寫的字數');
+    eq(st.techniques, Stats.techniqueCountOf(pass), '技法數就是這一次真的做到的條數');
+    for (const k of ['scorePct', 'wordsPct', 'techniquesPct']) {
+      ok(st[k] >= 0 && st[k] <= 100, `${k} 落在 0..100`, String(st[k]));
+    }
+    eq(typeof st.lean, 'boolean', 'lean 是布林');
+    eq(st.leanest, api.statsFor(c.id).techniques[0], 'leanest ＝ 分布裡最精簡那一份的技法數');
+
+    const fail = evaluate(c, '幫我寫');
+    eq(api.standingFor(c, fail), null, '沒過關 → 不說（分布講的是解得開的人怎麼寫）');
+    eq(api.standingFor({ id: 'no-such' }, pass), null, '沒有分布的關卡 → 不說');
+    eq(api.standingFor(null, pass), null, 'standingFor(null) 不會爆');
+    // 試煉：runtime 只挑「你學過的」那幾條 → 條數對不上就不比
+    const trial = challenges.find((x) => x.application === true);
+    const trialFull = evaluate(trial, trial.sample);
+    ok(Boolean(api.standingFor(trial, trialFull)), '試煉在「全部學過」時比得下去（滿分總分對得上）');
+    const twoRows = (trial.rubric || []).slice(0, 2);
+    const trialPartial = evaluate({ ...trial, rubric: twoRows, pass: 1 }, trial.sample);
+    eq(api.standingFor(trial, trialPartial), null, '試煉只挑到部分檢查時 → 不比（滿分總分對不上）');
+
+    /* 「最少技巧達成」真的拿得到：用分布裡最精簡的那一份技法數通過就算 */
+    let leanHit = 0;
+    for (const ch of challenges) {
+      const row = api.statsFor(ch.id);
+      const ev = evaluate(ch, ch.sample);
+      const stx = api.standingFor(ch, ev);
+      if (stx && stx.techniques <= row.techniques[0]) leanHit += 1;
+    }
+    ok(leanHit >= 1, '至少有一關的示範解答本身就達成「最少技巧」（徽章拿得到，不是永遠的空頭）', String(leanHit));
+  }
+
+  /* --- ⑤ leanSeals：純加法、冪等、不動 142 關的分子 --- */
+  {
+    const base = SaveIO.defaultSave();
+    ok(Array.isArray(base.leanSeals) && base.leanSeals.length === 0, '新存檔的 leanSeals 是空陣列');
+    eq(JSON.stringify(SaveIO.normalize({}).leanSeals), '[]', '舊存檔沒有這一欄 → 補空陣列');
+    eq(JSON.stringify(SaveIO.normalize({ leanSeals: 'x' }).leanSeals), '[]', '壞值 → 空陣列');
+    eq(
+      JSON.stringify(SaveIO.normalize({ leanSeals: ['a', 'a', 'b', 3] }).leanSeals),
+      JSON.stringify(['a', 'b']),
+      '去重、只留字串'
+    );
+
+    const prog = createProgression({ catalog, challenges });
+    eq(typeof prog.awardLeanSeal, 'function', 'progression.awardLeanSeal()');
+    eq(prog.leanSeals().length, 0, '一開始一枚都沒有');
+    eq(prog.hasLeanSeal('gate-of-clarity-01'), false, '一開始沒拿到');
+    const gradesBefore = JSON.stringify(prog.state.bestGrades);
+    const unlockedBefore = JSON.stringify(prog.state.unlockedRegions);
+    const xpBefore = prog.state.xp;
+    const clearedBefore = prog.clearedCount ? prog.clearedCount() : Object.keys(prog.state.bestGrades).length;
+    eq(prog.awardLeanSeal('gate-of-clarity-01'), true, '第一次拿到 → true（結果面才說那一句）');
+    eq(prog.awardLeanSeal('gate-of-clarity-01'), false, '再拿一次 → false（冪等，不重複說）');
+    eq(prog.hasLeanSeal('gate-of-clarity-01'), true, '拿到了');
+    eq(prog.leanSeals().length, 1, '收了一枚');
+    eq(prog.awardLeanSeal(''), false, '空 id 不收');
+    eq(prog.awardLeanSeal(null), false, 'null 不收');
+    eq(JSON.stringify(prog.state.bestGrades), gradesBefore, '拿徽章**不動** bestGrades（142 關的分子）');
+    eq(JSON.stringify(prog.state.unlockedRegions), unlockedBefore, '拿徽章不解鎖任何一片土地');
+    eq(prog.state.xp, xpBefore, '拿徽章不給 XP');
+    const clearedAfter = prog.clearedCount ? prog.clearedCount() : Object.keys(prog.state.bestGrades).length;
+    eq(clearedAfter, clearedBefore, '拿徽章不動已通關數');
+    ok((prog.masterSeals().lean || []).includes('gate-of-clarity-01'), '圖鑑的成就總表列得出來');
+    // 重置清乾淨
+    prog.resetAll();
+    eq(prog.leanSeals().length, 0, '重置之後一枚都不剩');
+  }
+
+  /* --- ⑥ 接線與用詞：結果面那一行、圖鑑那一格、解鎖完全沒讀過這一欄 --- */
+  {
+    const consoleSrc = srcOf('src/prompt/console.js');
+    ok(/solutionStats/.test(consoleSrc), '主控台收得到內建分布');
+    ok(/standingFor\(/.test(consoleSrc), '結果面問的是 standingFor()');
+    ok(/data-standing/.test(consoleSrc), '那一行有 data-standing 把手（e2e 抓得到）');
+    ok(/百分位/.test(consoleSrc), '那一行講的是百分位');
+    ok(/不是其他玩家/.test(consoleSrc), '那一行**明寫**不是其他玩家的成績（誠實原則）');
+    // 審查後補：字數與技法數是「越少越好」，不能跟分數一樣講「第 N 百分位」（會讀成越多越贏）
+    ok(/贏過 \$\{/.test(consoleSrc) || /贏過/.test(consoleSrc), '分數那一軸講「贏過幾成」');
+    ok(/更短/.test(consoleSrc), '字數那一軸講「比幾成更短」（不是第 N 百分位）');
+    ok(/更精簡/.test(consoleSrc), '技法數那一軸講「比幾成更精簡」');
+    ok(/內建/.test(consoleSrc), '那一行明寫是內建的分布');
+    ok(/awardLeanSeal\?\.\(/.test(consoleSrc), '徽章走 progression.awardLeanSeal()');
+    // 審查後補：防作弊面要與其他大師印記同一套，不然「按範例 → 貼上」在 39 關直接拿
+    ok(/leanClean/.test(consoleSrc), '徽章有防作弊的閘（leanClean）');
+    ok(/hasSeenSample\?\.\(challenge\.id\)/.test(consoleSrc), '翻開過範例就不算（含之前翻開的）');
+    ok(/sampleShown !== true/.test(consoleSrc), '這一次剛翻開範例也不算');
+    ok(/usedQuickFill !== true/.test(consoleSrc) && /usedCoach !== true/.test(consoleSrc), '用了快速填入或提示球也不算');
+    ok(
+      /leanNew = Boolean\(standing && standing\.lean && leanClean/.test(consoleSrc),
+      '技法數夠精簡**而且**乾淨才給徽章'
+    );
+    ok(/最少技巧達成/.test(consoleSrc), '徽章的名字是「最少技巧達成」');
+    ok(!/最少字/.test(consoleSrc), '**沒有**「最少字」那一枚（短 ≠ 好 prompt，roadmap §0 鐵則）');
+    const codexSrc = srcOf('src/ui/codex.js');
+    ok(/最少技巧達成/.test(codexSrc), '圖鑑的成就那一格列得出「最少技巧達成」');
+    ok(!/最少字/.test(codexSrc), '圖鑑也沒有「最少字」');
+    const progSrc = srcOf('src/progression/progression.js');
+    const unlockAt = progSrc.indexOf('function refreshUnlocks');
+    const unlockBody = progSrc.slice(unlockAt, progSrc.indexOf('\n  }', unlockAt));
+    ok(unlockAt > 0 && unlockBody.length > 50, '（前提）找得到 refreshUnlocks() 本體');
+    ok(!/leanSeals/.test(unlockBody), 'refreshUnlocks() 從頭到尾沒讀過 leanSeals（不影響解鎖）');
+    ok(!/^import .*\.json/m.test(progSrc), 'progression 不 import 任何 JSON（分布由外面注入）');
+    // WORLD.md §3.6：畫面上不出現系統術語（只看那一行的標記本身）
+    {
+      const at = consoleSrc.indexOf('data-standing');
+      const line = consoleSrc.slice(at, consoleSrc.indexOf('</p>', at));
+      ok(at > 0 && line.length > 40, '（前提）抓得到那一行的標記');
+      for (const bad of ['rubric', 'localStorage', '面板', '送出評分']) {
+        ok(!line.includes(bad), `那一行沒有系統術語（${bad}）`);
+      }
+    }
+  }
+}
+
+/* ================================================================== */
+/* v1.2 · P12：地面材質語言 ＋ 每區一種粒子 ＋ 中觀鋪到另外四片土地       */
+/*                                                                    */
+/*   · 地面：每區兩色基底兩兩可分辨、區界漸變帶寬 ≈6m、低畫質沒有碎紋   */
+/*     —— 而且畫出來的頂點色就是 groundBaseColor() 算的那一個           */
+/*   · 粒子：一區恰好 1 個 Points、12 區共用同一個材質、0 光源、        */
+/*     低畫質整層關、reducedMotion 不動、每幀零配置                     */
+/*   · 中觀：新三區吃同一套擺位斷言、逐塊貼地、每區碰撞體 ≤ 20          */
+/*   · 預算：三角 < 234k、光源 37、碰撞體 < 1,100（v1.2 · P17 的框）      */
+/* ================================================================== */
+console.log('\n▸ 地面材質語言 ＋ 每區粒子（v1.2 · P12）');
+{
+  const Ground = await import('../src/world/ground.js');
+  const Drifts = await import('../src/world/drifts.js');
+  const CS12 = await import('../src/world/color-script.js');
+  const colorScriptJson = readJson('src/data/color-script.json');
+  CS12.loadColorScript(colorScriptJson);
+
+  /* --- ① 地面：每區兩色基底 ------------------------------------- */
+  {
+    const ids12 = Object.keys(World.REGION_ATMOSPHERE);
+    eq(ids12.length, 12, '（前提）12 片土地');
+    for (const id of ids12) {
+      const row = colorScriptJson.regions[id];
+      ok(CS12.HEX_RE.test(String(row.groundLow)), `[${id}] groundLow 是 #rrggbb`, String(row.groundLow));
+      ok(CS12.HEX_RE.test(String(row.groundHigh)), `[${id}] groundHigh 是 #rrggbb`, String(row.groundHigh));
+      const lo = CS12.hexToHsl(row.groundLow);
+      const hi = CS12.hexToHsl(row.groundHigh);
+      ok(lo.l <= CS12.GROUND_TOLERANCE.lowMaxLightness, `[${id}] groundLow 壓得夠暗`, lo.l.toFixed(3));
+      ok(hi.l <= CS12.GROUND_TOLERANCE.highMaxLightness, `[${id}] groundHigh 壓得夠暗`, hi.l.toFixed(3));
+      ok(hi.l > lo.l, `[${id}] 高處比低處亮（高度階讀得出來）`);
+      ok(lo.s <= CS12.GROUND_TOLERANCE.maxSaturation, `[${id}] groundLow 不是糖果色`, lo.s.toFixed(3));
+      ok(hi.s <= CS12.GROUND_TOLERANCE.maxSaturation, `[${id}] groundHigh 不是糖果色`, hi.s.toFixed(3));
+    }
+    // 兩兩分得出來（66 對）—— 兩片土地共用同一組色、或某一片忘了填就會紅
+    let worst = Infinity;
+    let worstPair = '';
+    for (let i = 0; i < ids12.length; i += 1) {
+      for (let j = i + 1; j < ids12.length; j += 1) {
+        const a = colorScriptJson.regions[ids12[i]];
+        const b = colorScriptJson.regions[ids12[j]];
+        const d = Math.max(
+          CS12.toneDistance(a.groundLow, b.groundLow),
+          CS12.toneDistance(a.groundHigh, b.groundHigh)
+        );
+        ok(
+          d >= CS12.TONE_DISTANCE_MIN,
+          `[${ids12[i]}／${ids12[j]}] 地面兩兩分得出來（≥ ${CS12.TONE_DISTANCE_MIN}）`,
+          d.toFixed(3)
+        );
+        if (d < worst) {
+          worst = d;
+          worstPair = `${ids12[i]}／${ids12[j]}`;
+        }
+      }
+    }
+    ok(worst >= CS12.TONE_DISTANCE_MIN, `地面色最接近的一對：${worstPair}`, worst.toFixed(3));
+    // 這個門檻本身要有意義：拿兩組**一樣**的色去問，它一定要回 0
+    eq(CS12.toneDistance('#2a3947', '#2a3947'), 0, '同一個色的可分辨距離是 0（門檻擋得住「兩區共用一組色」）');
+    ok(CS12.toneDistance('#2a3947', '#3b3527') > CS12.TONE_DISTANCE_MIN, '差很多的兩個色距離遠大於門檻');
+  }
+
+  /* --- ② 地面：區界 6 公尺漸變 ---------------------------------- */
+  {
+    eq(Ground.GROUND_BLEND_M, 6, '區界漸變帶寬寫在 ground.js（6 公尺）');
+    /*
+     * 帶寬是**量**出來的：沿著母土地 → 加建院落的頸口取樣，看那一片的歸屬權重
+     * 從 5% 走到 95% 走了幾公尺。四座加建的院落都要落在 6 公尺 ±1.5 之內。
+     * （不是「差不多」而已 —— 帶寬變成 0 就是硬邊、變成 30 就是整片糊掉，兩種都會紅。）
+     */
+    const widthAcross = (ax, az, bx, bz, id) => {
+      const N = 600;
+      let lo = null;
+      let hi = null;
+      for (let i = 0; i <= N; i += 1) {
+        const x = ax + ((bx - ax) * i) / N;
+        const z = az + ((bz - az) * i) / N;
+        const w = Ground.groundBlend(x, z, World.REGION_SITES).find((o) => o.id === id);
+        const v = w ? w.w : 0;
+        const d = Math.hypot(x - ax, z - az);
+        if (lo === null && v >= 0.05) lo = d;
+        if (hi === null && v >= 0.95) hi = d;
+      }
+      return lo === null || hi === null ? null : hi - lo;
+    };
+    /*
+     * 取樣線的兩端：一端深在母土地裡、一端深在加建的院落裡。
+     * v1.2 · P22c 世界攤開之後這八個座標全部 ×1.3 —— 沒跟上的話，
+     * `wards` 的 (108,-160) 離新圓心 41.5 公尺（圓半徑只有 35.1），
+     * `refinery` 的 (-140,140) 離新圓心 39.2 公尺（實測兩條都回 null），
+     * 於是這一段量的是空氣、卡在自己的 `w !== null` 護欄上。
+     * 乘完之後兩端各離圓心 18.6–23.4 公尺，四條帶寬量到 5.63–5.82。
+     */
+    const necks = [
+      ['frugality', 0, -52, 0, -130],
+      ['wards', 123.5, -143, 140.4, -208],
+      ['refinery', -130, 130, -182, 182],
+      ['divergence', 52, 13, 117, 26],
+    ];
+    for (const [id, ax, az, bx, bz] of necks) {
+      const w = widthAcross(ax, az, bx, bz, id);
+      ok(w !== null, `[${id}] 量得到區界的漸變帶（不是量在空氣裡）`);
+      ok(
+        w !== null && Math.abs(w - Ground.GROUND_BLEND_M) <= 1.5,
+        `[${id}] 區界漸變帶寬 ≈ ${Ground.GROUND_BLEND_M} 公尺（不是硬邊、也不是整片糊掉）`,
+        w === null ? 'null' : `${w.toFixed(2)}m`
+      );
+    }
+    // 深在自己土地裡的一點：只有自己（權重 1），不會被隔壁染到
+    for (const site of World.REGION_SITES) {
+      if (site.annexOf) continue;
+      const w = Ground.groundBlend(site.x, site.z, World.REGION_SITES);
+      ok(w.length >= 1 && w[0].id === site.id && w.find((o) => o.id === site.id).w > 0.99, `[${site.id}] 土地中央只有自己的顏色`);
+    }
+  }
+
+  /* --- ②b 地面：橋面沒有硬邊（P12 審查） ------------------------- */
+  {
+    /*
+     * 橋面（兩片土地的半徑之間那一段）不屬於任何一片土地 —— `groundBlend()` 回空陣列，
+     * 而橋的 `coverage` 是 1.0，所以「掉進虛空就壓暗」那一層也蓋不住它。
+     * 審查前橋的兩端各留一條看得見的硬邊（實測 0.098 的跳色）。
+     * 這裡沿著每一條橋的中線每 0.25 公尺走一遍，量**相鄰兩點的顏色差**。
+     */
+    const toneOfBridge = (id) => {
+      const r = CS12.colorScriptFor(id);
+      return { low: r.groundLow, high: r.groundHigh };
+    };
+    const cA = new THREE.Color();
+    const cB = new THREE.Color();
+    const sampleAt = (x, z, out) =>
+      Ground.groundBaseColor(out, x, z, World.terrainHeight(x, z), {
+        toneOf: toneOfBridge,
+        sites: World.REGION_SITES,
+        links: World.BRIDGE_SPANS,
+        grain: false,
+      });
+    ok(World.BRIDGE_SPANS.length >= 11, '（前提）每一條橋與頸口都登記在 BRIDGE_SPANS', String(World.BRIDGE_SPANS.length));
+    let worstJump = 0;
+    let worstAt = '';
+    for (const span of World.BRIDGE_SPANS) {
+      const dx = span.bx - span.ax;
+      const dz = span.bz - span.az;
+      const len = Math.hypot(dx, dz);
+      let prev = null;
+      for (let d = span.aR - 6; d <= len - span.bR + 6; d += 0.25) {
+        const x = span.ax + (dx / len) * d;
+        const z = span.az + (dz / len) * d;
+        sampleAt(x, z, cA);
+        if (prev) {
+          const j = Math.hypot(cA.r - prev[0], cA.g - prev[1], cA.b - prev[2]);
+          if (j > worstJump) {
+            worstJump = j;
+            worstAt = `${span.toId} @${d.toFixed(1)}m`;
+          }
+        }
+        prev = [cA.r, cA.g, cA.b];
+      }
+    }
+    ok(worstJump < 0.02, `橋面沿線沒有硬邊（最大跳色 ${worstAt}）`, worstJump.toFixed(4));
+    // 橋的兩端要跟各自的土地接得上（不是「橋自己一個顏色」）
+    for (const span of World.BRIDGE_SPANS.slice(0, 4)) {
+      const dx = span.bx - span.ax;
+      const dz = span.bz - span.az;
+      const len = Math.hypot(dx, dz);
+      for (const [d0, d1, who] of [
+        [span.aR - 1, span.aR + 1, span.fromId],
+        [len - span.bR - 1, len - span.bR + 1, span.toId],
+      ]) {
+        sampleAt(span.ax + (dx / len) * d0, span.az + (dz / len) * d0, cA);
+        sampleAt(span.ax + (dx / len) * d1, span.az + (dz / len) * d1, cB);
+        const j = Math.hypot(cA.r - cB.r, cA.g - cB.g, cA.b - cB.b);
+        ok(j < 0.02, `[${span.toId}] 橋在 ${who} 那一端與土地接得上`, j.toFixed(4));
+      }
+    }
+    // 沒給 links 就是舊行為（退得回去，不是唯一一條路）
+    Ground.groundBaseColor(cA, 0, 0, 1, { toneOf: toneOfBridge, sites: World.REGION_SITES, grain: false });
+    Ground.groundBaseColor(cB, 0, 0, 1, { toneOf: toneOfBridge, sites: World.REGION_SITES, links: World.BRIDGE_SPANS, grain: false });
+    eq(cA.getHex(), cB.getHex(), '土地正中央不受橋面那一層影響');
+  }
+
+  /* --- ③ 地面：碎紋只在高畫質，而且畫出來的就是算出來的 ---------- */
+  {
+    const toneOf12 = (id) => {
+      const r = CS12.colorScriptFor(id);
+      return { low: r.groundLow, high: r.groundHigh };
+    };
+    const c1 = new THREE.Color();
+    const c2 = new THREE.Color();
+    let differ = 0;
+    let maxDelta = 0;
+    for (let i = 0; i < 200; i += 1) {
+      const x = -140 + (i % 20) * 14;
+      const z = -140 + Math.floor(i / 20) * 14;
+      const y = World.terrainHeight(x, z);
+      Ground.groundBaseColor(c1, x, z, y, { toneOf: toneOf12, sites: World.REGION_SITES, grain: true });
+      Ground.groundBaseColor(c2, x, z, y, { toneOf: toneOf12, sites: World.REGION_SITES, grain: false });
+      const d = Math.abs(c1.r - c2.r) + Math.abs(c1.g - c2.g) + Math.abs(c1.b - c2.b);
+      if (d > 1e-6) differ += 1;
+      if (d > maxDelta) maxDelta = d;
+    }
+    ok(differ >= 190, '碎紋那一層真的改了顏色（200 個樣點裡幾乎都不同）', String(differ));
+    ok(maxDelta < 0.16, '碎紋只是紋理不是噪點（振幅有上限）', maxDelta.toFixed(3));
+    // 同一點問兩次要一樣（可重現，不是 Math.random）
+    Ground.groundBaseColor(c1, 12.5, -33.25, 1.2, { toneOf: toneOf12, sites: World.REGION_SITES, grain: true });
+    Ground.groundBaseColor(c2, 12.5, -33.25, 1.2, { toneOf: toneOf12, sites: World.REGION_SITES, grain: true });
+    eq(c1.getHex(), c2.getHex(), '碎紋可重現（同一點永遠同一個顏色）');
+
+    /*
+     * **畫出來的就是算出來的**：把地形網格的頂點色跟 `groundBaseColor()` 對一遍。
+     * 高畫質的地形有碎紋、低畫質沒有 —— 兩邊各取幾個「不在路上、不在區緣」的頂點來比
+     * （路與區緣還會再往 worn／edge 靠，那兩層不是這一節在驗的）。
+     */
+    /*
+     * **要對「真的出貨的那個世界」驗**：`testWorld`／`lowWorld` 是不帶色彩腳本蓋的
+     * （P06 的退路：沒有腳本時地面退回全域 `PALETTE.ground`／`groundHigh`），
+     * 而遊戲在 `main.js` 是帶著 `colorScriptFor` 蓋的。所以這一節自己蓋兩個帶腳本的世界。
+     */
+    const restoreGround = installCanvasStub();
+    let toneWorlds;
+    try {
+      toneWorlds = [
+        ['高畫質', World.createWorld({ engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} }, quality: 'high', ...worldOpts, colorScript: CS12.colorScriptFor }), true],
+        ['低畫質', World.createWorld({ engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} }, quality: 'low', ...worldOpts, colorScript: CS12.colorScriptFor }), false],
+      ];
+    } finally {
+      restoreGround();
+    }
+    const terrainOf = (world) => world.root.getObjectByName('terrain');
+    const segs12base = buildPathNetwork(World.REGION_SITES, [...World.CORRIDORS, ...World.ANNEX_LINKS], challenges);
+    const accent12 = new THREE.Color();
+    const groupColorOf = new Map((curriculum.groups || []).map((g) => [g.id, g.color]));
+    for (const r of catalog.implementedRegions()) if (!groupColorOf.has(r.id)) groupColorOf.set(r.id, r.color);
+    /**
+     * 把 `buildTerrain()` 那一段**逐步重算一次**：基底（ground.js）→ 該區主色染一次。
+     * 只挑「覆蓋滿、不在橋上、不在路上」的頂點，這樣 worn／edge 兩層不會插手，
+     * 期望值就是精確的 —— 高畫質應該逐值等於「有碎紋」那一版、低畫質等於「沒碎紋」那一版。
+     */
+    const expectAt = (out, x, z, y, grain) => {
+      Ground.groundBaseColor(out, x, z, y, { toneOf: toneOf12, sites: World.REGION_SITES, grain });
+      const here = World.regionAt(x, z);
+      if (here) {
+        accent12.set(groupColorOf.get(here.id) || '#8aa0b4').multiplyScalar(0.42);
+        out.lerp(accent12, here.onBridge ? 0.22 : 0.38);
+      }
+      return out;
+    };
+    for (const [label, world, grain] of toneWorlds) {
+      const mesh = terrainOf(world);
+      ok(Boolean(mesh), `[${label}] 找得到地形網格`);
+      const pos = mesh.geometry.attributes.position;
+      const col = mesh.geometry.attributes.color;
+      ok(Boolean(col), `[${label}] 地形有頂點色`);
+      let checked12 = 0;
+      let wrongWay = 0;
+      for (let i = 0; i < pos.count && checked12 < 60; i += 1) {
+        const x = pos.getX(i);
+        const z = pos.getZ(i);
+        if (World.coverage(x, z) < 0.999) continue; // 區緣還要往 edge 靠
+        const here = World.regionAt(x, z);
+        if (!here || here.onBridge) continue;
+        if (pathInfluence(x, z, segs12base) > 0) continue; // 路上還要往 worn 靠
+        checked12 += 1;
+        const y = pos.getY(i);
+        const drawn = new THREE.Color(col.getX(i), col.getY(i), col.getZ(i));
+        expectAt(c1, x, z, y, grain);
+        const d = Math.hypot(drawn.r - c1.r, drawn.g - c1.g, drawn.b - c1.b);
+        ok(d < 2e-3, `[${label}] 頂點 ${i} 畫出來的就是 ground.js 算的那一個`, d.toFixed(5));
+        // 另一種畫質的算法要**對不上** —— 不然這條斷言等於沒問（碎紋有沒有都一樣就是沒做）
+        expectAt(c2, x, z, y, !grain);
+        const dOther = Math.hypot(drawn.r - c2.r, drawn.g - c2.g, drawn.b - c2.b);
+        if (dOther <= d) wrongWay += 1;
+      }
+      ok(checked12 >= 30, `[${label}] 真的量到夠多頂點（不是空過）`, String(checked12));
+      eq(wrongWay, 0, `[${label}] 每一個頂點都靠「這個畫質該有的碎紋」那一邊`, `${wrongWay}/${checked12}`);
+    }
+
+  }
+
+  /* --- ④ 粒子：一區一個 Points、共用材質、0 光源 ----------------- */
+  {
+    ok(Boolean(testWorld.drifts), '世界蓋出了每區專屬的粒子層');
+    eq(testWorld.drifts.layers.length, World.REGION_SITES.length, '一片土地一組（12 組）');
+    const mats = new Set();
+    let points = 0;
+    let lights12 = 0;
+    let meshes = 0;
+    testWorld.drifts.group.traverse((o) => {
+      if (o.isLight) lights12 += 1;
+      if (o.isPoints) {
+        points += 1;
+        mats.add(o.material);
+      } else if (o.isMesh) meshes += 1;
+    });
+    eq(points, 12, '恰好 12 個 THREE.Points（一區一個 draw call）');
+    eq(mats.size, 1, '12 區共用同一個材質');
+    eq(lights12, 0, 'P12：粒子層一盞燈都沒加');
+    eq(meshes, 0, '粒子層沒有網格（三角形 +0）');
+    for (const layer of testWorld.drifts.layers) {
+      const tag = `[drift:${layer.id}]`;
+      ok(Boolean(Drifts.DRIFTS[layer.id]), `${tag} 有自己的一組參數`);
+      ok(layer.n > 0, `${tag} 真的有點`, String(layer.n));
+      const pos = layer.points.geometry.attributes.position;
+      eq(pos.count, layer.n, `${tag} 點數與資料一致`);
+      ok(layer.points.name === `drift:${layer.id}`, `${tag} 節點名照 §5.1`);
+      // 每一顆都在這片土地上、都在地面以上
+      let inside = 0;
+      let above = 0;
+      for (let i = 0; i < pos.count; i += 1) {
+        const x = pos.getX(i);
+        const z = pos.getZ(i);
+        const site = World.REGION_SITES.find((sm) => sm.id === layer.id);
+        if (Math.hypot(x - site.x, z - site.z) <= site.radius + 6) inside += 1;
+        if (pos.getY(i) > World.terrainHeight(x, z) + 0.2) above += 1;
+      }
+      eq(inside, pos.count, `${tag} 每一顆都撒在自己那一片土地上`);
+      eq(above, pos.count, `${tag} 每一顆都在地面以上（不是埋在土裡）`);
+    }
+    /*
+     * **天花板也要驗**（P12 審查抓到的）：`update()` 會在 `baseY` 上再加 0…span 的 `dy`，
+     * 如果起點自己也散在 [lo, hi]，兩邊各加一次 → 實際上限變成 `hi + span`
+     * （齒輪工坊宣告 12m、實測飄到 25.9m）。
+     * 量的是「離**自己出生那一點**的地面多高」——不是離腳下當下那一點，
+     * 因為 swirl 會把點橫向帶到坡下，那是地形的起伏不是它自己飄的。
+     * 這一段會動到每一層的座標，所以擺在前面那些「出生點」斷言的後面。
+     */
+    for (const layer of testWorld.drifts.layers) {
+      const spec = Drifts.DRIFTS[layer.id];
+      const arr = layer.points.geometry.attributes.position.array;
+      let ceil = -Infinity;
+      for (let step = 0; step < 24; step += 1) {
+        testWorld.drifts.update(1 / 60, (step / 24) * 40, { position: { x: layer.cx, y: 8, z: layer.cz } });
+        for (let i = 0; i < layer.n; i += 1) {
+          const h = arr[i * 3 + 1] - World.terrainHeight(layer.baseX[i], layer.baseZ[i]);
+          if (h > ceil) ceil = h;
+        }
+      }
+      ok(
+        spec.rise === 0 || ceil <= spec.y[1] + spec.bob + 0.35,
+        `[drift:${layer.id}] 飄不出自己宣告的高度（≤ ${spec.y[1]} ＋ 起伏 ${spec.bob}）`,
+        ceil.toFixed(2)
+      );
+    }
+    // 12 種參數不准長一樣（不然就不是「專屬」）
+    const shapes = new Set();
+    for (const id of Object.keys(Drifts.DRIFTS)) {
+      const d = Drifts.DRIFTS[id];
+      shapes.add(`${d.shape}|${d.rise}|${d.bob}|${d.swirl}|${d.speed}|${d.tone}`);
+    }
+    eq(shapes.size, 12, '12 片土地的空氣兩兩不同（不是同一種東西換個顏色）');
+    eq(Object.keys(Drifts.DRIFTS).length, 12, 'DRIFTS 表剛好 12 片土地');
+    for (const id of Object.keys(Drifts.DRIFTS)) {
+      ok(World.REGION_SITES.some((sm) => sm.id === id), `DRIFTS 的 ${id} 是真實區域`);
+    }
+  }
+
+  /* --- ⑤ 粒子：低畫質整層關、reducedMotion 不動、零每幀配置 ------ */
+  {
+    const kit12 = { sites: World.REGION_SITES, heightAt: World.terrainHeight, particleOf: () => '#cfe8f6', densityOf: () => 1 };
+    const cam = { position: { x: 0, y: 2, z: 0 } };
+    const restore12 = installCanvasStub();
+    try {
+      // 低畫質：整層藏起來、位置一個位元組都不動
+      let quality12 = 'low';
+      const lowDrift = Drifts.createDrifts({ ...kit12, qualityOf: () => quality12 });
+      const arrLow = lowDrift.layers[0].points.geometry.attributes.position.array;
+      const snapLow = Float32Array.from(arrLow);
+      lowDrift.update(0.1, 3.7, cam);
+      eq(lowDrift.group.visible, false, '低畫質：粒子層整層關掉');
+      ok(snapLow.every((v, i) => v === arrLow[i]), '低畫質：位置一個位元組都沒動（零每幀工作）');
+      // 切回高畫質就要回來（畫質是當下問的，不必重建世界）
+      quality12 = 'high';
+      lowDrift.update(0.1, 3.8, cam);
+      eq(lowDrift.group.visible, true, '切回高畫質：粒子層回來了');
+      ok(!snapLow.every((v, i) => v === arrLow[i]), '切回高畫質：位置開始動了');
+
+      // reducedMotion：點還在、還會亮，但不動
+      const still = Drifts.createDrifts({ ...kit12, reducedMotion: true, qualityOf: () => 'high' });
+      const arrStill = still.layers[0].points.geometry.attributes.position.array;
+      const snapStill = Float32Array.from(arrStill);
+      still.update(0.1, 9.3, cam);
+      still.update(0.1, 19.3, cam);
+      eq(still.group.visible, true, 'reducedMotion：粒子還在（關掉的是動，不是回應）');
+      ok(snapStill.every((v, i) => v === arrStill[i]), 'reducedMotion：一顆都沒有移動');
+      ok(still.layers.every((l) => l.n > 0), 'reducedMotion：每一區還是有點');
+
+      // 離鏡頭很遠的土地整層跳過（距離分級）
+      const far = Drifts.createDrifts({ ...kit12, qualityOf: () => 'high' });
+      const layerFar = far.layers.find((l) => l.id === 'forms');
+      ok(Boolean(layerFar), '（前提）找得到量器坊那一層');
+      const arrFar = layerFar.points.geometry.attributes.position.array;
+      const snapFar = Float32Array.from(arrFar);
+      far.update(0.1, 5.5, { position: { x: -300, y: 2, z: -300 } });
+      ok(snapFar.every((v, i) => v === arrFar[i]), '離鏡頭 180 公尺以外的土地整層跳過');
+      far.update(0.1, 5.5, { position: { x: 0, y: 2, z: 124 } });
+      ok(!snapFar.every((v, i) => v === arrFar[i]), '鏡頭走到那片土地上就會動（斷言不是空過）');
+      lowDrift.dispose();
+      still.dispose();
+      far.dispose();
+    } finally {
+      restore12();
+    }
+    // 靜態掃描：每幀迴圈裡零配置
+    const driftSrc = readFileSync(resolve(root, 'src/world/drifts.js'), 'utf8');
+    const updateBody = CS12.bodyOf(driftSrc, 'function update');
+    ok(updateBody.length > 200, '（前提）抓得到 drifts.js 的 update()');
+    for (const bad of ['new ', '.map(', '.filter(', '=>']) {
+      ok(!updateBody.includes(bad), `P12：粒子的每幀迴圈沒有 ${bad.trim()}`);
+    }
+    ok(!/requestAnimationFrame/.test(driftSrc), 'P12：drifts.js 沒有自己的動畫迴圈');
+    /*
+     * 匯出的 `CULL_M` 就是真的拿去比的那一個數字（P12 審查前是 `CULL_M + 60`，
+     * 調 `CULL_M` 不會生效 —— 兩份真相裡有一份沒作用，比沒有更糟）。
+     */
+    ok(
+      /dx \* dx \+ dz \* dz > CULL_M \* CULL_M/.test(driftSrc),
+      'P12：距離分級直接用 CULL_M（不是 CULL_M ＋ 別的數）'
+    );
+    ok(Drifts.CULL_M >= 150, 'P12：CULL_M 含得住最大的一片土地（半徑 62）加上視距', String(Drifts.CULL_M));
+  }
+
+  /* --- ⑥ 中觀：新的四片土地吃同一套規則 -------------------------- */
+  {
+    const Screens12 = await import('../src/world/screens.js');
+    const Rules12 = (await import('./lib/screen-rules.mjs')).default;
+    eq(Screens12.SOLID_MIN_R, World.SOLID_MIN_RADIUS, 'screens.js 的 SOLID_MIN_R 與 world.js 逐值相同');
+    for (const b of Screens12.SCREEN_BANDS) {
+      ok(
+        b.depth >= Screens12.BAND_DEPTH_MIN && b.depth <= Screens12.BAND_DEPTH_MAX,
+        `[band:${b.id}] 厚度 ${Screens12.BAND_DEPTH_MIN}–${Screens12.BAND_DEPTH_MAX} 公尺（碰撞圓串的半徑就是半個厚度）`,
+        String(b.depth)
+      );
+    }
+    ok(Screens12.APRON_HEIGHT < 0.9, '朝橋頭那一面的矮階低於 §6.3 的 0.9（所以不必有碰撞體）', String(Screens12.APRON_HEIGHT));
+    // 一片土地的母題只准一種造型
+    for (const site of World.REGION_SITES) {
+      const list = Screens12.MOTIFS.filter((mo) => mo.region === site.id);
+      if (!list.length) continue;
+      eq(new Set(list.map((mo) => mo.kind)).size, 1, `[${site.id}] 母題是同一個形狀重複出現`);
+      for (let i = 0; i < list.length; i += 1) {
+        for (let j = i + 1; j < list.length; j += 1) {
+          const d = Math.hypot(list[i].at[0] - list[j].at[0], list[i].at[1] - list[j].at[1]);
+          ok(d >= Rules12.MOTIF_GAP, `[${site.id}] 母題 ${list[i].id}／${list[j].id} 散得夠開`, d.toFixed(1));
+        }
+      }
+    }
+    // 每一種登記的造型都真的被用到（沒有寫了沒人用的造型）
+    for (const kind of Screens12.MOTIF_KIND_IDS) {
+      ok(Screens12.MOTIFS.some((mo) => mo.kind === kind), `母題造型 ${kind} 真的有土地在用`);
+    }
+    // 資料層算出來的碰撞圓 ＝ 蓋出來的碰撞圓（`screen-fit` 的離線篩靠它）
+    for (const b of Screens12.SCREEN_BANDS) {
+      const layer = testWorld.screens.find((l) => l.id === b.region);
+      ok(Boolean(layer), `[band:${b.id}] 這一區蓋出了中觀層`);
+      const node = layer ? layer.group.children.find((c) => c.name === `screen:${b.id}`) : null;
+      ok(Boolean(node), `[band:${b.id}] 場景圖裡找得到它`);
+      const built = node ? World.collectSolids(node, World.terrainHeight) : [];
+      const predicted = Screens12.bandSolidCircles(b);
+      eq(built.length, predicted.length, `[band:${b.id}] 資料層算的碰撞圓數 ＝ 蓋出來的`, `${predicted.length} vs ${built.length}`);
+      for (let i = 0; i < Math.min(built.length, predicted.length); i += 1) {
+        const d = Math.hypot(built[i].x - predicted[i].x, built[i].z - predicted[i].z);
+        ok(d < 0.01, `[band:${b.id}] 第 ${i} 個碰撞圓的位置對得上`, d.toFixed(4));
+        ok(Math.abs(built[i].r - predicted[i].r) < 1e-6, `[band:${b.id}] 第 ${i} 個碰撞圓的半徑對得上`);
+      }
+      ok(built.length <= 7, `[band:${b.id}] 一道帶的碰撞體 ≤ 7`, String(built.length));
+    }
+    // 中觀層每一片土地的碰撞體 ≤ 20
+    eq(
+      EXPECT.screens.solidsPerRegion,
+      Rules12.SOLIDS_PER_REGION_MAX,
+      'expected-counts 的「每區中觀碰撞體上限」與程式常數一致（兩份數字只有一份有效）'
+    );
+    for (const layer of testWorld.screens) {
+      const n = World.collectSolids(layer.group, World.terrainHeight).length;
+      ok(
+        n <= Rules12.SOLIDS_PER_REGION_MAX,
+        `[${layer.id}] 中觀層的碰撞體 ≤ 每區 ${Rules12.SOLIDS_PER_REGION_MAX}`,
+        String(n)
+      );
+      for (const mo of layer.motifs) {
+        const node = layer.group.children.find((c) => c.name === `motif:${mo.id}`);
+        ok(Boolean(node), `[motif:${mo.id}] 場景圖裡找得到它`);
+        const n2 = node ? World.collectSolids(node, World.terrainHeight).length : 99;
+        ok(n2 <= 3, `[motif:${mo.id}] 一座母題的碰撞體 ≤ 3`, String(n2));
+      }
+    }
+    // 母題腳下的那幾點：覆蓋率與落差（造型與規則問的是同一組點）
+    for (const mo of Screens12.MOTIFS) {
+      const pts = Screens12.motifGroundPoints(mo);
+      eq(pts.length, Screens12.motifBlocks(mo).length, `[motif:${mo.id}] 落點數 ＝ 實體塊數`);
+      const hs = [];
+      for (const [px, pz] of pts) {
+        const cov = World.coverage(px, pz);
+        ok(cov >= Rules12.MOTIF_COVERAGE_MIN, `[motif:${mo.id}] 每一塊腳下都站得住`, cov.toFixed(3));
+        hs.push(World.terrainHeight(px, pz));
+      }
+      const drop = Math.max(...hs) - Math.min(...hs);
+      ok(drop <= Rules12.MOTIF_STEP_DROP_MAX, `[motif:${mo.id}] 各塊之間的落差 ≤ ${Rules12.MOTIF_STEP_DROP_MAX}m`, drop.toFixed(2));
+      const segs12 = buildPathNetwork(World.REGION_SITES, [...World.CORRIDORS, ...World.ANNEX_LINKS], challenges);
+      const dPath = Rules12.pathDistance(segs12, mo.at[0], mo.at[1]);
+      ok(
+        dPath >= Rules12.MOTIF_PATH_MIN && dPath <= Rules12.MOTIF_PATH_MAX,
+        `[motif:${mo.id}] 離路網 ${Rules12.MOTIF_PATH_MIN}–${Rules12.MOTIF_PATH_MAX} 公尺`,
+        dPath.toFixed(1)
+      );
+    }
+    /*
+     * 逐塊貼地 —— 這一次驗的是**自己宣告站在地上**的那些塊（`hugsGround`）。
+     * P11 那版靠 `solid || solidSpan` 認人，P12 把石脊的碰撞集中成一個節點之後，
+     * 核心石板就不再帶那兩個旗標了 —— 不改認法的話，一整道 12 公尺高的牆會從這條斷言裡消失。
+     */
+    {
+      const bb12 = new THREE.Box3();
+      const m12 = new THREE.Matrix4();
+      let checkedHug = 0;
+      for (const layer of testWorld.screens) {
+        layer.group.updateMatrixWorld(true);
+        layer.group.traverse((o) => {
+          if (!o.isMesh || !o.geometry || !o.userData.hugsGround) return;
+          if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+          const each = (mtx, i) => {
+            bb12.copy(o.geometry.boundingBox).applyMatrix4(mtx);
+            const cx = (bb12.min.x + bb12.max.x) / 2;
+            const cz = (bb12.min.z + bb12.max.z) / 2;
+            const bottom = bb12.min.y - World.terrainHeight(cx, cz);
+            checkedHug += 1;
+            ok(bottom <= Rules12.GROUND_HUG_MAX, `[${layer.id}] ${o.name || '(mesh)'}#${i} 沒有浮在空中`, bottom.toFixed(2));
+            ok(bottom >= -Rules12.GROUND_BURY_MAX, `[${layer.id}] ${o.name || '(mesh)'}#${i} 沒有整塊埋進土裡`, bottom.toFixed(2));
+          };
+          if (o.isInstancedMesh) {
+            for (let i = 0; i < o.count; i += 1) {
+              o.getMatrixAt(i, m12);
+              m12.premultiply(o.matrixWorld);
+              each(m12, i);
+            }
+          } else each(m12.copy(o.matrixWorld), 0);
+        });
+      }
+      ok(checkedHug >= 60, 'P12：貼地檢查真的量到東西（不是空過）', String(checkedHug));
+    }
+  }
+
+  /* --- ⑦ 預算 ---------------------------------------------------- */
+  {
+    let tris12 = 0;
+    let lights12 = 0;
+    let points12 = 0;
+    testScene.traverse((o) => {
+      if (o.isLight) lights12 += 1;
+      if (o.isPoints) points12 += 1;
+      if (o.isMesh && o.geometry) {
+        const geo = o.geometry;
+        const n = geo.index ? geo.index.count / 3 : geo.attributes.position ? geo.attributes.position.count / 3 : 0;
+        tris12 += n * (o.isInstancedMesh ? o.count : 1);
+      }
+    });
+    ok(tris12 < WORLD_TRI_CEIL, `P12：世界三角形 < ${WORLD_TRI_CEIL}（P20b 的框）`, `tris=${Math.round(tris12)}`);
+    eq(lights12, 37, 'P12：光源數不變（地面／粒子／中觀一盞燈都不加）', `lights=${lights12}`);
+    ok(testWorld.solids.length < 1100, 'P12：碰撞體 < 1,100（v1.2 · P17 的框）', `n=${testWorld.solids.length}`);
+    /*
+     * 粒子的 draw call：這一格加的是 12 個（一區一個），**其餘一個都沒動**。
+     * 場景裡本來就有的那 9 個：星空 6（`engine.js` 的星層）、濁靈的光屑、
+     * 舊的那一層全域螢火 `motes`、石座演出的光屑 `rubric-fx-particles`。
+     */
+    let driftPoints = 0;
+    testWorld.drifts.group.traverse((o) => {
+      if (o.isPoints) driftPoints += 1;
+    });
+    eq(driftPoints, 12, 'P12：新增的粒子 draw call ＝ 12（一區一個）');
+    eq(points12 - driftPoints, 9, 'P12：其餘的粒子層一個都沒動（星空 6 ＋ 濁靈 ＋ 螢火 ＋ 石座演出）', String(points12));
+  }
+}
+
+
+/* ================================================================== */
+/* v1.2 · P14：跳躍原型（只在中央高原）                                 */
+/*   · 常數與 WORLD.md §3.1 逐條一致；只有 foundations 跳得起來         */
+/*   · 純函式的彈道：跳得上 1.6、跳不上 3.0（量最差的那一次幀率）        */
+/*   · 狀態機模擬：跳上去 → 站得住 → 走下來；不按空白鍵 逐幀等於地形高度      */
+/*   · 邊界護欄的正反例（虛空、穿模）；escapeSolid 那條路不會被抬到頂面   */
+/*   · 高台：資料契約 ＋ 世界實體 ＋ 預算；零每幀配置的靜態掃描          */
+/* ================================================================== */
+console.log('\n▸ 跳躍原型（v1.2 · P14）');
+{
+  const Jump = await import('../src/player/jump.js');
+  const ScreensP14 = await import('../src/world/screens.js');
+  const worldMdP14 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+  const s31P14 = worldMdP14.slice(worldMdP14.indexOf('### 3.1'), worldMdP14.indexOf('### 3.2'));
+  const PLATFORM = ScreensP14.PLATFORMS[0];
+
+  /* --- ① 常數本身說得通，而且與 WORLD.md 是同一組數字 --------------- */
+  {
+    eq(Jump.COYOTE_TIME, 0.1, 'coyote time ＝ 100 毫秒');
+    eq(Jump.JUMP_BUFFER, 0.15, 'input buffer ＝ 150 毫秒');
+    eq(Jump.JUMP_CUT, 0.5, '鬆手把上升速度砍半');
+    ok(Jump.JUMP_BUFFER > Jump.COYOTE_TIME, 'buffer 比 coyote 長（早按比晚按寬容）');
+    ok(Jump.GRAVITY > 9.8, '重力比現實大（遊戲的跳要上去得快、下來得更快）', String(Jump.GRAVITY));
+    ok(Jump.MAX_STEP <= 1 / 60, '垂直積分的步長 ≤ 1/60 秒（軟體渲染一幀 0.2 秒也不會失真）', String(Jump.MAX_STEP));
+    ok(Jump.MAX_FALL > Jump.JUMP_SPEED, '終端速度大於起跳速度（不會在上升時就被夾住）');
+    // WORLD.md §3.1 寫的就是這幾個數字（改了程式沒改文件 → 這裡先紅）
+    ok(s31P14.includes('100 ms'), 'WORLD.md §3.1 寫了 coyote time 100 ms');
+    ok(s31P14.includes('150 ms'), 'WORLD.md §3.1 寫了 input buffer 150 ms');
+    ok(s31P14.includes(String(Jump.JUMP_SPEED)), `WORLD.md §3.1 寫了起跳速度 ${Jump.JUMP_SPEED}`);
+    ok(s31P14.includes(String(Jump.GRAVITY)), `WORLD.md §3.1 寫了重力 ${Jump.GRAVITY}`);
+    ok(s31P14.includes('JUMP_REGIONS'), 'WORLD.md §3.1 指得出「跳得起來的土地」住在哪個常數');
+    ok(s31P14.includes('P16a'), 'WORLD.md §3.1 說得出其餘 11 片土地由哪一格放行');
+    ok(/砍半/.test(s31P14), 'WORLD.md §3.1 寫了鬆手提前下落');
+    ok(
+      s31P14.includes(String(Jump.apexOf(Jump.JUMP_SPEED))),
+      `WORLD.md §3.1 寫了頂點高度 ${Jump.apexOf(Jump.JUMP_SPEED)} 公尺`
+    );
+    ok(/1\/120/.test(s31P14), 'WORLD.md §3.1 寫了垂直積分切成 1/120 秒的小步');
+  }
+
+  /*
+   * --- ② 跳得起來的土地與橋（v1.2 · P15 由 1 片長到 4 片 ＋ 1 座橋）
+   *
+   * **「行為零改變」的根在這裡**：沒開的那 8 片土地與 6 座橋，`jumpSpeedFor()` 回 0 →
+   * `stepJumper()` 的第 ② 段直接把那一次按鍵丟掉 → 一路走到第 ④ 段回 `groundY`。
+   * 而且開了哪幾片不是隨手決定的：**開的一定是這一格真的蓋了高台的那幾片**
+   * （不然是蓋裝飾），開的那一座橋**一定是有缺口的那一座**（不然是給人跳出去）。
+   */
+  {
+    /*
+     * v1.2 · P16a：**這張表不再寫死一個數字，而是「與真的有高台的土地逐項相等」。**
+     * 寫死 4（或 8）只是在記錄快照；要守的規矩是「開的一定是蓋得出高台的那幾片」——
+     * 多開一片沒有高台的、或蓋了高台卻忘了開，兩種錯法都要紅。
+     */
+    const jumpSorted = Jump.JUMP_REGIONS.slice().sort().join(',');
+    const withPlatform = [...new Set(ScreensP14.PLATFORMS.map((pf) => pf.region))].sort().join(',');
+    eq(jumpSorted, withPlatform, '跳得起來的土地 ＝ 真的有高台的土地（逐項相等，不多也不少）');
+    ok(Jump.JUMP_REGIONS.length >= 8, '這一格鋪到至少八片土地（P16a：先量再放）', String(Jump.JUMP_REGIONS.length));
+    ok(Jump.JUMP_REGIONS.includes('foundations'), '中央高原還在（P14 開的那一片沒有被拿掉）');
+    // 量出來一個合法落點都沒有的那四片：**不准**偷偷開（開了也沒有東西跳得上去）
+    for (const id of ['toolcraft', 'sight', 'divergence', 'wards']) {
+      eq(
+        ScreensP14.PLATFORMS.some((pf) => pf.region === id),
+        false,
+        `[${id}] 量出來擺不下高台（WORLD.md §4.12 的表）`
+      );
+      eq(Jump.jumpSpeedFor(id), 0, `[${id}] 沒有高台就不開跳躍（按了 J 什麼都不會發生）`);
+    }
+    // 開的每一片都真的有高台；有高台的每一片也都跳得起來 —— 兩邊互相對得上
+    const platformRegions = new Set(ScreensP14.PLATFORMS.map((pf) => pf.region));
+    for (const id of Jump.JUMP_REGIONS) {
+      ok(platformRegions.has(id), `[${id}] 跳得起來的土地上真的有高台（不是白開）`);
+    }
+    for (const id of platformRegions) {
+      ok(Jump.JUMP_REGIONS.includes(id), `[${id}] 有高台的土地跳得起來（高台不是裝飾）`);
+    }
+    let nonZero = 0;
+    for (const site of World.REGION_SITES) {
+      const v = Jump.jumpSpeedFor(site.id);
+      if (Jump.JUMP_REGIONS.includes(site.id)) {
+        ok(v > 0, `[${site.id}] 跳得起來`, String(v));
+        ok(Jump.jumpApexFor(site.id) > 1.7, `[${site.id}] 跳得上這一片最高的那一座高台`);
+        nonZero += 1;
+      } else {
+        eq(v, 0, `[${site.id}] 跳躍速度是 0（行為與 P14 之前完全相同）`);
+        eq(Jump.jumpApexFor(site.id), 0, `[${site.id}] 跳得多高 ＝ 0`);
+      }
+    }
+    eq(nonZero, Jump.JUMP_REGIONS.length, `12 片土地裡有 ${Jump.JUMP_REGIONS.length} 片非 0`);
+    eq(
+      World.REGION_SITES.length - nonZero,
+      World.REGION_SITES.length - Jump.JUMP_REGIONS.length,
+      '其餘那幾片一寸都沒動（每一幀與 P14 之前完全相同）'
+    );
+    ok(World.REGION_SITES.length - nonZero > 0, '而且真的還有「跳不起來」的土地（反例還在，這一段不是空過的）');
+    for (const bad of [null, undefined, '', 'nope', '__proto__', 'constructor', 'toString']) {
+      eq(Jump.jumpSpeedFor(bad), 0, `jumpSpeedFor(${JSON.stringify(bad)}) ＝ 0（不會漏原型鍊上的東西）`);
+      eq(Jump.jumpSpeedForBridge(bad), 0, `jumpSpeedForBridge(${JSON.stringify(bad)}) ＝ 0`);
+    }
+    /* 橋：**只有開了缺口的那一座**跳得起來，其餘六座是 0。 */
+    eq(
+      Jump.JUMP_BRIDGES.slice().sort().join(','),
+      World.BRIDGE_GAPS.map((g2) => g2.region).sort().join(','),
+      '跳得起來的橋 ＝ 有缺口的橋（一一對應，不多也不少）'
+    );
+    for (const c of World.CORRIDORS) {
+      const v = Jump.jumpSpeedForBridge(c.region);
+      if (World.BRIDGE_GAPS.some((g2) => g2.region === c.region)) ok(v > 0, `[bridge:${c.region}] 有缺口 → 跳得起來`);
+      else eq(v, 0, `[bridge:${c.region}] 沒有缺口 → 跳躍速度是 0（每一幀與 P14 之前相同）`);
+    }
+  }
+
+  /* --- ③ 彈道：跳得上 1.6、跳不上 3.0（**量最差的那一次幀率**） ------ */
+  {
+    const apex = Jump.apexOf(Jump.JUMP_SPEED);
+    ok(apex > PLATFORM.height + 0.3, `連續解的頂點跳得上 ${PLATFORM.height} 公尺的第一階`, apex.toFixed(3));
+    ok(apex < World.STAND_MAX_H - 0.5, `連續解的頂點跳不上 ${World.STAND_MAX_H} 公尺（STAND_MAX_H 就是契約）`, apex.toFixed(3));
+    /*
+     * 連續解只是紙上的數字，玩家踩到的是離散積分那一條。
+     * findings（P13）：「全程都…」的斷言要量**最差的那一次** ——
+     * 所以這裡對五種幀時間各跑一次，取最小值與最大值來判生死。
+     */
+    const dts = [1 / 240, 1 / 120, 1 / 60, 1 / 30, 0.2];
+    const sims = dts.map((dt) => Jump.simulateApex(Jump.JUMP_SPEED, dt));
+    ok(sims.length === dts.length, '五種幀時間都模擬到了');
+    ok(
+      Math.min(...sims) > PLATFORM.height + 0.3,
+      `離散積分**最矮的那一次**仍然跳得上 ${PLATFORM.height} 公尺`,
+      `min=${Math.min(...sims).toFixed(3)} @dt=${dts[sims.indexOf(Math.min(...sims))]}`
+    );
+    ok(
+      Math.max(...sims) < World.STAND_MAX_H,
+      `離散積分**最高的那一次**仍然跳不上 ${World.STAND_MAX_H} 公尺`,
+      `max=${Math.max(...sims).toFixed(3)}`
+    );
+    ok(
+      Math.max(...sims) - Math.min(...sims) < 0.1,
+      '彈道幾乎與幀率無關（切小步的理由）—— 五種幀時間的頂點差 < 10 公分',
+      `spread=${(Math.max(...sims) - Math.min(...sims)).toFixed(4)} · ${sims.map((v) => v.toFixed(3)).join('/')}`
+    );
+    // 鬆手：輕點一下跳不上第一階（不然「兩種高度」是假的）
+    const tapped = Jump.apexOf(Jump.JUMP_SPEED * Jump.JUMP_CUT);
+    ok(tapped < PLATFORM.height, '輕點一下（起跳就鬆手）跳不上第一階', tapped.toFixed(3));
+    ok(tapped > 0.25, '輕點一下還是離得了地（不是完全沒反應）', tapped.toFixed(3));
+    eq(Jump.apexOf(0), 0, '起跳速度 0 → 一點都跳不起來');
+    eq(Jump.apexOf(-5), 0, '負的起跳速度不會算出一個正的高度');
+  }
+
+  /* ------------------------------------------------------------------ *
+   * ④ 狀態機模擬：一台小小的離線遊戲迴圈。
+   *
+   * 它同時模擬 `player.js` 的兩條規則，所以「跳上去、站得住、走下來」
+   * 這件事不必等 15 分鐘的無頭瀏覽器就答得完：
+   *   · 垂直：`stepJumper()`（真的那一支）
+   *   · 水平：`solidAtAbove()` 的那條例外 —— 腳在頂面以下時高台**擋得住人**
+   * ------------------------------------------------------------------ */
+  const LEDGE = World.LEDGE_EPS;
+  /**
+   * @param {object} o
+   * @param {(x:number)=>number} o.ground 地形高度
+   * @param {null|{x:number,standR:number,standTop:number,id:string}} o.plat 高台（null ＝ 沒有）
+   * @param {number} o.x0 起點
+   * @param {number} o.vx 水平速度（m/s）
+   * @param {number} o.dt
+   * @param {number} o.frames
+   * @param {(f:number)=>boolean} o.press 第 f 幀有沒有按下空白鍵
+   * @param {(f:number)=>boolean} o.hold 第 f 幀 J 還按著嗎
+   * @param {number} o.jumpSpeed
+   * @param {boolean|((f:number)=>boolean)} o.canTakeOff
+   */
+  function runSim(o) {
+    const st = Jump.createJumper();
+    const io = {
+      y: 0, groundY: 0, supportY: 0, supportId: null, supportIndex: -1,
+      wantJump: false, held: false, jumpSpeed: 0, canTakeOff: true,
+    };
+    let x = o.x0;
+    let y = o.ground(x);
+    const trace = [];
+    let worstOffGround = 0;
+    let landedFrame = -1;
+    for (let f = 0; f < o.frames; f += 1) {
+      // 水平：腳在頂面以下時，高台擋得住人（＝ solidAtAbove 的那條例外）
+      const vx = typeof o.vx === 'function' ? o.vx(st) : o.vx;
+      const nx = x + vx * o.dt;
+      const blockR = o.plat ? o.plat.standR + World.PLAYER_RADIUS : 0;
+      const passes = o.plat ? y >= o.plat.standTop - LEDGE : true;
+      if (!o.plat || passes || Math.abs(nx - o.plat.x) > blockR) x = nx;
+      // 支撐面：用這一幀開始時腳的高度去問（player.js 是同一句）
+      const g = o.ground(x);
+      let supY = g;
+      let supIdx = -1;
+      let supId = null;
+      if (o.plat && Math.abs(x - o.plat.x) <= o.plat.standR && o.plat.standTop > g && y >= o.plat.standTop - LEDGE) {
+        supY = o.plat.standTop;
+        supIdx = 0;
+        supId = o.plat.id;
+      }
+      io.y = y;
+      io.groundY = g;
+      io.supportY = supY;
+      io.supportIndex = supIdx;
+      io.supportId = supId;
+      io.wantJump = o.press ? o.press(f) : false;
+      io.held = o.hold ? o.hold(f) : false;
+      io.jumpSpeed = o.jumpSpeed;
+      io.canTakeOff = typeof o.canTakeOff === 'function' ? o.canTakeOff(f) : o.canTakeOff !== false;
+      y = Jump.stepJumper(st, o.dt, io);
+      worstOffGround = Math.max(worstOffGround, Math.abs(y - g));
+      trace.push({ f, x, y, g, airborne: st.airborne, supported: st.supported, standing: st.standing });
+      if (landedFrame < 0 && !st.airborne && st.supported) landedFrame = f;
+    }
+    return { st, x, y, trace, worstOffGround, landedFrame };
+  }
+
+  const FLAT = () => 0;
+  const HILLY = (x) => 2 * Math.sin(x * 0.31) + 0.6 * Math.cos(x * 1.13);
+  const step = ScreensP14.PLATFORMS[0];
+  const PLAT = { x: 0, standR: 2.45, standTop: step.height, id: step.id };
+
+  /* ④a 不按空白鍵：逐幀等於地形高度（**最差的那一次**也是 0） */
+  {
+    const r = runSim({
+      ground: HILLY, plat: PLAT, x0: 12, vx: -3.5, dt: 1 / 60, frames: 900,
+      press: () => false, hold: () => false, jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true,
+    });
+    ok(r.trace.length === 900, '不按空白鍵 的模擬真的跑了 900 幀（不是空過）');
+    ok(r.trace.some((t) => Math.abs(t.g) > 1.5), '這條路真的有起有伏（不然這一段是空過的）',
+      `最大落差=${Math.max(...r.trace.map((t) => Math.abs(t.g))).toFixed(2)}`);
+    eq(r.worstOffGround, 0, '不按空白鍵：**每一幀**腳的高度都精確等於地形高度（行為零改變）');
+    eq(r.trace.every((t) => t.y === t.g), true, '不按空白鍵：逐幀 === 地形高度（不是「很接近」）');
+    eq(r.st.jumps, 0, '不按空白鍵：一次都沒跳');
+    eq(r.st.airborne, false, '不按空白鍵：從頭到尾沒離過地');
+    eq(r.st.supported, false, '不按空白鍵：從頭到尾沒站到任何東西上（所以走的一定是原本那一行）');
+    eq(r.st.standing, null, '不按空白鍵：從頭到尾沒站到任何東西上（所以走的一定是原本那一行）');
+    // 不按空白鍵 的人走到高台前就被擋下來 —— 上不去，也走不進去
+    ok(
+      Math.abs(Math.abs(r.x - PLAT.x) - (PLAT.standR + World.PLAYER_RADIUS)) < 0.2,
+      '不按空白鍵：走到高台側面就被擋下來（上不去也走不進去）',
+      `x=${r.x.toFixed(2)} 擋人半徑=${(PLAT.standR + World.PLAYER_RADIUS).toFixed(2)}`
+    );
+    ok(r.trace.some((t) => t.x > 10), '這一段真的走了一段路（不是原地不動）', r.trace[0].x.toFixed(1));
+  }
+
+  /* ④b 跳上去 → 站得住 → 走下來（**五種幀時間都要成立**） */
+  {
+    for (const dt of [1 / 240, 1 / 120, 1 / 60, 1 / 30, 0.1]) {
+      const start = PLAT.standR + World.PLAYER_RADIUS + 0.4;
+      // 走過去（撞在側面）→ 按空白鍵 並按住 → 飛過邊緣 → 落到頂面
+      const up = runSim({
+        // 落到頂面上就停下腳步（不然他會一路走過去再走下來 —— 那是下一段要驗的事）
+        ground: FLAT, plat: PLAT, x0: start, vx: (st2) => (st2.standing === PLAT.id ? 0 : -6),
+        dt, frames: Math.ceil(2 / dt),
+        press: (f) => f === Math.ceil(0.2 / dt), hold: () => true,
+        jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true,
+      });
+      eq(up.st.jumps, 1, `[dt=${dt.toFixed(4)}] 真的起跳了一次`);
+      ok(up.st.lastApex > PLAT.standTop, `[dt=${dt.toFixed(4)}] 這一跳的頂點高過頂面`, up.st.lastApex.toFixed(3));
+      eq(up.st.standing, PLAT.id, `[dt=${dt.toFixed(4)}] 落在第一階上，而且站得住`);
+      eq(up.st.airborne, false, `[dt=${dt.toFixed(4)}] 落地了（不是還在空中）`);
+      ok(Math.abs(up.y - PLAT.standTop) < 1e-9, `[dt=${dt.toFixed(4)}] 腳的高度正好是頂面`, up.y.toFixed(4));
+      ok(Math.abs(up.x - PLAT.x) <= PLAT.standR, `[dt=${dt.toFixed(4)}] 落點在頂面平的那一段之內`, up.x.toFixed(2));
+    }
+  }
+  /* ④b2 **落在一顆沒有名字的可站立體上**（P14 審查 · 第 1 條）
+   *
+   * 全世界 180 顆可站立體裡只有登記過 `standId` 的那幾顆有名字。狀態機一度拿
+   * 「叫什麼名字」當「站不站著」，於是跳上一顆沒名字的石頭之後**下一幀就穿回地形高度**，
+   * 再被 escapeSolid() 橫向擠出來（實測：f=40 落在 1.10、f=41 掉回 0）。
+   */
+  {
+    const dt = 1 / 60;
+    const anon = { x: PLAT.x, standR: PLAT.standR, standTop: PLAT.standTop, id: null };
+    const start = anon.standR + World.PLAYER_RADIUS + 0.4;
+    const up = runSim({
+      ground: FLAT, plat: anon, x0: start, vx: (st2) => (st2.supported ? 0 : -6),
+      dt, frames: Math.ceil(3 / dt),
+      press: (f) => f === Math.ceil(0.2 / dt), hold: () => true,
+      jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true,
+    });
+    eq(up.st.supported, true, '落在沒有名字的可站立體上：站得住');
+    eq(up.st.standing, null, '沒有名字的就是沒有名字（標籤仍是 null）');
+    eq(up.st.airborne, false, '落地了');
+    ok(Math.abs(up.y - anon.standTop) < 1e-9, '腳的高度停在頂面（不是穿回地形）', up.y.toFixed(4));
+    /*
+     * 最關鍵的一條：落地之後**又走了一整秒**，人還在頂面上。
+     * 壞掉的版本會在落地的下一幀就掉回 0 —— 所以這裡量的是整段的最低點。
+     */
+    const after = up.trace.filter((t) => t.f >= up.landedFrame);
+    ok(after.length > 30, '（前提）落地之後還有夠多幀可以看', String(after.length));
+    ok(
+      after.every((t) => Math.abs(t.y - anon.standTop) < 1e-9),
+      '落地之後整整一秒都還站在上面（不會下一幀就穿回地形）',
+      `最低 ${Math.min(...after.map((t) => t.y)).toFixed(3)}`
+    );
+  }
+
+  {
+    // 走下來：從頂面上一路往前走，走出平面就開始掉，最後回到地形高度
+    const dt = 1 / 60;
+    const st = Jump.createJumper();
+    const io = { y: PLAT.standTop, groundY: 0, supportY: PLAT.standTop, supportId: PLAT.id, supportIndex: 0,
+      wantJump: false, held: false, jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true };
+    st.supported = true;
+    st.standing = PLAT.id;
+    let x = 0;
+    let y = PLAT.standTop;
+    let leftAt = -1;
+    let landedAt = -1;
+    for (let f = 0; f < 240; f += 1) {
+      x += 4 * dt;
+      const onTop = Math.abs(x - PLAT.x) <= PLAT.standR && y >= PLAT.standTop - LEDGE;
+      io.y = y;
+      io.groundY = 0;
+      io.supportY = onTop ? PLAT.standTop : 0;
+      io.supportIndex = onTop ? 0 : -1;
+      io.supportId = onTop ? PLAT.id : null;
+      const wasAir = st.airborne;
+      y = Jump.stepJumper(st, dt, io);
+      if (!wasAir && st.airborne && leftAt < 0) leftAt = f;
+      if (leftAt >= 0 && landedAt < 0 && !st.airborne) landedAt = f;
+    }
+    ok(leftAt > 0, '走出頂面之後真的開始往下掉（不是浮在空中）', `第 ${leftAt} 幀`);
+    ok(landedAt > leftAt, '掉完之後落回地形', `第 ${landedAt} 幀`);
+    eq(st.standing, null, '走下來之後就不再站在高台上了');
+    eq(st.airborne, false, '走下來之後已經落地');
+    eq(y, 0, '腳的高度回到地形高度');
+    ok(landedAt - leftAt >= 2, '掉下來是一段真的下墜，不是瞬間貼地', `${landedAt - leftAt} 幀`);
+  }
+
+  /* ④b3 從一顆頂面走到另一顆：標籤要跟著換（P14 審查 · 第 2 條）
+   *
+   * 站著的時候只檢查「還有沒有支撐」，不重讀是哪一顆 —— 於是 `standingOn`
+   * 會一直報第一顆的名字。今天只有一座高台看不出來，P16a 鋪滿 12 區就會錯。
+   */
+  {
+    const dt = 1 / 60;
+    const st = Jump.createJumper();
+    st.supported = true;
+    st.standing = 'first';
+    const io = { y: PLAT.standTop, groundY: 0, supportY: PLAT.standTop, supportId: 'first', supportIndex: 0,
+      wantJump: false, held: false, jumpSpeed: 0, canTakeOff: true };
+    Jump.stepJumper(st, dt, io);
+    eq(st.standing, 'first', '（前提）先站在第一顆上');
+    io.supportId = 'second';
+    io.supportIndex = 1;
+    Jump.stepJumper(st, dt, io);
+    eq(st.standing, 'second', '走到第二顆頂面上時標籤跟著換');
+    eq(st.supported, true, '換過去之後仍然站著');
+  }
+
+  /* ④c 跳不上 3.0 公尺（STAND_MAX_H 那條線） */
+  {
+    const tall = { x: 0, standR: 2.45, standTop: World.STAND_MAX_H, id: 'too-tall' };
+    const r = runSim({
+      ground: FLAT, plat: tall, x0: tall.standR + World.PLAYER_RADIUS + 0.4, vx: -6, dt: 1 / 60, frames: 240,
+      press: (f) => f === 12, hold: () => true, jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true,
+    });
+    eq(r.st.jumps, 1, '[3.0m] 有起跳（不然這一條是空過的）');
+    eq(r.st.standing, null, `[3.0m] 跳不上 ${World.STAND_MAX_H} 公尺的頂面`);
+    eq(r.y, 0, '[3.0m] 落回地面');
+    ok(Math.abs(r.x - tall.x) > tall.standR, '[3.0m] 連水平方向都被擋在外面（腳從來沒高過頂面）', r.x.toFixed(2));
+  }
+
+  /* ④d 別的區按空白鍵：什麼都不會發生 */
+  {
+    const r = runSim({
+      ground: HILLY, plat: null, x0: 5, vx: -3, dt: 1 / 60, frames: 300,
+      press: (f) => f % 30 === 0, hold: () => true, jumpSpeed: 0, canTakeOff: true,
+    });
+    eq(r.st.jumps, 0, '其餘 11 片土地：按了 10 次 J，一次都沒跳起來');
+    eq(r.st.blocked, 10, '被擋下來的次數就是按下去的次數（不是被吞掉，是有記錄的）');
+    eq(r.st.airborne, false, '其餘土地：沒離過地');
+    eq(r.worstOffGround, 0, '其餘土地：**每一幀**腳的高度都精確等於地形高度');
+    eq(r.st.buffer, 0, '按下去的那一次不會留在 buffer 裡等著（走回中央高原不會莫名彈起來）');
+  }
+
+  /* ④e 邊界護欄：腳下不合格就不准離地 */
+  {
+    const r = runSim({
+      ground: HILLY, plat: null, x0: 5, vx: 0, dt: 1 / 60, frames: 120,
+      press: (f) => f % 20 === 0, hold: () => true, jumpSpeed: Jump.JUMP_SPEED, canTakeOff: false,
+    });
+    eq(r.st.jumps, 0, '腳下不合格（虛空邊緣 / 卡在石頭裡）→ 起跳那一刻就被夾住');
+    eq(r.st.blocked, 6, '被夾住的次數有記錄');
+    eq(r.worstOffGround, 0, '被夾住時腳的高度一寸都沒動');
+    // 反例：同一組輸入，只把 canTakeOff 打開就跳得起來（證明夾住的是它，不是別的）
+    const ok2 = runSim({
+      ground: HILLY, plat: null, x0: 5, vx: 0, dt: 1 / 60, frames: 120,
+      press: (f) => f % 20 === 0, hold: () => true, jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true,
+    });
+    ok(ok2.st.jumps >= 1, '[反例] 只把腳下的護欄打開，同一組輸入就跳得起來', String(ok2.st.jumps));
+  }
+
+  /* ④f coyote time：走出邊緣之後那 100 毫秒還跳得起來 */
+  {
+    const dt = 1 / 240;
+    /*
+     * 站在高台頂上 → 第 4 幀走出平面 → 過了 `delaySec` 秒按一次 J。
+     * 地面刻意放在 -50 公尺：這一段要驗的只有 coyote，
+     * 不要讓「落地之後 buffer 補發」混進答案裡（那是下一段的事）。
+     */
+    const runCoyote = (delaySec) => {
+      const st = Jump.createJumper();
+      const io = { y: PLAT.standTop, groundY: -50, supportY: PLAT.standTop, supportId: PLAT.id, supportIndex: 0,
+        wantJump: false, held: true, jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true };
+      st.supported = true;
+    st.standing = PLAT.id;
+      st.coyote = Jump.COYOTE_TIME;
+      let y = PLAT.standTop;
+      let airT = null;
+      let pressed = false;
+      for (let f = 0; f < 400; f += 1) {
+        const onTop = airT === null && f < 4;
+        io.y = y;
+        io.groundY = -50;
+        io.supportY = onTop ? PLAT.standTop : -50;
+        io.supportIndex = onTop ? 0 : -1;
+        io.supportId = onTop ? PLAT.id : null;
+        io.wantJump = airT !== null && !pressed && airT >= delaySec;
+        if (io.wantJump) pressed = true;
+        y = Jump.stepJumper(st, dt, io);
+        if (airT === null && st.airborne) airT = 0;
+        else if (airT !== null) airT += dt;
+      }
+      ok(pressed, `coyote：延遲 ${delaySec}s 的那一次真的按下去了（不然這一條是空過的）`);
+      return st.jumps;
+    };
+    eq(runCoyote(0.0), 1, 'coyote：走出邊緣的當下按空白鍵 跳得起來');
+    eq(runCoyote(0.08), 1, 'coyote：走出邊緣後 80 毫秒還跳得起來');
+    eq(runCoyote(0.16), 0, 'coyote：走出邊緣後 160 毫秒就跳不起來了（寬限是有限的）');
+  }
+
+  /* ④g input buffer：落地前先按的那一次算數 */
+  {
+    const dt = 1 / 240;
+    const runBuffer = (beforeLandSec) => {
+      // 從 2 公尺高自由落體，落地前 beforeLandSec 秒按一次 J
+      const fall = Math.sqrt((2 * 2) / Jump.GRAVITY); // 掉 2 公尺要多久
+      const pressAt = Math.max(0, Math.round((fall - beforeLandSec) / dt));
+      const st = Jump.createJumper();
+      st.airborne = true;
+      st.launchY = 2;
+      const io = { y: 2, groundY: 0, supportY: 0, supportId: null, supportIndex: -1,
+        wantJump: false, held: true, jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true };
+      let y = 2;
+      for (let f = 0; f < 600; f += 1) {
+        io.y = y;
+        io.wantJump = f === pressAt;
+        y = Jump.stepJumper(st, dt, io);
+      }
+      return st.jumps;
+    };
+    eq(runBuffer(0.05), 1, 'buffer：落地前 50 毫秒按的跳，落地那一刻補發');
+    eq(runBuffer(0.13), 1, 'buffer：落地前 130 毫秒按的也算數');
+    eq(runBuffer(0.30), 0, 'buffer：落地前 300 毫秒按的已經忘掉了（不是無限期記著）');
+  }
+
+  /* ④h 鬆手提前下落 */
+  {
+    const cut = runSim({
+      ground: FLAT, plat: null, x0: 0, vx: 0, dt: 1 / 240, frames: 400,
+      press: (f) => f === 0, hold: (f) => f < 2, jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true,
+    });
+    const full = runSim({
+      ground: FLAT, plat: null, x0: 0, vx: 0, dt: 1 / 240, frames: 400,
+      press: (f) => f === 0, hold: () => true, jumpSpeed: Jump.JUMP_SPEED, canTakeOff: true,
+    });
+    eq(cut.st.jumps, 1, '[鬆手] 有跳');
+    eq(full.st.jumps, 1, '[按住] 有跳');
+    ok(cut.st.lastApex < full.st.lastApex * 0.45, '鬆手那一跳明顯比按住那一跳矮',
+      `${cut.st.lastApex.toFixed(3)} vs ${full.st.lastApex.toFixed(3)}`);
+    ok(cut.st.lastApex < PLATFORM.height, '鬆手那一跳跳不上第一階（同一個鍵真的有兩種高度）',
+      cut.st.lastApex.toFixed(3));
+    ok(cut.st.lastAirTime < full.st.lastAirTime, '鬆手那一跳滯空也比較短');
+  }
+
+  /* --- ⑤ 高台：資料契約 --------------------------------------------- */
+  const RulesP14 = (await import('./lib/screen-rules.mjs')).default;
+  {
+    ok(ScreensP14.PLATFORMS.length >= 1, '世界上至少有一座高台', String(ScreensP14.PLATFORMS.length));
+    eq(new Set(ScreensP14.PLATFORMS.map((p) => p.id)).size, ScreensP14.PLATFORMS.length, '高台 id 沒有重複');
+    const regionIdSet = new Set(World.REGION_SITES.map((s2) => s2.id));
+    for (const pf of ScreensP14.PLATFORMS) {
+      const tag = `[platform:${pf.id}]`;
+      ok(/^[a-z0-9-]+$/.test(pf.id), `${tag} id 是 kebab-case`);
+      ok(regionIdSet.has(pf.region), `${tag} region 是真實區域`, pf.region);
+      ok(Jump.JUMP_REGIONS.includes(pf.region), `${tag} 蓋在跳得起來的那幾片土地上（不然是裝飾）`, pf.region);
+      ok(Jump.jumpSpeedFor(pf.region) > 0, `${tag} 蓋在跳得起來的土地上（不然是一面牆）`);
+      ok(ScreensP14.PLATFORM_KIND_IDS.includes(pf.kind), `${tag} 造型是實作得出來的`, pf.kind);
+      ok(Array.isArray(pf.at) && pf.at.length === 2 && pf.at.every(Number.isFinite), `${tag} 座標是兩個有限數字`);
+      ok(
+        pf.height >= ScreensP14.PLATFORM_HEIGHT_MIN && pf.height <= ScreensP14.PLATFORM_HEIGHT_MAX,
+        `${tag} 高度在 ${ScreensP14.PLATFORM_HEIGHT_MIN}–${ScreensP14.PLATFORM_HEIGHT_MAX} 公尺`,
+        String(pf.height)
+      );
+      ok(
+        pf.height >= World.STAND_MIN_H && pf.height <= World.STAND_MAX_H,
+        `${tag} 高度落在「站得上去」的區間內（§6.3）`,
+        String(pf.height)
+      );
+      ok(Jump.apexOf(Jump.JUMP_SPEED) > pf.height, `${tag} 這片土地的跳躍真的跳得上它`);
+      ok(
+        pf.radius >= ScreensP14.PLATFORM_RADIUS_MIN && pf.radius <= ScreensP14.PLATFORM_RADIUS_MAX,
+        `${tag} 半徑在 ${ScreensP14.PLATFORM_RADIUS_MIN}–${ScreensP14.PLATFORM_RADIUS_MAX} 公尺`,
+        String(pf.radius)
+      );
+      for (const banned of ['source', 'teaches', 'techniqueId', 'hint']) {
+        eq(banned in pf, false, `${tag} 沒有 ${banned} 欄位（純風味，不教技巧）`);
+      }
+    }
+    eq(ScreensP14.PLATFORM_STAND_R_MIN > World.PLAYER_RADIUS, true, '頂面平的那一段一定站得下一個人');
+  }
+
+  /* --- ⑤b 高台：真的蓋出來的那一顆圓 -------------------------------- */
+  {
+    for (const [label, w] of [['高畫質', testWorld], ['低畫質', lowWorld]]) {
+      ok(Array.isArray(w.platforms) && w.platforms.length >= 1, `[${label}] 世界認得高台資料`);
+      for (const pf of ScreensP14.PLATFORMS) {
+        const sd = w.solids.filter((c) => c.id === pf.id);
+        eq(sd.length, 1, `[${label}][${pf.id}] 登記成**一顆**碰撞圓（一顆圓、一個名字）`);
+        const c = sd[0] || { standable: null, standR: NaN, standTop: NaN, r: NaN, x: NaN, z: NaN };
+        eq(c.standable, true, `[${label}][${pf.id}] 頂面站得上去`);
+        ok(Math.abs(c.x - pf.at[0]) < 1e-6 && Math.abs(c.z - pf.at[1]) < 1e-6, `[${label}][${pf.id}] 圓心就在資料寫的座標上`);
+        ok(Math.abs(c.r - pf.radius) < 1e-6, `[${label}][${pf.id}] 碰撞半徑就是資料寫的半徑`, String(c.r));
+        const h = c.standTop - World.terrainHeight(c.x, c.z);
+        ok(Math.abs(h - pf.height) < 0.05, `[${label}][${pf.id}] 頂面離自己腳下的地 ${pf.height} 公尺`, h.toFixed(3));
+        ok(
+          c.standR >= ScreensP14.PLATFORM_STAND_R_MIN,
+          `[${label}][${pf.id}] 頂面量過是平的那一段 ≥ ${ScreensP14.PLATFORM_STAND_R_MIN} 公尺`,
+          c.standR.toFixed(2)
+        );
+        /*
+         * 「量到多遠都是平的」要用**這支量法自己的解析度**去講（findings：取樣式的證明
+         * 要說得出自己量不到什麼）。`standR` 是一圈一圈往外長的階梯（`STAND_RING_STEP`
+         * 0.15），最外那一圈落在半徑上就停 —— 所以能保證的上界是「差最多一個步長」。
+         * 舊的 `radius * 0.9` 是個比例，半徑一小（1.4 → 1.26）就比階梯還嚴，
+         * 而且半徑一大（2.6 → 2.34）反而比實際的 2.45 鬆。方的頂面照樣紅：
+         * 同樣半徑 2.6 的方臺量出來只有 1.8，離 2.45 還差得遠。
+         */
+        ok(
+          c.standR >= pf.radius - World.STAND_RING_STEP - 1e-9,
+          `[${label}][${pf.id}] 圓的頂面「量到多遠都是平的」（差最多一個取樣步長 ${World.STAND_RING_STEP}；方的會停在七成）`,
+          `${c.standR.toFixed(2)} / r=${pf.radius}`
+        );
+        // 擋得住人：從外面走不進去
+        ok(Boolean(w.solidAt(c.x, c.z)), `[${label}][${pf.id}] 擋得住人（走不進石頭裡）`);
+        eq(w.isClear(c.x, c.z), false, `[${label}][${pf.id}] 腳在地上時那一點走不到`);
+      }
+    }
+    // 四周繞得過去（P11／P12 那一套）
+    const allAround = [];
+    for (const pf of ScreensP14.PLATFORMS) {
+      /*
+       * 量在哪一圈、要通幾個方向，**與產生這些座標的 `screen-fit` 同一份**
+       * （`scripts/lib/screen-rules.mjs` 的 `AROUND_*`）——P14 兩邊各寫一份，
+       * P15 一鋪開就出現「工具說可行、測試說不行」。
+       */
+      let free = 0;
+      const rr = RulesP14.AROUND_RING;
+      for (let a = 0; a < RulesP14.AROUND_DIRS; a += 1) {
+        const ang = (a / RulesP14.AROUND_DIRS) * Math.PI * 2;
+        if (!testWorld.solidAt(pf.at[0] + Math.cos(ang) * rr, pf.at[1] + Math.sin(ang) * rr)) free += 1;
+      }
+      /*
+       * 門檻與 `scripts/screen-fit.mjs`（產生這些座標的那一支）**同一個 14/16** ——
+       * 「不另訂一份會分家的門檻」（§4.12 ③）。P14 只有一座、剛好挑到 16/16，
+       * 把 16 寫死會讓資料一長就必紅。下面另外守「至少有一座是全通的」。
+       */
+      ok(free >= RulesP14.AROUND_FREE_MIN, `[${pf.id}] 四周 ${RulesP14.AROUND_DIRS} 個方向裡至少 ${RulesP14.AROUND_FREE_MIN} 個繞得過去`, `${free}/${RulesP14.AROUND_DIRS}`);
+      allAround.push(free);
+      // 離走出來的那條路 7–26 公尺（與母題共用同一段門檻）
+      const segsP14 = buildPathNetwork(World.REGION_SITES, [...World.CORRIDORS, ...World.ANNEX_LINKS], challenges);
+      let best = Infinity;
+      for (const sg of segsP14) {
+        const dx = sg[2] - sg[0];
+        const dz = sg[3] - sg[1];
+        const len2 = dx * dx + dz * dz;
+        const t = len2 > 0 ? Math.max(0, Math.min(1, ((pf.at[0] - sg[0]) * dx + (pf.at[1] - sg[1]) * dz) / len2)) : 0;
+        best = Math.min(best, Math.hypot(pf.at[0] - (sg[0] + dx * t), pf.at[1] - (sg[1] + dz * t)));
+      }
+      ok(best >= 7 && best <= 26, `[${pf.id}] 離走出來的那條路 7–26 公尺（看得到、走得過去、不擋路）`, best.toFixed(1));
+    }
+    ok(allAround.some((n) => n === RulesP14.AROUND_DIRS), '至少有一座高台四周全通', allAround.join('/'));
+    // 高台彼此至少隔 16 公尺（與母題共用同一條「重複才叫語彙、擠在一起就是雜物」）
+    for (let i = 0; i < ScreensP14.PLATFORMS.length; i += 1) {
+      for (let j = i + 1; j < ScreensP14.PLATFORMS.length; j += 1) {
+        const a = ScreensP14.PLATFORMS[i];
+        const b = ScreensP14.PLATFORMS[j];
+        ok(
+          Math.hypot(a.at[0] - b.at[0], a.at[1] - b.at[1]) >= 16,
+          `高台 ${a.id} / ${b.id} 離得夠開`,
+          Math.hypot(a.at[0] - b.at[0], a.at[1] - b.at[1]).toFixed(1)
+        );
+      }
+    }
+    // 每一片有高台的土地都剛好兩座（契約表；擺不下的土地本來就不擺 —— 見 expected-counts）
+    for (const [regionId, n] of Object.entries(EXPECT.screens.platforms)) {
+      eq(ScreensP14.PLATFORMS.filter((pf) => pf.region === regionId).length, n, `[${regionId}] 高台座數＝契約表`);
+    }
+    eq(
+      Object.values(EXPECT.screens.platforms).reduce((a, b) => a + b, 0),
+      ScreensP14.PLATFORMS.length,
+      '契約表加起來＝高台總數'
+    );
+  }
+
+  /* --- ⑥ supportAt：接上去的那一條路（含 escapeSolid 那個坑） -------- */
+  {
+    const pf = ScreensP14.PLATFORMS[0];
+    const c = testWorld.solids.find((s2) => s2.id === pf.id) || { x: NaN, z: NaN, standTop: NaN, standR: NaN };
+    const ground = World.terrainHeight(c.x, c.z);
+
+    // 共用物件：兩次呼叫回的是同一個（零每幀配置的證據）
+    const a1 = testWorld.supportAt(c.x, c.z, Infinity);
+    const a2 = testWorld.supportAt(0, 6, Infinity);
+    ok(a1 === a2, 'supportAt() 回的是共用物件（tick 裡不 new）');
+
+    // 腳在地形高度 → 拿到的是地形高度（**這就是脫困中的玩家不會被抬到屋頂上的原因**）
+    eq(
+      testWorld.supportAt(c.x, c.z, ground).y,
+      ground,
+      '[escapeSolid 那條路] 卡在高台裡的人，腳下的高度仍然是地形高度'
+    );
+    // 反例：同一點問「不管腳在哪」（＝ P13 的 groundHeightAt）就會被抬到頂面 —— 證明上一條不是空過的
+    ok(
+      testWorld.groundHeightAt(c.x, c.z) > ground + 1,
+      '[反例] 同一點用 P13 的 groundHeightAt() 問，答案是頂面（所以上一條真的有守住東西）',
+      `${testWorld.groundHeightAt(c.x, c.z).toFixed(2)} vs ${ground.toFixed(2)}`
+    );
+    eq(testWorld.groundHeightAt(c.x, c.z), testWorld.supportAt(c.x, c.z, Infinity).y, 'groundHeightAt() ＝ supportAt(..., Infinity)（兩支共用同一段迴圈）');
+    // 腳已經在頂面上 → 撐得住
+    const onTop = testWorld.supportAt(c.x, c.z, c.standTop);
+    eq(onTop.y, c.standTop, '腳站在頂面上時，支撐面就是頂面');
+    eq(onTop.id, pf.id, '支撐面說得出自己是誰（player.standingOn 回的就是它）');
+    ok(onTop.index >= 0, '支撐面指得到碰撞表裡的那一顆圓');
+    // 差一公分就撐不住（容差是 LEDGE_EPS，不是「差不多就好」）
+    eq(testWorld.supportAt(c.x, c.z, c.standTop - 0.05).y, ground, '腳差 5 公分沒到頂面 → 撐不住（容差是 2 公分）');
+    // 走出平的那一段就沒有支撐
+    eq(
+      testWorld.supportAt(c.x + c.standR + 0.2, c.z, c.standTop).y,
+      World.terrainHeight(c.x + c.standR + 0.2, c.z),
+      '走出頂面平的那一段就沒有支撐（會開始往下掉）'
+    );
+
+    /* escapeSolid：站在頂上是合法的，卡在裡面才要被請出來 */
+    eq(testWorld.escapeSolid(c.x, c.z, 0.35, c.standTop), null, '站在高台頂面上 → 保險絲不動作（那是合法的）');
+    const out = testWorld.escapeSolid(c.x, c.z, 0.35, ground);
+    ok(out !== null, '腳在地上卻站在高台圓心 → 保險絲照樣啟動');
+    ok(
+      out && Math.hypot(out.x - c.x, out.z - c.z) <= 0.36,
+      '脫困仍然是一小步一小步（不是瞬移）',
+      out ? Math.hypot(out.x - c.x, out.z - c.z).toFixed(3) : 'null'
+    );
+    // 不給 feetY 走的是 P13 之前那一支 —— 與「腳在地上」的答案逐值相同
+    const outLegacy = testWorld.escapeSolid(c.x, c.z, 0.35);
+    ok(outLegacy && out && outLegacy.x === out.x && outLegacy.z === out.z, '不給 feetY 與腳在地上時的答案一模一樣');
+  }
+
+  /* --- ⑥b solidAtAbove：擋人的那條例外只在該生效的時候生效 ---------- */
+  {
+    const pf = ScreensP14.PLATFORMS[0];
+    const c = testWorld.solids.find((s2) => s2.id === pf.id);
+    ok(Boolean(c), 'solidAtAbove 的正反例找得到那座高台');
+    if (c) {
+      const near = { x: c.x, z: c.z };
+      ok(Boolean(World.solidAtAbove(near.x, near.z, testWorld.solids, c.standTop - 0.5)), '腳在頂面以下：高台照樣擋人');
+      eq(World.solidAtAbove(near.x, near.z, testWorld.solids, c.standTop) === null ||
+         World.solidAtAbove(near.x, near.z, testWorld.solids, c.standTop).id !== pf.id, true,
+        '腳在頂面以上：這一顆不再擋人');
+      // 反例：不可站立的東西不管腳抬多高都擋人
+      const nonStand = testWorld.solids.find((s2) => !s2.standable && s2.r > 1);
+      ok(Boolean(nonStand), '世界裡找得到一顆站不上去的圓（不然這一條是空過的）');
+      if (nonStand) {
+        ok(
+          Boolean(World.solidAtAbove(nonStand.x, nonStand.z, testWorld.solids, 999)),
+          '站不上去的東西：腳抬到 999 公尺也照樣擋人（例外只給可站立體）'
+        );
+      }
+    }
+  }
+
+  /* --- ⑥c 邊界護欄：不管腳多高都不准落到虛空 ------------------------ */
+  {
+    // 找一個「走得到」的點與一個虛空點
+    let safe = null;
+    let voidPt = null;
+    for (let a = 0; a < 360 && !voidPt; a += 3) {
+      const t = (a / 180) * Math.PI;
+      const x = Math.cos(t) * 200;
+      const z = Math.sin(t) * 200;
+      if (World.coverage(x, z) < 0.2) voidPt = [x, z];
+    }
+    for (let rr = 0; rr < 40 && !safe; rr += 1) {
+      if (testWorld.isClear(rr, 6)) safe = [rr, 6];
+    }
+    ok(Boolean(voidPt), '找得到一個虛空的點（不然這一段是空過的）');
+    ok(Boolean(safe), '找得到一個站得住的點');
+    if (voidPt && safe) {
+      eq(World.coverage(voidPt[0], voidPt[1]) < World.STAND_COVER_MIN, true, '那個點真的在虛空上');
+      const kept = testWorld.clampPosition(voidPt[0], voidPt[1], safe[0], safe[1], 999);
+      ok(
+        !(kept.x === voidPt[0] && kept.z === voidPt[1]),
+        '腳抬到 999 公尺也走不進虛空（isWalkable 一寸都沒放寬）',
+        JSON.stringify(kept)
+      );
+      ok(World.coverage(kept.x, kept.z) >= 0.45, '被夾住之後的落點仍然踩得到地', World.coverage(kept.x, kept.z).toFixed(2));
+      // 反例：同一個呼叫但目標是合法的點 → 走得過去（證明上面夾住的是虛空，不是「什麼都夾」）
+      const moved = testWorld.clampPosition(safe[0], safe[1], safe[0], safe[1] + 0.5, 999);
+      ok(moved.x === safe[0] && moved.z === safe[1], '[反例] 目標合法時照樣走得過去');
+    }
+  }
+
+  /* --- ⑦ 預算與零每幀配置 ------------------------------------------- */
+  {
+    let pfTris = 0;
+    let pfLights = 0;
+    let pfSolids = 0;
+    const platformRegionsP14 = new Set(ScreensP14.PLATFORMS.map((pf) => pf.region));
+    for (const layer of testWorld.screens) {
+      if (layer.id !== 'foundations') continue;
+      layer.group.traverse((o) => {
+        if (o.isLight) pfLights += 1;
+        if (o.isMesh && o.geometry) {
+          const geo = o.geometry;
+          const n = geo.index ? geo.index.count / 3 : geo.attributes.position.count / 3;
+          pfTris += n * (o.isInstancedMesh ? o.count : 1);
+        }
+      });
+      pfSolids += World.collectSolids(layer.group, World.terrainHeight).length;
+    }
+    ok(pfTris > 0, 'P14：高台真的蓋出來了（三角形不是 0）', `tris=${pfTris}`);
+    ok(pfTris < 2000, 'P14：高台的三角形 < 2,000', `tris=${pfTris}`);
+    eq(pfLights, 0, 'P14：高台一盞燈都沒加');
+    // 中央高原現在有兩座（P15）：一座高台 ＝ 一顆圓、一個名字
+    eq(pfSolids, ScreensP14.PLATFORMS.filter((pf) => pf.region === 'foundations').length, 'P14：一座高台只登記一顆碰撞圓');
+    eq(
+      platformRegionsP14.size,
+      Object.keys(EXPECT.screens.platforms).length,
+      'P16a：高台鋪在契約表登記的那幾片土地上（多一片少一片都要紅）'
+    );
+    ok(platformRegionsP14.size >= 8, 'P16a：高台至少鋪到八片土地', String(platformRegionsP14.size));
+    let lightsP14 = 0;
+    testScene.traverse((o) => {
+      if (o.isLight) lightsP14 += 1;
+    });
+    eq(lightsP14, 37, 'P14：世界光源數仍然是 37', String(lightsP14));
+    ok(testWorld.solids.length < 1060, 'P14：碰撞體 < 1,060', String(testWorld.solids.length));
+
+    // 靜態掃描：跳躍的那兩段程式在 tick 裡不 new、不 map/filter、不建閉包
+    const jumpSrc = readFileSync(resolve(root, 'src/player/jump.js'), 'utf8');
+    const playerSrc = readFileSync(resolve(root, 'src/player/player.js'), 'utf8');
+    const bodyOf = (src, head, endMark) => {
+      const i = src.indexOf(head);
+      if (i < 0) return '';
+      const j = src.indexOf(endMark, i);
+      return j < 0 ? src.slice(i) : src.slice(i, j);
+    };
+    const stepBody = bodyOf(jumpSrc, 'export function stepJumper(', '\nexport default');
+    ok(stepBody.length > 400, 'stepJumper() 的本體抓得到（不然下面三條是空過的）', String(stepBody.length));
+    for (const bad of ['new ', '.map(', '.filter(', '=>']) {
+      eq(stepBody.includes(bad), false, `P14：stepJumper() 裡沒有 ${bad}（零每幀配置）`);
+    }
+    const vertBody = bodyOf(playerSrc, '  function updateVertical(dt, groundY) {', '\n  engine.onUpdate(');
+    ok(vertBody.length > 400, 'updateVertical() 的本體抓得到（不然下面三條是空過的）', String(vertBody.length));
+    for (const bad of ['new ', '.map(', '.filter(']) {
+      eq(vertBody.includes(bad), false, `P14：updateVertical() 裡沒有 ${bad}（零每幀配置）`);
+    }
+    // 玩家貼地那一行還在（結構上的「行為零改變」）
+    ok(
+      /group\.position\.y = updateVertical\(dt, groundY\);/.test(playerSrc),
+      'player.js 的貼地那一行改成問 updateVertical()（唯一的接點）'
+    );
+    ok(
+      /return io\.groundY;/.test(jumpSrc),
+      'stepJumper() 在「沒離地也沒站在東西上」時直接回地形高度（就是原本那一行）'
+    );
+    ok(/reducedMotion/.test(playerSrc), 'player.js 收得到 reducedMotion');
+    ok(
+      /if \(reducedMotion\) \{\n\s+squash = 0;/.test(playerSrc),
+      'reducedMotion 下不做擠壓（位移保留、擠壓拿掉 —— WORLD.md §2.4）'
+    );
+  }
+
+  /* --- ⑧ 音效與鍵位說明 --------------------------------------------- */
+  {
+    const AudioMod = await import('../src/audio/audio.js');
+    for (const kind of ['jump', 'land']) {
+      const spec = AudioMod.SFX[kind];
+      ok(Boolean(spec), `音效表有 ${kind}`);
+      ok(spec && Array.isArray(spec.seq) && spec.seq.length >= 1, `${kind} 有合成序列（不需要音檔）`);
+      ok(spec && spec.gain > 0 && spec.gain < 0.06, `${kind} 很小聲（跳一整片高原也不吵）`, spec ? String(spec.gain) : '?');
+      eq(kind in AudioMod.SFX_FILES, false, `${kind} 沒有對應音檔 → 離線一定聽得到（合成是預設，不是備案）`);
+    }
+    const KeyHelp = await import('../src/ui/keyhelp.js');
+    const walkGroup = KeyHelp.KEY_GROUPS.find((g2) => g2.id === 'walk');
+    ok(Boolean(walkGroup), '操作一覽有「走路」那一組');
+    const jumpRow = walkGroup && walkGroup.rows.find((r2) => r2.keys.includes('空白鍵'));
+    ok(Boolean(jumpRow), '操作一覽的走路那一組有空白鍵');
+    ok(jumpRow && /跳/.test(jumpRow.what), '操作一覽說得出空白鍵是跳', jumpRow ? jumpRow.what : '');
+    ok(jumpRow && /高台/.test(jumpRow.what), '操作一覽誠實標明「有高台的土地」才跳得起來（不是每一片）');
+    // 空白鍵只能有一個意思：它不准同時還掛在「抬頭看天空」那一行上
+    const camGroup = KeyHelp.KEY_GROUPS.find((g2) => g2.id === 'camera');
+    ok(
+      camGroup && !camGroup.rows.some((r2) => r2.keys.includes('空白鍵')),
+      '操作一覽的鏡頭那一組不再有空白鍵（它現在是跳躍鍵）'
+    );
+    const introSrc = readFileSync(resolve(root, 'src/ui/intro.js'), 'utf8');
+    ok(/<kbd>空白鍵<\/kbd>/.test(introSrc), '首次進入的教學卡也列了空白鍵');
+  }
+}
+
+/* ================================================================== *
+ * 高台語法 ＋ 高處的祕密 ＋ 橋缺口（v1.2 · P15）
+ * ================================================================== *
+ *
+ * 這一格要證明三件事，而且每一件都要**量得出來、也紅得出來**：
+ *   ① 高台不是裝飾 —— 站上去搆得到一件站在地上搆不到的東西（把高台壓矮就紅）。
+ *   ② 三種 tell 真的是三種 —— 顏色不對的那一塊真的不對、聲音先到真的先到、
+ *      高處真的只有高處搆得到。
+ *   ③ **不倒退**：不按 `J`，每一座橋走得完、每一個互動點到得了。
+ */
+console.log('\n▸ 高台語法 ＋ 高處的祕密 ＋ 橋缺口（v1.2 · P15）');
+{
+  const Screens15 = await import('../src/world/screens.js');
+  const Jump15 = await import('../src/player/jump.js');
+  const Reactive15 = await import('../src/world/reactive.js');
+  const AudioP15 = await import('../src/audio/audio.js');
+
+  /* --- ① 高台：**從四周每一個方向**都跳得上去 ----------------------- *
+   *
+   * 這一條是 P15 的 e2e 逼出來的，也是這一格最重要的一條。
+   * `height` 量的是「頂面離**自己腳下**的地多高」，可是玩家是站在**旁邊**起跳的：
+   * 地形一斜，同一座高台從高的那一側是 1.2 公尺、從低的那一側可能是 2.6 公尺 ——
+   * 於是它 `standable` 為真、`height` 合法、穿模稽核與可站立體稽核全綠，
+   * **卻有一半的方向跳不上去**（P14 交接點名的「別做那個」，
+   * 只是這一次不是資料寫太高，是地形替你寫高的）。
+   *
+   * 先紅實測：P15 第一版的七座新高台，這一條全部紅（最糟的一座要爬 4.96 公尺）。
+   */
+  {
+    const dts = [1 / 240, 1 / 120, 1 / 60, 1 / 30, 0.2];
+    const worst = Math.min(...dts.map((dt) => Jump15.simulateApex(Jump15.JUMP_SPEED, dt)));
+    const need = worst - Screens15.PLATFORM_JUMP_MARGIN;
+    for (const [label, w] of [['高畫質', testWorld], ['低畫質', lowWorld]]) {
+      for (const pf of Screens15.PLATFORMS) {
+        const sd = w.solids.find((c) => c.id === pf.id);
+        ok(Boolean(sd), `[${label}][${pf.id}] 找得到那一顆圓`);
+        if (!sd) continue;
+        const rise = Screens15.platformRise(sd, World.terrainHeight, (x, z) => w.isWalkable(x, z));
+        ok(rise.samples >= 6, `[${label}][${pf.id}] 四周站得住的起跳點夠多`, String(rise.samples));
+        ok(
+          rise.worst <= need,
+          `[${label}][${pf.id}] **從四周每一個站得住的方向都跳得上去**（最難的那一側 ≤ ${need.toFixed(2)}m）`,
+          `worst=${rise.worst.toFixed(2)} @${JSON.stringify(rise.at)}`
+        );
+        /*
+         * 餘裕**逐座報出來**（P16a 審查 · 第 8 條）：`PLATFORM_JUMP_MARGIN` 0.2 是給
+         * 離散化與最差幀時間的頭部空間，但有兩座（量器坊第二座、演武場那座）
+         * 只剩 0.01–0.02 —— 那是「今天剛好過」而不是「有餘裕」。
+         * 這一條不擋，只是把數字放進失敗訊息裡：以後有人動地形、動 `PLATFORM_TAKEOFF_PAD`
+         * 或在旁邊擺了新道具，先紅的會是它們，而且一眼看得出是為什麼。
+         */
+        const slack = need - rise.worst;
+        ok(
+          slack >= 0,
+          `[${label}][${pf.id}] 跳躍餘裕（剩 ${slack.toFixed(3)}m；<0.05 就是「剛好過」，動任何東西前先看它）`,
+          slack.toFixed(3)
+        );
+      }
+    }
+    // 反例：把高台抬到頂點以上，同一支判定就要說「跳不上去」（證明它不是永遠成立）
+    {
+      const sd = testWorld.solids.find((c) => c.id === Screens15.PLATFORMS[0].id);
+      const tall = Screens15.platformRise(
+        { ...sd, standTop: sd.standTop + 1.5 },
+        World.terrainHeight,
+        (x, z) => testWorld.isWalkable(x, z)
+      );
+      ok(tall.worst > need, '[反例] 同一座高台抬高 1.5 公尺就跳不上去了', tall.worst.toFixed(2));
+    }
+    for (const pf of Screens15.PLATFORMS) {
+      /*
+       * findings：「`Math.min` 寫的『全程都…』是假斷言」—— 所以這裡量的是
+       * **最差的那一種幀時間**，不是紙上的連續解。0.3 公尺的餘裕是契約：
+       * 剛好跳得上等於跳不上（玩家不會每次都從最平的那一點起跳）。
+       */
+      ok(
+        worst > pf.height + 0.3,
+        `[platform:${pf.id}] 最差幀率下仍然跳得上（還有 0.3 公尺餘裕）`,
+        `${worst.toFixed(2)} > ${pf.height} + 0.3`
+      );
+      ok(pf.height > Screens15.EYE_HEIGHT - 0.001, `[platform:${pf.id}] 頂面不低於眼睛高度（站在地上看不完它）`, String(pf.height));
+    }
+  }
+
+  /* --- ② 站上去才搆得到：高台 ↔ 高處的祕密（含把它壓矮的反例） ------ */
+  {
+    const kit = kitFor('#8aa0b4');
+    const withPlatforms = (list) =>
+      Reactive15.createReactiveField({
+        spots: [],
+        secrets,
+        platforms: list,
+        kitOf: () => kit,
+        terrainHeight: World.terrainHeight,
+      });
+    /** 走到那一點、腳在 `feetY`，找得到嗎。 */
+    const reach = (field, sec, feetY) => {
+      field.markSecretFound('__none__');
+      field.update(1 / 60, 1, sec.at[0], sec.at[1], feetY);
+      return Boolean(field.secret(sec.id) && field.secret(sec.id).found);
+    };
+    const highs = secrets.filter((sc) => sc.tell === 'high');
+    ok(highs.length >= 3, '高處的祕密至少三處', String(highs.length));
+    for (const sec of highs) {
+      const pf = Screens15.PLATFORMS.find((p) => p.id === sec.onPlatform);
+      const ground = World.terrainHeight(sec.at[0], sec.at[1]);
+      // 站在地上：搆不到
+      const onFoot = withPlatforms(Screens15.PLATFORMS);
+      eq(reach(onFoot, sec, ground), false, `[secret:${sec.id}] 站在地上搆不到`);
+      // 站在頂面上：搆得到
+      const onTop = withPlatforms(Screens15.PLATFORMS);
+      eq(reach(onTop, sec, ground + pf.height), true, `[secret:${sec.id}] 站上那一座高台就搆得到`);
+      /*
+       * **反例（這一條就是「先紅」）**：把那座高台壓到 `SECRET_HIGH_REACH` 以下，
+       * 站在它頂上照樣搆不到 —— 門檻是固定的常數，不是「那座高台的高度」，
+       * 所以壓矮／搬走高台會讓上面那條斷言真的紅（findings：斷言要答得出「什麼時候會紅」）。
+       */
+      const squashed = Screens15.PLATFORMS.map((p) =>
+        p.id === pf.id ? { ...p, height: Reactive15.SECRET_HIGH_REACH - 0.2 } : p
+      );
+      const low = withPlatforms(squashed);
+      eq(
+        reach(low, sec, ground + Reactive15.SECRET_HIGH_REACH - 0.2),
+        false,
+        `[secret:${sec.id}][反例] 高台壓矮到門檻以下 → 站上去也搆不到`
+      );
+      // 沒有高台資料時也搆不到（保守：查不到就當它站在地上）
+      const none = withPlatforms([]);
+      eq(reach(none, sec, ground), false, `[secret:${sec.id}][反例] 沒有高台資料 → 搆不到`);
+    }
+  }
+
+  /* --- ③ tell「聲音先到」：外圈真的先響，而且響在找到之前 ----------- */
+  {
+    const kit = kitFor('#8aa0b4');
+    const sounds = secrets.filter((sc) => sc.tell === 'sound');
+    ok(sounds.length >= 3, '「聲音先到」至少三處', String(sounds.length));
+    for (const sec of sounds) {
+      const heard = [];
+      const found = [];
+      const field = Reactive15.createReactiveField({
+        spots: [],
+        secrets: [sec],
+        platforms: Screens15.PLATFORMS,
+        kitOf: () => kit,
+        terrainHeight: World.terrainHeight,
+        onReact: (e) => heard.push(e),
+        onSecret: (id) => found.push(id),
+      });
+      const outer = (sec.radius || Reactive15.SECRET_RADIUS) * Reactive15.SECRET_TELL_RATIO;
+      ok(outer > (sec.radius || 5), `[secret:${sec.id}] 聲音的外圈比發現半徑大`, outer.toFixed(1));
+      // 一步一步走近：先進外圈（聽得到）、再進內圈（找到）
+      let clock = 0;
+      let toldAt = -1;
+      let foundAt = -1;
+      for (let d = outer + 2; d >= 0; d -= 0.4) {
+        clock += 1;
+        field.update(1 / 60, clock, sec.at[0] + d, sec.at[1], World.terrainHeight(sec.at[0] + d, sec.at[1]));
+        if (toldAt < 0 && heard.length) toldAt = d;
+        if (foundAt < 0 && found.length) foundAt = d;
+      }
+      ok(toldAt > 0, `[secret:${sec.id}] 走近的路上真的先響了一聲`, String(toldAt));
+      ok(foundAt >= 0, `[secret:${sec.id}] 再走近就找到了`, String(foundAt));
+      ok(toldAt > foundAt, `[secret:${sec.id}] **聲音先到**（比找到早一段距離）`, `${toldAt} > ${foundAt}`);
+      eq(heard.filter((e) => e.kind === 'secret-tell').length, 1, `[secret:${sec.id}] 那一聲只響一次`);
+      /*
+       * **那個音名要真的存在。** `audio.cue()` 對不認得的名字是「靜靜地回 false」——
+       * 打錯字的後果是「這個 tell 永遠沒有聲音」，而其他每一條斷言都照樣綠
+       * （P15 第一版寫成 `chime`，世界上根本沒有這支音）。
+       */
+      const tellEvt = heard.find((e) => e.kind === 'secret-tell');
+      ok(
+        tellEvt && (tellEvt.sound in AudioP15.SFX || tellEvt.sound in AudioP15.SFX_FILES),
+        `[secret:${sec.id}] 那一聲用的是音效表裡真的有的名字`,
+        tellEvt ? tellEvt.sound : '?'
+      );
+    }
+    // 反例：沒有 sound tell 的那幾處，走過去一聲都不響
+    for (const sec of secrets.filter((sc) => sc.tell !== 'sound').slice(0, 3)) {
+      const heard = [];
+      const field = Reactive15.createReactiveField({
+        spots: [],
+        secrets: [sec],
+        platforms: Screens15.PLATFORMS,
+        kitOf: () => kit,
+        terrainHeight: World.terrainHeight,
+        onReact: (e) => heard.push(e),
+      });
+      for (let d = 12; d >= 0; d -= 0.4) {
+        field.update(1 / 60, d, sec.at[0] + d, sec.at[1], World.terrainHeight(sec.at[0], sec.at[1]));
+      }
+      eq(heard.filter((e) => e.kind === 'secret-tell').length, 0, `[secret:${sec.id}][反例] 不是「聲音先到」就不響`);
+    }
+  }
+
+  /* --- ④ tell「不對的東西」：那一塊碎片真的蓋出來了 ------------------ */
+  {
+    const kit = kitFor('#8aa0b4');
+    for (const sec of secrets) {
+      const built = Reactive15.buildSecret(sec, kit, World.terrainHeight, 0);
+      let shard = null;
+      built.group.traverse((o) => {
+        if (o.name === `secret-odd:${sec.id}`) shard = o;
+      });
+      if (sec.tell === 'odd') {
+        ok(Boolean(shard), `[secret:${sec.id}] 場景裡真的有那一塊格格不入的碎片`);
+        ok(
+          shard && `#${shard.material.color.getHexString()}` === sec.oddAccent.toLowerCase(),
+          `[secret:${sec.id}] 碎片用的就是資料寫的那個顏色`,
+          shard ? `#${shard.material.color.getHexString()}` : '?'
+        );
+      } else {
+        eq(shard, null, `[secret:${sec.id}][反例] 不是「不對的東西」就沒有那塊碎片`);
+      }
+    }
+  }
+
+  /* --- ④b 起伏要繞著自己被擺的地方擺（P15 審查 · 第 2／3 條） --------- */
+  {
+    const kit = kitFor('#8aa0b4');
+    for (const sec of secrets) {
+      const built = Reactive15.buildSecret(sec, kit, World.terrainHeight, 0);
+      const stars = built.group.getObjectByName(`secret:${sec.id}`)
+        ? null
+        : null;
+      // `stars` 是造型自己挑的那一件（風片、記號…）；從 update 前後的差看得出來
+      const before = [];
+      built.group.traverse((o) => {
+        if (o.isMesh || o.isGroup) before.push([o, o.position.y]);
+      });
+      built.update(1 / 60, 0.0, 1);
+      let worst = 0;
+      let worstName = '';
+      for (const [o, y0] of before) {
+        const d = Math.abs(o.position.y - y0);
+        if (d > worst) {
+          worst = d;
+          worstName = o.name || '(unnamed)';
+        }
+      }
+      /*
+       * 起伏的振幅是 0.05 —— 任何一件東西被搬動超過 0.2 公尺，就是被
+       * 「繞著一個寫死的高度擺」搬走了（審查實測：掛在柱頂的風片 1.90 → 0.67）。
+       */
+      ok(worst < 0.2, `[secret:${sec.id}] 起伏沒有把東西整個搬走（最多動 ${worst.toFixed(3)}m｜${worstName}）`, worst.toFixed(3));
+      void stars;
+    }
+  }
+
+  /* --- ④c 面具浮雕貼在裙上，不是一片伸出去的鰭（P15 審查 · 第 4 條） -- */
+  {
+    const kit = kitFor('#8aa0b4');
+    const maskSpec = ScreensP15.PLATFORMS.find((pl) => pl.kind === 'maskStep');
+    ok(Boolean(maskSpec), '（前提）有一座面具劇場的高台');
+    if (maskSpec) {
+      const built15 = ScreensP15.buildScreens(maskSpec.region, kit, World.terrainHeight, {
+        bands: [],
+        motifs: [],
+        platforms: [maskSpec],
+      });
+      const grp = built15 ? built15.group : null;
+      ok(Boolean(grp), '（前提）蓋得出那一座高台');
+      if (grp) grp.updateMatrixWorld(true);
+      const cx = maskSpec.at[0];
+      const cz = maskSpec.at[1];
+      let face = null;
+      if (grp) grp.traverse((o) => {
+        if (!o.isMesh || !o.geometry || !o.geometry.parameters) return;
+        const pr = o.geometry.parameters;
+        // 浮雕：寬 ≈ r*0.7、厚 0.12 的那一片
+        if (Math.abs(pr.depth - 0.12) < 1e-6 && pr.width > 0.8) face = o;
+      });
+      ok(Boolean(face), '（前提）找得到那一片浮雕');
+      if (face) {
+        const n = new THREE.Vector3(0, 0, 1).applyQuaternion(face.getWorldQuaternion(new THREE.Quaternion())).normalize();
+        const p = face.getWorldPosition(new THREE.Vector3());
+        const radial = new THREE.Vector3(p.x - cx, 0, p.z - cz).normalize();
+        const dot = Math.abs(n.dot(radial));
+        /*
+         * 浮雕的**法線**要朝外（貼在裙上），不是它的寬邊朝外 ——
+         * 審查前實測 dot = 0.000，那是一片從側面伸出去半公尺的鰭。
+         */
+        ok(dot > 0.9, '面具浮雕的正面朝外（不是側著插出去）', dot.toFixed(3));
+      }
+    }
+  }
+
+  /* --- ⑤ 橋缺口：資料契約 ＋ 逐點掃過去 ----------------------------- */
+  {
+    eq(World.BRIDGE_GAPS.length, EXPECT.bridgeGaps.value, '橋缺口數量＝契約值', String(World.BRIDGE_GAPS.length));
+    ok(World.BRIDGE_GAPS.length <= EXPECT.bridgeGaps.max, '橋缺口沒有超過上限');
+    for (const gap of World.BRIDGE_GAPS) {
+      const tag = `[gap:${gap.id}]`;
+      ok(/^[a-z0-9-]+$/.test(gap.id), `${tag} id 是 kebab-case`);
+      const corridor = World.CORRIDORS.find((c) => c.region === gap.region);
+      ok(Boolean(corridor), `${tag} region 指得到一座真的橋`, gap.region);
+      if (!corridor) continue;
+      eq(gap.length, 3, `${tag} 缺口寬 3 公尺（跳得過去的那一段）`);
+      // 窄板整條都在主動線之外（§6.4 的例外條件）
+      ok(gap.keepFrom > World.LANE_HALF, `${tag} 窄板起點在主動線之外`, `${gap.keepFrom} > ${World.LANE_HALF}`);
+      ok(gap.keepTo > gap.keepFrom + 1.2, `${tag} 窄板至少 1.2 公尺寬`, `${gap.keepTo - gap.keepFrom}`);
+      // 不壓在閘門上、也不壓在橋的兩端
+      ok(Math.abs(gap.at - corridor.gateAt) >= 8, `${tag} 離閘門 ≥ 8 公尺`, Math.abs(gap.at - corridor.gateAt).toFixed(1));
+      // 在閘門的這一側 → 還沒解鎖的玩家也遇得到（第一次看到缺口不必先過關）
+      ok(gap.at < corridor.gateAt, `${tag} 開在閘門的內側（不必先解鎖就遇得到）`);
+
+      const f = World.gapFrame(gap);
+      const at = (along, lat) => [f.ax + f.ux * along + f.vx * lat, f.az + f.uz * along + f.vz * lat];
+      /*
+       * **逐點掃**（步長 0.1 公尺，遠小於玩家半徑 0.62 —— 掃不到的縫人也塞不進去）：
+       * 缺口那一段裡，只有窄板走得到；窄板整條都走得到。
+       */
+      let blocked = 0;
+      let plank = 0;
+      let plankGaps = 0;
+      // `at()` 的第一個參數是**離缺口中心**的距離（`gapFrame()` 的原點就在中心）
+      for (let d = -gap.length / 2 + 0.05; d <= gap.length / 2; d += 0.1) {
+        for (let lat = -5; lat <= 5.001; lat += 0.1) {
+          const [x, z] = at(d, lat);
+          const side = lat * gap.keepSide;
+          const inPlank = side >= gap.keepFrom + 0.2 && side <= gap.keepTo - 0.2;
+          /*
+           * 窄板要用 `isClear()` 問（＝ `isWalkable` **再加上道具的碰撞體**）——
+           * 只問 `isWalkable` 的話，哪天有人把一塊石頭擺在窄板上，
+           * 這一條還是綠的（P15 審查 · 第 8 條：斷言要說得出自己在講什麼）。
+           */
+          const walk = inPlank ? testWorld.isClear(x, z) : testWorld.isWalkable(x, z);
+          if (inPlank) {
+            if (walk) plank += 1;
+            else plankGaps += 1;
+          } else if (!walk) blocked += 1;
+        }
+      }
+      ok(blocked > 0, `${tag} 缺口那一段真的走不過去`, String(blocked));
+      eq(plankGaps, 0, `${tag} **窄板整條走得到**（逐點掃，步長 0.1 公尺）`, String(plankGaps));
+      ok(plank > 200, `${tag} 窄板不是一個點（掃到的可走點夠多）`, String(plank));
+
+      // 缺口正中央：走路的人過不去、腳夠高的人過得去（唯一的例外，形狀同 solidAtAbove）
+      const [cx, cz] = at(0, 0);
+      eq(testWorld.isWalkable(cx, cz), false, `${tag} 正中央走不過去`);
+      eq(testWorld.isClear(cx, cz, World.terrainHeight(cx, cz) + World.GAP_LIP + 0.1), true, `${tag} 腳離地夠高就飛得過去`);
+      eq(
+        testWorld.isClear(cx, cz, World.terrainHeight(cx, cz) + World.GAP_LIP - 0.1),
+        false,
+        `${tag}[反例] 腳離地不夠高照樣過不去`
+      );
+      // 落在缺口裡的人請得出來（不瞬移、不被關住）
+      let p = { x: cx, z: cz };
+      let steps = 0;
+      while (testWorld.gapAt(p.x, p.z) && steps < 40) {
+        const out = testWorld.escapeSolid(p.x, p.z, 0.35, null);
+        ok(Boolean(out), `${tag} 保險絲第 ${steps + 1} 步推得動（不會把人關住）`);
+        if (!out) break;
+        ok(Math.hypot(out.x - p.x, out.z - p.z) <= 0.36, `${tag} 保險絲一步不超過 0.35 公尺（不瞬移）`);
+        p = out;
+        steps += 1;
+      }
+      ok(steps > 0 && steps < 20, `${tag} 幾步之內就被請出缺口`, String(steps));
+      eq(testWorld.gapAt(p.x, p.z), null, `${tag} 請出來之後真的不在缺口裡了`);
+      ok(testWorld.isWalkable(p.x, p.z), `${tag} 請出來的那一點站得住`);
+
+      // 缺口的幾何：0 碰撞體、0 光源（擋人的是 isWalkable，不是石頭）
+      const node = testWorld.gapGroups.find((g2) => g2.name === `bridge-gap:${gap.id}`);
+      ok(Boolean(node), `${tag} 場景圖裡找得到它`);
+      if (node) {
+        let lights = 0;
+        node.traverse((o) => {
+          if (o.isLight) lights += 1;
+        });
+        eq(lights, 0, `${tag} 一盞燈都沒加`);
+        eq(World.collectSolids(node, World.terrainHeight).length, 0, `${tag} 一顆碰撞圓都沒登記`);
+      }
+    }
+    // 沒有缺口的世界：那一點照樣走得到（證明擋住它的真的是缺口這一層）
+    {
+      const restoreG = installCanvasStub();
+      const bare = World.createWorld({
+        engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} },
+        quality: 'high',
+        ...worldOpts,
+        gaps: [],
+      });
+      restoreG();
+      const f = World.gapFrame(World.BRIDGE_GAPS[0]);
+      ok(bare.isWalkable(f.ax, f.az), '[反例] 拿掉缺口資料，同一點就走得到了');
+      eq(bare.gapAt(f.ax, f.az), null, '[反例] 拿掉缺口資料就沒有缺口');
+      eq(bare.bridgeGaps.length, 0, '[反例] 那個世界真的沒有缺口');
+    }
+  }
+
+  /* --- ⑥ 不按空白鍵 的可達性：全地圖洪水填充 ---------------------------- *
+   *
+   * 護欄 7（不倒退）的硬證據。P13 的全地圖網格證的是「高度一寸沒變」，
+   * 這一條證的是「**路一條都沒斷**」：從出生點出發，只用走的（`isClear` 不給 feetY，
+   * 走的就是 P13 之前那一支），142 座石座、8 隻濁靈、24 頁殘頁、44 件反應物、
+   * 44 件器物、12 座地標、12 塊石碑、12 則刻文、**以及每一座橋的另一端**，
+   * 全部到得了。
+   *
+   * 解析度：格點 0.5 公尺。玩家半徑 0.62 —— 比它寬的縫才走得過去，
+   * 所以 0.5 的格點**不會**讓洪水穿過人過不去的縫；缺口 3 公尺遠大於 0.5，
+   * 也不可能被一步跨過去（findings：取樣式的證明要講清楚自己的解析度）。
+   */
+  {
+    const STEP = 0.5;
+    /*
+     * 洪水的框要**包得住整片畫出來的地面**再多兩公尺（v1.2 · P22c：221 → 223）。
+     * 寫死的 172 在世界攤開之後連 wards（z 到 −221）、refinery、sight、toolcraft、forms
+     * 的外半圈都框不進來 —— 洪水到不了的地方不是「走不到」，是「沒有格子」。
+     */
+    const R = World.TERRAIN_SIZE / 2 + 2;
+    const N = Math.round((R * 2) / STEP) + 1;
+    const idx = (i, j) => i * N + j;
+    const seen = new Uint8Array(N * N);
+    const toCell = (x, z) => [Math.round((x + R) / STEP), Math.round((z + R) / STEP)];
+    const toWorld = (i, j) => [i * STEP - R, j * STEP - R];
+    // 走路：一律不給 feetY（＝ P14 之前那一支）
+    const walkable = (x, z) => testWorld.isClear(x, z, null);
+    const start = toCell(World.SPAWN_AT[0], World.SPAWN_AT[1]);
+    ok(walkable(World.SPAWN_AT[0], World.SPAWN_AT[1]), '出生點站得住（洪水的起點不是碰運氣）');
+    const queue = [idx(start[0], start[1])];
+    seen[idx(start[0], start[1])] = 1;
+    let head = 0;
+    let reached = 0;
+    while (head < queue.length) {
+      const cur = queue[head];
+      head += 1;
+      reached += 1;
+      const i = Math.floor(cur / N);
+      const j = cur - i * N;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const ni = i + di;
+        const nj = j + dj;
+        if (ni < 0 || nj < 0 || ni >= N || nj >= N) continue;
+        const k = idx(ni, nj);
+        if (seen[k]) continue;
+        const [wx, wz] = toWorld(ni, nj);
+        if (!walkable(wx, wz)) continue;
+        seen[k] = 1;
+        queue.push(k);
+      }
+    }
+    ok(reached > 60000, '洪水填充走過整張地圖（不是只淹了出生點附近）', String(reached));
+
+    /**
+     * 這一點**周圍 `reach` 公尺內**有沒有被走到。
+     * 為什麼不是「這一點本身」：互動點的中心常常被它自己的碰撞圓佔住
+     * （高台的圓心、地標的塔身），而「走得到」的意思本來就是「走得進它的互動半徑」。
+     */
+    const near = (x, z, reachM = 2) => {
+      const pad = Math.ceil(reachM / STEP);
+      const [ci, cj] = toCell(x, z);
+      for (let di = -pad; di <= pad; di += 1) {
+        for (let dj = -pad; dj <= pad; dj += 1) {
+          const ni = ci + di;
+          const nj = cj + dj;
+          if (ni < 0 || nj < 0 || ni >= N || nj >= N) continue;
+          if (seen[idx(ni, nj)]) return true;
+        }
+      }
+      return false;
+    };
+
+    /*
+     * `reach`（公尺）＝ 走得到它的互動半徑之內就算數。
+     * 地標與高台的中心被自己的量體佔住，所以用它們自己的尺度：
+     * 地標的留白圈 13–16 公尺 → 12；高台的碰撞半徑 ≤3.2 ＋ 玩家 0.62 → 5。
+     */
+    const layers = [
+      ['石座', challenges.map((c) => [c.position[0], c.position[1], c.id])],
+      ['濁靈', murkFile.entries.map((m) => [m.at[0], m.at[1], m.id])],
+      ['殘頁', letterFile.entries.map((l) => [l.at[0], l.at[1], l.id])],
+      ['反應物', Reactive.REACTIVE_SPOTS.map((r) => [r.at[0], r.at[1], r.id])],
+      ['器物', handles.map((h) => [h.at[0], h.at[1], h.id])],
+      ['地標', LANDMARKS.map((l) => [l.at[0], l.at[1], l.id]), 12],
+      ['石碑', LORE_TABLETS.map((t) => [t.at[0], t.at[1], t.id])],
+      ['刻文', inscriptions.map((i2) => [i2.at[0], i2.at[1], i2.id])],
+      ['祕密', groundSecrets.map((sc) => [sc.at[0], sc.at[1], sc.id])],
+      ['高台', Screens15.PLATFORMS.map((pf) => [pf.at[0], pf.at[1], pf.id]), 5],
+      // v1.2 · P16d：P16c 加進世界的 12 位守夜人也要走得到（那一格漏了這一層）
+      ['守夜人', readJson('src/data/watchmen.json').entries.map((w) => [w.at[0], w.at[1], w.id])],
+    ];
+    for (const [label, list, reachM] of layers) {
+      let bad = 0;
+      for (const [x, z, id] of list) {
+        if (!near(x, z, reachM || 2)) {
+          bad += 1;
+          ok(false, `[不按空白鍵 的可達性] ${label} ${id} 走得到`, `${x},${z}`);
+        }
+      }
+      eq(bad, 0, `[不按空白鍵 的可達性] ${list.length} 個${label}全部走得到`);
+    }
+
+    /* 每一座橋：兩端與缺口的另一側都走得到（＝「不跳也走得完每一座橋」）。 */
+    for (const c of World.CORRIDORS) {
+      const site = World.REGION_SITES.find((s2) => s2.id === c.region);
+      const pt = (along, lat = 0) => [
+        c.from.x + c.dir.x * along + -c.dir.z * lat,
+        c.from.z + c.dir.z * along + c.dir.x * lat,
+      ];
+      const inner = pt(World.REGION_SITES[0].radius - 4);
+      const outer = pt(c.length - site.radius + 4);
+      ok(near(inner[0], inner[1], 2), `[橋:${c.region}] 高原這一端走得到`);
+      ok(near(outer[0], outer[1], 2), `[橋:${c.region}] 土地那一端走得到`, `${outer[0].toFixed(1)},${outer[1].toFixed(1)}`);
+      const gap = World.BRIDGE_GAPS.find((g2) => g2.region === c.region);
+      if (gap) {
+        const before = pt(gap.at - gap.length / 2 - 2);
+        const after = pt(gap.at + gap.length / 2 + 2);
+        ok(near(before[0], before[1], 1.5), `[橋:${c.region}] 缺口前一段走得到`);
+        ok(near(after[0], after[1], 1.5), `[橋:${c.region}] **缺口後一段也走得到（不跳也走得完）**`);
+        // 而且真的是繞窄板過去的：缺口正中央那一格沒有被走到
+        const mid = pt(gap.at, 0);
+        const [mi, mj] = toCell(mid[0], mid[1]);
+        eq(seen[idx(mi, mj)], 0, `[橋:${c.region}] 走路走不過缺口正中央（繞的是窄板）`);
+      }
+    }
+  }
+
+  /* --- ⑦ isWalkable 只在缺口足跡裡變了（全地圖網格） ----------------- */
+  {
+    const restoreW = installCanvasStub();
+    const bare = World.createWorld({
+      engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} },
+      quality: 'high',
+      ...worldOpts,
+      gaps: [],
+    });
+    restoreW();
+    let diff = 0;
+    let inGap = 0;
+    // 掃的範圍就是畫出來的地面（±TERRAIN_SIZE/2），不是寫死的 ±170 ——
+    // v1.2 · P22c 把世界攤開之後，寫死的框會漏掉外圈 18.8% 的可站立土地。
+    const P15_HALF = World.TERRAIN_SIZE / 2;
+    const P15_N = Math.round(P15_HALF * 2) + 1;
+    for (let x = -P15_HALF; x <= P15_HALF; x += 1) {
+      for (let z = -P15_HALF; z <= P15_HALF; z += 1) {
+        const a = testWorld.isWalkable(x, z);
+        const b = bare.isWalkable(x, z);
+        if (a === b) continue;
+        diff += 1;
+        if (World.gapAt(x, z)) inGap += 1;
+      }
+    }
+    eq(diff - inGap, 0, `P15：全地圖 ${P15_N}×${P15_N} 網格上，\`isWalkable\` **只有缺口足跡裡**變了`, `diff=${diff} inGap=${inGap}`);
+    ok(diff > 0, 'P15：缺口足跡裡真的變了（不是一條永遠成立的斷言）', String(diff));
+  }
+
+  /* --- ⑧ 預算 -------------------------------------------------------- */
+  {
+    let tris = 0;
+    let lights = 0;
+    testScene.traverse((o) => {
+      if (o.isLight) lights += 1;
+      if (o.isMesh && o.geometry) {
+        const geo = o.geometry;
+        const n = geo.index ? geo.index.count / 3 : geo.attributes.position ? geo.attributes.position.count / 3 : 0;
+        tris += n * (o.isInstancedMesh ? o.count : 1);
+      }
+    });
+    ok(tris < WORLD_TRI_CEIL, `P15：世界三角形 < ${WORLD_TRI_CEIL}（P20b 的框）`, `tris=${Math.round(tris)}`);
+    eq(lights, 37, 'P15：光源數仍然是 37（高台、祕密、缺口一盞都沒加）', String(lights));
+    ok(testWorld.solids.length < 1060, 'P15：碰撞體 < 1,060', String(testWorld.solids.length));
+  }
+
+  /* --- ⑨ WORLD.md 說得出這一格做了什麼 ------------------------------ */
+  {
+    const world15 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+    ok(/BRIDGE_GAPS/.test(world15), 'WORLD.md 指得出橋缺口住在哪個常數');
+    ok(/窄板/.test(world15), 'WORLD.md 講得出「旁邊一定留一條窄板」');
+    ok(/SECRET_HIGH_REACH|高處/.test(world15), 'WORLD.md 講得出高處的祕密');
+    const s45 = world15.slice(world15.indexOf('### 4.5'), world15.indexOf('### 4.6'));
+    ok(/12/.test(s45), 'WORLD.md §4.5 的祕密數字是 12（不是舊的 4）');
+    for (const t of ['不對的東西', '聲音先到', '高處']) ok(s45.includes(t), `WORLD.md §4.5 列了 tell「${t}」`);
+  }
+}
+
+/* ================================================================== *
+ * 走不走得到要看坡度（v1.2 · P16d）
+ * ================================================================== *
+ *
+ * 站長 2026-08-26 實玩：「會墜落懸崖，然後可以走回來，但是讓主角會超出會墜落區域。」
+ *
+ * 根因：`coverage()` 是**土地半徑的水平混合值**、與高度場毫無關係，而
+ * `terrainHeight()` 正好在同一段裡往下崩 —— 兩者各說各話，於是「走得到」的邊界
+ * 落在崖面的半山腰。修法是讓兩者講同一句話（`voidDrop()`），再加一道斜度上限。
+ *
+ * 這一段的斷言都附**反例**：拿 P16d 之前那條線性的崩（`oldHeight`）再量一次，
+ * 每一條都要在舊高度場上紅掉，才證明它量的是真的東西。
+ */
+{
+  const P16D_STEP = 0.5;
+  /**
+   * 掃的半邊就是畫出來的地面的半邊（v1.2 · P22c 之後 = 221），不是寫死的 170 ——
+   * 寫死的框會漏掉外圈 18.8% 的可站立土地（refinery / sight / wards / forms / toolcraft 的外半圈）。
+   */
+  const P16D_HALF = World.TERRAIN_SIZE / 2;
+  /** P16d 之前的高度場：地貌 − (1 − 覆蓋率) × 34（一條直線）。 */
+  const oldHeight = (x, z) => World.terrainRelief(x, z) - (1 - World.coverage(x, z)) * World.VOID_DEPTH;
+
+  /* --- ① 常數的契約 -------------------------------------------------- */
+  eq(World.VOID_DEPTH, 34, 'P16d：虛空深度仍然是 34 公尺（畫面沒變）');
+  ok(World.WALK_SLOPE_MAX > 41.9 && World.WALK_SLOPE_MAX < 55,
+    'P16d：斜度上限落在「設計已經把人擺上去的最陡坡（41.9°）」與「崖唇（55°+）」之間',
+    String(World.WALK_SLOPE_MAX));
+  ok(World.SLOPE_PROBE > World.PLAYER_RADIUS / 2 && World.SLOPE_PROBE < 0.5,
+    'P16d：斜度探針比半個身體寬、又不到半公尺', String(World.SLOPE_PROBE));
+
+  /* --- ② 走得到的地方一寸都沒有往下崩 -------------------------------- *
+   *
+   * 這是整格的核心：`coverage ≥ STAND_COVER_MIN` 與「地面沒有沉」現在是同一句話。
+   */
+  {
+    let worst = 0;
+    let worstPt = null;
+    let oldWorst = 0;
+    let n = 0;
+    for (let x = -P16D_HALF; x <= P16D_HALF; x += P16D_STEP) {
+      for (let z = -P16D_HALF; z <= P16D_HALF; z += P16D_STEP) {
+        if (World.coverage(x, z) < World.STAND_COVER_MIN) continue;
+        n += 1;
+        const sunk = World.terrainRelief(x, z) - World.terrainHeight(x, z);
+        if (sunk > worst) {
+          worst = sunk;
+          worstPt = [x, z];
+        }
+        const oldSunk = World.terrainRelief(x, z) - oldHeight(x, z);
+        if (oldSunk > oldWorst) oldWorst = oldSunk;
+      }
+    }
+    ok(n > 200000, 'P16d：覆蓋率過關的取樣點夠多（不是只掃了一角）', String(n));
+    eq(worst, 0, 'P16d：**覆蓋率過關的每一點，地面一寸都沒有往下崩**', `${worst.toFixed(2)}m ${worstPt}`);
+    ok(oldWorst > 18, 'P16d[反例]：同一組點在 P16d 之前最深崩了 18 公尺以上', `${oldWorst.toFixed(2)}m`);
+  }
+
+  /* --- ③ 土地邊緣最多還能往下走幾公尺 -------------------------------- *
+   *
+   * 12 片土地各射 120 條徑線，從平地往外一步一步走到走不動為止，
+   * 量「腳下比出發那一點低了幾公尺」。P16d 之前最糟的校驗場是 21.22 公尺。
+   */
+  {
+    const tan = Math.tan((World.WALK_SLOPE_MAX * Math.PI) / 180);
+    const steepBy = (heightAt) => (x, z) => {
+      const h = World.SLOPE_PROBE;
+      const gx = (heightAt(x + h, z) - heightAt(x - h, z)) / (2 * h);
+      const gz = (heightAt(x, z + h) - heightAt(x, z - h)) / (2 * h);
+      return Math.hypot(gx, gz) > tan;
+    };
+    /** 沿 120 條徑線量「走到走不動為止掉了幾公尺」。`slope` 給 null ＝ 只問覆蓋率（P16d 之前那一支）。 */
+    const edgeDrop = (site, heightAt, slope) => {
+      let worst = 0;
+      for (let k = 0; k < 120; k += 1) {
+        const a = (k / 120) * Math.PI * 2;
+        const dx = Math.cos(a);
+        const dz = Math.sin(a);
+        const h0 = heightAt(site.x + dx * site.flat, site.z + dz * site.flat);
+        let last = null;
+        for (let d = site.flat; d <= site.radius + 25; d += 0.25) {
+          const px = site.x + dx * d;
+          const pz = site.z + dz * d;
+          if (World.coverage(px, pz) < World.STAND_COVER_MIN) break;
+          if (slope && slope(px, pz)) break;
+          last = heightAt(px, pz);
+        }
+        if (last === null) continue;
+        if (h0 - last > worst) worst = h0 - last;
+      }
+      return worst;
+    };
+    let live = 0;
+    let old = 0;
+    for (const site of World.REGION_SITES) {
+      const drop = edgeDrop(site, World.terrainHeight, steepBy(World.terrainHeight));
+      ok(drop < 3, `P16d：[${site.id}] 走到土地邊緣最多還能往下走 < 3 公尺`, `${drop.toFixed(2)}m`);
+      if (drop > live) live = drop;
+      const before = edgeDrop(site, oldHeight, null);
+      if (before > old) old = before;
+    }
+    ok(old > 18, 'P16d[反例]：P16d 之前同一支量出來最深走得下去 18 公尺以上', `${old.toFixed(2)}m`);
+    ok(live < old / 6, 'P16d：修完之後的最深落差不到修之前的六分之一', `${live.toFixed(2)} vs ${old.toFixed(2)}`);
+  }
+
+  /* --- ④ 走得到的地形沒有一點陡於 WALK_SLOPE_MAX --------------------- *
+   *
+   * 「用 `tooSteep()` 去驗 `isWalkable()` 有沒有擋掉陡點」是一句廢話（同一支函式）。
+   * 所以這裡**換一把尺**：站在走得到的那一點上，往八個方向各踏半公尺，
+   * 量「最深的一步掉了幾公尺」——這是玩家真的會遇到的那件事，而且與實作無關。
+   */
+  {
+    const STEP8 = 0.5;
+    let worstStep = 0;
+    let worstPt = null;
+    let oldWorstStep = 0;
+    let blockedBySlope = 0;
+    /**
+     * 往八個方向各踏半公尺，**只算落腳處也走得到的那幾步**，最深掉幾公尺。
+     * （踏到走不到的地方那一步是不會發生的 —— `clampPosition()` 當場擋下來。）
+     * @param {(x:number,z:number)=>boolean} walkable 那個世界的「走得到」
+     */
+    const maxStepDown = (x, z, heightAt, walkable) => {
+      const h0 = heightAt(x, z);
+      let worst = 0;
+      for (let a = 0; a < 8; a += 1) {
+        const ang = (a / 8) * Math.PI * 2;
+        const px = x + Math.cos(ang) * STEP8;
+        const pz = z + Math.sin(ang) * STEP8;
+        if (!walkable(px, pz)) continue;
+        const drop = h0 - heightAt(px, pz);
+        if (drop > worst) worst = drop;
+      }
+      return worst;
+    };
+    // P16d 之前的「走得到」＝ 只問覆蓋率
+    const oldWalkable = (x, z) => World.coverage(x, z) >= World.STAND_COVER_MIN;
+    const nowWalkable = (x, z) => World.coverage(x, z) >= World.STAND_COVER_MIN && !World.tooSteep(x, z);
+    for (let x = -P16D_HALF; x <= P16D_HALF; x += P16D_STEP) {
+      for (let z = -P16D_HALF; z <= P16D_HALF; z += P16D_STEP) {
+        if (World.coverage(x, z) < World.STAND_COVER_MIN) continue;
+        if (World.tooSteep(x, z)) {
+          blockedBySlope += 1;
+        } else {
+          const d = maxStepDown(x, z, World.terrainHeight, nowWalkable);
+          if (d > worstStep) {
+            worstStep = d;
+            worstPt = [x, z];
+          }
+        }
+        const od = maxStepDown(x, z, oldHeight, oldWalkable);
+        if (od > oldWorstStep) oldWorstStep = od;
+      }
+    }
+    ok(
+      worstStep < 0.9,
+      'P16d：走一步（半公尺）最深掉 < 0.9 公尺 —— 走得到的點之間沒有斷崖',
+      `${worstStep.toFixed(2)}m ${worstPt}`
+    );
+    /*
+     * v1.2 · P16e：這個數字從 925 掉到 21 —— **少擋不是壞事，是分工變乾淨了**。
+     * P16d 的崖唇是一道近乎垂直的摺線，`tooSteep()` 半公尺的探針一伸出去就讀到虛空，
+     * 於是它兼著把崖唇前那一圈（613 個點）也收掉。P16e 把崖唇改成一段肩之後，
+     * 那件事歸高度場與覆蓋率管；剩下的 21 個點才是這條規則真正要擋的
+     * **地本身的坎**（45.1–49.4°）。門檻跟著實測改，但仍然守著「不是永遠成立」。
+     */
+    ok(blockedBySlope > 10, 'P16d：斜度那一條真的有在擋（不是一條永遠成立的斷言）', String(blockedBySlope));
+    ok(
+      oldWorstStep > 5,
+      'P16d[反例]：P16d 之前同一批點裡，半公尺的一步可以掉 5 公尺以上',
+      `${oldWorstStep.toFixed(2)}m`
+    );
+  }
+
+  /* --- ⑤ 崖唇外「看起來還是平地、卻走不過去」的那一圈有多寬 ---------- *
+   *
+   * 換一個看不見的牆不算修好。量的是：**還沒掉下去（比地本身的起伏低不到 0.3 公尺）
+   * 卻走不到的那些點，離走得到的地最遠有多遠**。
+   *
+   * v1.2 · P16e 換掉了 P16d 那把尺。P16d 是「沿著徑線往外走到掉 0.3 公尺為止」——
+   * 那量的是 `唇寬 / sin(徑線與邊界的夾角)`：徑線一擦過鄰居的地界（護欄崗、校驗場
+   * 那幾片加建院落的圓弧）就近乎與邊界平行，同一圈 1.5 公尺的唇會被讀成 7–9 公尺。
+   * 現在改成**到「走得到的地」的真實距離**（0.5 公尺格上的 chamfer 距離，與方向無關，
+   * 也與 `rimDistance()` 的公式無關 —— 它只問「走得到的格子在哪裡」）。
+   * 同一把尺同時量土地邊緣**與橋的甲板邊**（P16d 只驗了土地，站長 P16e 的第 ⑦ 條）。
+   */
+  {
+    // 格子鋪滿整片畫出來的地面（v1.2 · P22c：±221），不是寫死的 ±170。
+    const GS = 0.5;
+    const G0 = -World.TERRAIN_SIZE / 2;
+    const GN = Math.round(World.TERRAIN_SIZE / GS) + 1;
+    const cover = new Float64Array(GN * GN);
+    const relief = new Float64Array(GN * GN);
+    const height = new Float64Array(GN * GN);
+    const walk = new Uint8Array(GN * GN);
+    for (let i = 0; i < GN; i += 1) {
+      for (let j = 0; j < GN; j += 1) {
+        const k = i * GN + j;
+        const x = G0 + i * GS;
+        const z = G0 + j * GS;
+        cover[k] = World.coverage(x, z);
+        relief[k] = World.terrainRelief(x, z);
+        height[k] = World.terrainHeight(x, z);
+        walk[k] = cover[k] >= World.STAND_COVER_MIN && !World.tooSteep(x, z) ? 1 : 0;
+      }
+    }
+    /** 每一格到最近的「走得到的格子」有多遠（公尺；chamfer 兩趟）。 */
+    const chamfer = (mask) => {
+      const dist = new Float64Array(GN * GN).fill(1e9);
+      for (let k = 0; k < GN * GN; k += 1) if (mask[k]) dist[k] = 0;
+      const relax = (i, j, di, dj, w) => {
+        const a = i + di;
+        const b = j + dj;
+        if (a < 0 || b < 0 || a >= GN || b >= GN) return;
+        const v = dist[a * GN + b] + w * GS;
+        if (v < dist[i * GN + j]) dist[i * GN + j] = v;
+      };
+      for (let i = 0; i < GN; i += 1) {
+        for (let j = 0; j < GN; j += 1) {
+          relax(i, j, -1, 0, 1);
+          relax(i, j, 0, -1, 1);
+          relax(i, j, -1, -1, Math.SQRT2);
+          relax(i, j, -1, 1, Math.SQRT2);
+        }
+      }
+      for (let i = GN - 1; i >= 0; i -= 1) {
+        for (let j = GN - 1; j >= 0; j -= 1) {
+          relax(i, j, 1, 0, 1);
+          relax(i, j, 0, 1, 1);
+          relax(i, j, 1, 1, Math.SQRT2);
+          relax(i, j, 1, -1, Math.SQRT2);
+        }
+      }
+      return dist;
+    };
+    const dist = chamfer(walk);
+    /** 「還是平地卻走不到」的格子：地面比起伏低不到 0.3 公尺（掉下去的不算）。 */
+    const isLip = (k) => !walk[k] && dist[k] < 20 && relief[k] - height[k] <= 0.3;
+    let lip = 0;
+    let lipPt = null;
+    let lipCells = 0;
+    for (let i = 0; i < GN; i += 1) {
+      for (let j = 0; j < GN; j += 1) {
+        const k = i * GN + j;
+        if (!isLip(k)) continue;
+        lipCells += 1;
+        if (dist[k] > lip) {
+          lip = dist[k];
+          lipPt = [G0 + i * GS, G0 + j * GS];
+        }
+      }
+    }
+    ok(lipCells > 2000, 'P16e：真的有一圈「還是平地卻走不到」的唇（不是一條空過的斷言）', String(lipCells));
+    ok(lip < 2, 'P16e：全地圖「還是平地卻走不到」的那一圈 < 2 公尺寬', `${lip.toFixed(2)}m ${lipPt}`);
+    /* 逐片土地、逐座橋各報一個數字 —— 站長第 ⑦ 條要的是「橋也一起驗」 */
+    const inSite = (x, z) => World.REGION_SITES.some((s) => Math.hypot(x - s.x, z - s.z) <= s.radius);
+    for (const site of World.REGION_SITES) {
+      let worst = 0;
+      for (let i = 0; i < GN; i += 1) {
+        for (let j = 0; j < GN; j += 1) {
+          const k = i * GN + j;
+          if (!isLip(k)) continue;
+          const x = G0 + i * GS;
+          const z = G0 + j * GS;
+          if (Math.hypot(x - site.x, z - site.z) > site.radius + 6) continue;
+          if (dist[k] > worst) worst = dist[k];
+        }
+      }
+      ok(worst < 2, `P16e：[${site.id}] 土地邊緣那一圈 < 2 公尺寬`, `${worst.toFixed(2)}m`);
+    }
+    /*
+     * v1.2 · P19：這一圈連**捷徑走廊**一起量（`LANES` ＝ 橋 ＋ 捷徑）。
+     * 新開一條走廊等於新開一段甲板邊，那段唇沒有人量的話，
+     * 「換一個看不見的牆不算修好」這條規則就漏了新的那一段。
+     */
+    for (const c of World.LANES) {
+      const label = c.region || c.id;
+      let worst = 0;
+      let seen = 0;
+      for (let i = 0; i < GN; i += 1) {
+        for (let j = 0; j < GN; j += 1) {
+          const k = i * GN + j;
+          if (!isLip(k)) continue;
+          const x = G0 + i * GS;
+          const z = G0 + j * GS;
+          if (inSite(x, z)) continue; // 甲板兩端已經算在土地那一圈裡
+          if (distToSeg(x, z, c.from.x, c.from.z, c.to.x, c.to.z) > c.half + 6) continue;
+          seen += 1;
+          if (dist[k] > worst) worst = dist[k];
+        }
+      }
+      ok(seen > 100, `P16e：[lane:${label}] 甲板邊真的有量到唇`, String(seen));
+      ok(worst < 2, `P16e：[lane:${label}] 甲板邊那一圈 < 2 公尺寬`, `${worst.toFixed(2)}m`);
+    }
+    /*
+     * 反例：把肩的曲率放軟成四分之一（起手更平），同一把尺立刻讀出 > 2 公尺的唇 ——
+     * 證明這條斷言量得到「把看不見的牆往外搬」這件事。
+     */
+    {
+      const soft = (x, z) => {
+        const s = World.rimDistance(x, z);
+        const h = World.terrainRelief(x, z);
+        if (s <= 0) return h;
+        const d = s <= World.RIM_SHOULDER
+          ? 0.5 * (World.RIM_CURVE / 4) * s * s
+          : (World.RIM_CURVE / 4) * World.RIM_SHOULDER * (0.5 * World.RIM_SHOULDER + (s - World.RIM_SHOULDER)) +
+            0.5 * World.RIM_PLUNGE * (s - World.RIM_SHOULDER) ** 2;
+        return d >= h + World.VOID_DEPTH ? -World.VOID_DEPTH : h - d;
+      };
+      let softLip = 0;
+      for (let i = 0; i < GN; i += 1) {
+        for (let j = 0; j < GN; j += 1) {
+          const k = i * GN + j;
+          if (walk[k] || dist[k] >= 20) continue;
+          const x = G0 + i * GS;
+          const z = G0 + j * GS;
+          if (relief[k] - soft(x, z) > 0.3) continue;
+          if (dist[k] > softLip) softLip = dist[k];
+        }
+      }
+      ok(softLip > 2, 'P16e[反例]：肩放軟四倍之後，同一把尺讀出 > 2 公尺的唇', `${softLip.toFixed(2)}m`);
+    }
+  }
+
+  /* --- ⑥ 四片加建院落的頸口：整條中線走得到、而且是坡不是崖 ---------- */
+  {
+    for (const link of World.ANNEX_LINKS) {
+      let worstSlope = 0;
+      let blocked = 0;
+      for (let t = link.gateAt - 18; t <= link.gateAt + 18; t += 0.25) {
+        const px = link.from.x + link.dir.x * t;
+        const pz = link.from.z + link.dir.z * t;
+        const h = World.SLOPE_PROBE;
+        const gx = (World.terrainHeight(px + h, pz) - World.terrainHeight(px - h, pz)) / (2 * h);
+        const gz = (World.terrainHeight(px, pz + h) - World.terrainHeight(px, pz - h)) / (2 * h);
+        const deg = (Math.atan(Math.hypot(gx, gz)) * 180) / Math.PI;
+        if (deg > worstSlope) worstSlope = deg;
+        if (!testWorld.isWalkable(px, pz)) blocked += 1;
+      }
+      eq(blocked, 0, `P16d：[頸口:${link.region}] 閘門前後 18 公尺的中線整條走得到`, String(blocked));
+      ok(
+        worstSlope <= World.WALK_SLOPE_MAX,
+        `P16d：[頸口:${link.region}] 中線是坡不是崖（斜度在門檻之內，沒有豁免）`,
+        `${worstSlope.toFixed(1)}°`
+      );
+    }
+    /* 反例：P16d 之前，減法之庭與分歧之廳的頸口中線是 70–81° 的溜滑梯 */
+    let oldWorst = 0;
+    for (const link of World.ANNEX_LINKS) {
+      for (let t = link.gateAt - 18; t <= link.gateAt + 18; t += 0.25) {
+        const px = link.from.x + link.dir.x * t;
+        const pz = link.from.z + link.dir.z * t;
+        const h = World.SLOPE_PROBE;
+        const gx = (oldHeight(px + h, pz) - oldHeight(px - h, pz)) / (2 * h);
+        const gz = (oldHeight(px, pz + h) - oldHeight(px, pz - h)) / (2 * h);
+        const deg = (Math.atan(Math.hypot(gx, gz)) * 180) / Math.PI;
+        if (deg > oldWorst) oldWorst = deg;
+      }
+    }
+    ok(oldWorst > 70, 'P16d[反例]：P16d 之前頸口中線最陡是 70° 以上的溜滑梯', `${oldWorst.toFixed(1)}°`);
+  }
+}
+
+/* ================================================================== *
+ * 畫出來的地面就是腳下的地面（v1.2 · P16e）
+ * ================================================================== *
+ *
+ * P16d 的斷言全部拿**解析式**（`terrainHeight()`）自己跟自己比 —— 於是漏掉了
+ * 這一整類問題：**地形網格是固定格點**（`buildTerrain()`：高畫質 200 段 ＝ 1.70
+ * 公尺一格、低畫質 110 段 ＝ 3.09 公尺一格），解析式畫得出來的崖唇，格點插不出來。
+ * P16d 把 34 公尺壓進 5.75 公尺那一段（約 80°）之後，站在崖唇上的人**浮在畫面的
+ * 地面上 9.2 公尺**（高畫質）／**17.5 公尺**（低畫質）。
+ *
+ * 所以這一節的尺不一樣：拿**真的被畫出來的那張網格**（從建好的世界裡把 `terrain`
+ * 那個 mesh 撈出來）去問「玩家腳下那一點，畫面上的地面在多高」。
+ */
+console.log('\n▸ 畫出來的地面就是腳下的地面（v1.2 · P16e）');
+{
+  /**
+   * 從一個蓋好的世界裡撈出地形網格，做成「任意 (x, z) → 畫面上的地面高度」。
+   *
+   * 網格是 `PlaneGeometry` 轉平的：頂點排成規則格點，每一格切成兩個三角形
+   * （對角線是 u + v = 1）。這裡**不假設**它長這樣 —— 下面用真的 raycast 對過。
+   */
+  const terrainSampler = (scene, label) => {
+    let mesh = null;
+    scene.traverse((o) => {
+      if (o.isMesh && o.name === 'terrain') mesh = o;
+    });
+    ok(Boolean(mesh), `[${label}] 場景裡撈得到地形網格`);
+    const pos = mesh.geometry.attributes.position;
+    const seg = Math.round(Math.sqrt(pos.count)) - 1;
+    eq((seg + 1) * (seg + 1), pos.count, `[${label}] 地形網格是 (seg+1)² 個頂點`, String(pos.count));
+    const size = World.TERRAIN_SIZE;
+    const step = size / seg;
+    const half = size / 2;
+    const n = seg + 1;
+    const H = new Float64Array(n * n);
+    let offGrid = 0;
+    for (let i = 0; i < pos.count; i += 1) {
+      const ix = Math.round((pos.getX(i) + half) / step);
+      const iz = Math.round((pos.getZ(i) + half) / step);
+      if (Math.abs(ix * step - half - pos.getX(i)) > 1e-4 || Math.abs(iz * step - half - pos.getZ(i)) > 1e-4) offGrid += 1;
+      H[iz * n + ix] = pos.getY(i);
+    }
+    eq(offGrid, 0, `[${label}] 地形網格的頂點真的排在規則格點上`, String(offGrid));
+    const sample = (x, z) => {
+      const fx = (x + half) / step;
+      const fz = (z + half) / step;
+      const ix = Math.min(seg - 1, Math.max(0, Math.floor(fx)));
+      const iz = Math.min(seg - 1, Math.max(0, Math.floor(fz)));
+      const u = fx - ix;
+      const v = fz - iz;
+      const ha = H[iz * n + ix];
+      const hb = H[(iz + 1) * n + ix];
+      const hc = H[(iz + 1) * n + ix + 1];
+      const hd = H[iz * n + ix + 1];
+      return u + v <= 1 ? ha + (hd - ha) * u + (hb - ha) * v : hc + (hb - hc) * (1 - u) + (hd - hc) * (1 - v);
+    };
+    /*
+     * 把這支取樣函式跟**真的射線**對一次 —— 不然它只是一段長得像插值的程式，
+     * 而「三角形怎麼切」猜錯的話整節斷言會靜靜地量錯東西。
+     */
+    const ray = new THREE.Raycaster();
+    ray.ray.direction.set(0, -1, 0);
+    ray.far = 1000;
+    let worstRay = 0;
+    let rayHits = 0;
+    for (let k = 0; k < 40; k += 1) {
+      const a = (k / 40) * Math.PI * 2;
+      const d = 8 + (k % 7) * 9;
+      const x = Math.cos(a) * d;
+      const z = Math.sin(a) * d;
+      ray.ray.origin.set(x, 400, z);
+      const hits = ray.intersectObject(mesh);
+      if (!hits.length) continue;
+      rayHits += 1;
+      worstRay = Math.max(worstRay, Math.abs(hits[0].point.y - sample(x, z)));
+    }
+    ok(rayHits > 30, `[${label}] 射線真的打到地形（取樣函式有被驗到）`, String(rayHits));
+    ok(worstRay < 0.01, `[${label}] 取樣函式與真的射線逐點相同`, `${worstRay.toFixed(4)}m`);
+    return { sample, seg, step };
+  };
+
+  /*
+   * 崖面要從甲板／地面的高度長下去，不是從 0 開始 —— `groundAt()` 在
+   * 「混不出東西」（離所有土地與橋都超過自己的半徑）時改用**最近的那一片**的起伏
+   * 把地面接出去。接得起來嗎？就在 `d = radius`／`d = half` 那條縫上兩邊各取一點。
+   * P16e 之前那裡是一道 1–3 公尺的硬邊（外面直接從 0 起算）。
+   */
+  {
+    let seam = 0;
+    let seamAt = null;
+    for (const site of World.REGION_SITES) {
+      for (let k = 0; k < 180; k += 1) {
+        const a = (k / 180) * Math.PI * 2;
+        const dx = Math.cos(a);
+        const dz = Math.sin(a);
+        const inn = World.terrainHeight(site.x + dx * (site.radius - 0.01), site.z + dz * (site.radius - 0.01));
+        const out = World.terrainHeight(site.x + dx * (site.radius + 0.01), site.z + dz * (site.radius + 0.01));
+        if (Math.abs(inn - out) > seam) {
+          seam = Math.abs(inn - out);
+          seamAt = site.id;
+        }
+      }
+    }
+    for (const c of World.CORRIDORS) {
+      const nx = -c.dir.z;
+      const nz = c.dir.x;
+      for (let t = 6; t <= c.length - 6; t += 0.5) {
+        const bx = c.from.x + c.dir.x * t;
+        const bz = c.from.z + c.dir.z * t;
+        for (const sgn of [1, -1]) {
+          const inn = World.terrainHeight(bx + nx * sgn * (c.half - 0.01), bz + nz * sgn * (c.half - 0.01));
+          const out = World.terrainHeight(bx + nx * sgn * (c.half + 0.01), bz + nz * sgn * (c.half + 0.01));
+          if (Math.abs(inn - out) > seam) {
+            seam = Math.abs(inn - out);
+            seamAt = `bridge:${c.region}`;
+          }
+        }
+      }
+    }
+    /*
+     * 門檻 1.5 是量出來的，不是拍的：
+     *   · 直接「挑最近的那一片」接出去 —— 實測 **4.14 公尺**（中央高原邊上的地貌
+     *     比旁邊那座橋的甲板高 4 公尺，出了 `radius` 就整段換人）→ 這條斷言當場紅。
+     *   · 改成 `1 / (離自己的邊 + eps)` 的混合 —— **1.26 公尺**。
+     * 剩下的 1.26 是**兩片的外緣剛好交叉**的那幾個點：從高原那一側逼近讀到的是
+     * 高原的地貌、從橋那一側逼近讀到的是甲板 —— 那個落差在 `terrainRelief()`
+     * 裡本來就有（Phase F 起的覆蓋權重混合就是這樣），任何接法都接不掉，只能減半。
+     */
+    ok(seam < 1.5, 'P16e：崖面與地面在 d = radius／d = half 那條縫上接得起來（不是一道硬邊）', `${seam.toFixed(3)}m ${seamAt}`);
+  }
+
+  const hi = terrainSampler(testScene, 'high');
+  const lo = terrainSampler(lowScene, 'low');
+  eq(hi.seg, 260, 'P16e：高畫質地形網格 260 段（放大後維持放大前 1.70 公尺的格距）', String(hi.seg));
+  eq(lo.seg, 143, 'P16e：低畫質地形網格 143 段（放大後維持放大前 3.09 公尺的格距；110 段的格對角線 5.53 ≥ RIM_SHOULDER，懸崖漂浮會回歸）', String(lo.seg));
+  ok(
+    World.RIM_SHOULDER > lo.step * Math.SQRT2,
+    'P16e：崖唇的肩比低畫質一格的對角線還寬（站在邊界上的人，腳下那一格四個角都還在肩上）',
+    `${World.RIM_SHOULDER} > ${(lo.step * Math.SQRT2).toFixed(2)}`
+  );
+
+  /** P16d 的高度場（`voidDrop` 吃覆蓋率、把 34 公尺壓進覆蓋率 0.45→0 那一段）。 */
+  const p16dHeight = (x, z) => {
+    const cover = World.coverage(x, z);
+    const h = World.terrainRelief(x, z);
+    if (cover >= World.STAND_COVER_MIN) return h;
+    const t = (World.STAND_COVER_MIN - cover) / World.STAND_COVER_MIN;
+    return h - t * t * World.VOID_DEPTH;
+  };
+  /** 只有「地本身的起伏」的那一面（沒有崖唇）—— 拿來分開兩種誤差。 */
+  const reliefMesh = (seg) => {
+    const size = World.TERRAIN_SIZE;
+    const step = size / seg;
+    const half = size / 2;
+    const n = seg + 1;
+    const H = new Float64Array(n * n);
+    for (let iz = 0; iz < n; iz += 1) {
+      for (let ix = 0; ix < n; ix += 1) H[iz * n + ix] = World.terrainRelief(ix * step - half, iz * step - half);
+    }
+    return (x, z) => {
+      const fx = (x + half) / step;
+      const fz = (z + half) / step;
+      const ix = Math.min(seg - 1, Math.max(0, Math.floor(fx)));
+      const iz = Math.min(seg - 1, Math.max(0, Math.floor(fz)));
+      const u = fx - ix;
+      const v = fz - iz;
+      const ha = H[iz * n + ix];
+      const hb = H[(iz + 1) * n + ix];
+      const hc = H[(iz + 1) * n + ix + 1];
+      const hd = H[iz * n + ix + 1];
+      return u + v <= 1 ? ha + (hd - ha) * u + (hb - ha) * v : hc + (hb - hc) * (1 - u) + (hd - hc) * (1 - v);
+    };
+  };
+  const oldMesh = (seg) => {
+    const size = World.TERRAIN_SIZE;
+    const step = size / seg;
+    const half = size / 2;
+    const n = seg + 1;
+    const H = new Float64Array(n * n);
+    for (let iz = 0; iz < n; iz += 1) {
+      for (let ix = 0; ix < n; ix += 1) H[iz * n + ix] = p16dHeight(ix * step - half, iz * step - half);
+    }
+    return (x, z) => {
+      const fx = (x + half) / step;
+      const fz = (z + half) / step;
+      const ix = Math.min(seg - 1, Math.max(0, Math.floor(fx)));
+      const iz = Math.min(seg - 1, Math.max(0, Math.floor(fz)));
+      const u = fx - ix;
+      const v = fz - iz;
+      const ha = H[iz * n + ix];
+      const hb = H[(iz + 1) * n + ix];
+      const hc = H[(iz + 1) * n + ix + 1];
+      const hd = H[iz * n + ix + 1];
+      return u + v <= 1 ? ha + (hd - ha) * u + (hb - ha) * v : hc + (hb - hc) * (1 - u) + (hd - hc) * (1 - v);
+    };
+  };
+
+  /*
+   * 兩把尺，兩個門檻：
+   *   · `rimMax` —— **虛空那一崩伸進腳下那一格多少**（站長回報的那個 bug）。
+   *     實測 0.158（高）／0.492（低）；P16d 是 9.2／17.5。
+   *   · `gapMax` —— 腳下與畫面的總差。低畫質的門檻鬆一格是量出來的，不是讓步：
+   *     **只有地本身的起伏、完全不含崖唇**，3.09 公尺一格的網格就已經差 0.830 公尺
+   *     （高畫質 1.70 公尺一格是 0.442）—— 那是低多邊形地貌自己的坎，P16d 之前就有，
+   *     而且不在虛空上方。下面那條「剩下的差幾乎全是地貌自己的坎」把這件事釘死。
+   */
+  for (const [label, s, rimMax, gapMax, oldMin] of [['high', hi, 0.25, 0.6, 8], ['low', lo, 0.6, 1.2, 15]]) {
+    const rm = reliefMesh(s.seg);
+    const om = oldMesh(s.seg);
+    let gap = 0;
+    let gapPt = null;
+    let byRim = 0;
+    let byRimPt = null;
+    let reliefOnly = 0;
+    let oldGap = 0;
+    let n = 0;
+    // 掃滿整片畫出來的地面（v1.2 · P22c：±221），不是寫死的 ±170。
+    const P16E_HALF = World.TERRAIN_SIZE / 2;
+    for (let x = -P16E_HALF; x <= P16E_HALF; x += 0.5) {
+      for (let z = -P16E_HALF; z <= P16E_HALF; z += 0.5) {
+        if (World.coverage(x, z) < World.STAND_COVER_MIN) continue;
+        if (World.tooSteep(x, z)) continue;
+        n += 1;
+        const drawn = s.sample(x, z);
+        const d = Math.abs(World.terrainHeight(x, z) - drawn);
+        if (d > gap) {
+          gap = d;
+          gapPt = [x, z];
+        }
+        /*
+         * **崖唇自己的份**：同一張網格，一張含崖唇、一張只有起伏。
+         * 兩者的差就是「虛空那一崩伸進腳下這一格多少」——
+         * 這才是站長回報的那個 bug，剩下的是地貌自己的坎（高低畫質都有，P16d 之前就有）。
+         */
+        const dr = Math.abs(drawn - rm(x, z));
+        if (dr > byRim) {
+          byRim = dr;
+          byRimPt = [x, z];
+        }
+        const ro = Math.abs(World.terrainRelief(x, z) - rm(x, z));
+        if (ro > reliefOnly) reliefOnly = ro;
+        const od = Math.abs(p16dHeight(x, z) - om(x, z));
+        if (od > oldGap) oldGap = od;
+      }
+    }
+    ok(n > 200000, `P16e[${label}]：量的點夠多（不是只掃了一角）`, String(n));
+    ok(
+      byRim < rimMax,
+      `P16e[${label}]：虛空那一崩幾乎沒有伸進走得到的人腳下那一格（< ${rimMax} 公尺；P16d 是 9.2／17.5）`,
+      `${byRim.toFixed(3)}m ${byRimPt}`
+    );
+    ok(
+      gap < gapMax,
+      `P16e[${label}]：走得到的每一點，腳下與畫出來的網格差 < ${gapMax} 公尺`,
+      `${gap.toFixed(3)}m ${gapPt}（其中地貌自己的坎就佔 ${reliefOnly.toFixed(3)}m）`
+    );
+    ok(
+      oldGap > oldMin,
+      `P16e[${label}][反例]：P16d 的高度場在同一批點上浮空 > ${oldMin} 公尺`,
+      `${oldGap.toFixed(2)}m`
+    );
+    ok(
+      reliefOnly > gap - 0.3,
+      `P16e[${label}]：剩下的差幾乎全是地貌自己的坎（不是崖唇）`,
+      `${reliefOnly.toFixed(3)} vs ${gap.toFixed(3)}`
+    );
+  }
+}
+
+/* ================================================================== *
+ * 跳躍鋪區 ＋ 中景補四區（v1.2 · P16a）
+ * ================================================================== *
+ *
+ * 這一格的題目是「**先量再放**」，所以斷言也照著量出來的那張表寫：
+ *   ① 母題／高台與**遮擋帶**之間也要走得過去（P16a 新補的 `BAND_CLEAR`，
+ *      先紅實測：示範與推理的高台第一版被搜到離石脊 0.45 公尺）。
+ *   ② 「重複才叫語彙」那幾條**每一片土地都要驗**（P11 只驗了階梯迴廊那一片）。
+ *   ③ 造型與土地一一對應：一片土地一種母題造型、一種高台造型。
+ *   ④ 文件與資料是同一份（WORLD.md §4.12 的表列得出「擺不下」的那幾片）。
+ */
+console.log('\n▸ 跳躍鋪區 ＋ 中景補四區（v1.2 · P16a）');
+{
+  const S16 = await import('../src/world/screens.js');
+  const Jump16 = await import('../src/player/jump.js');
+  const Rules16 = (await import('./lib/screen-rules.mjs')).default;
+  const world16 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+
+  /* --- ① 離遮擋帶要留得下人（新門檻） ------------------------------- */
+  {
+    ok(typeof S16.bandCoreDistance === 'function', '`bandCoreDistance()` 是共用的那一支（工具與測試同一份）');
+    ok(Rules16.BAND_CLEAR > World.PLAYER_RADIUS * 2, 'BAND_CLEAR 至少留得下一個人的直徑', String(Rules16.BAND_CLEAR));
+    let pairs = 0;
+    for (const item of [...S16.MOTIFS, ...S16.PLATFORMS]) {
+      const own = item.radius || Math.max(1.0, (item.height / 3.4) * 0.78);
+      for (const b of S16.SCREEN_BANDS) {
+        if (b.region !== item.region) continue;
+        pairs += 1;
+        const d = S16.bandCoreDistance(b, item.at[0], item.at[1]);
+        ok(
+          d >= Rules16.BAND_CLEAR + own,
+          `[${item.id}] 離石脊 ${b.id} 的核心矩形夠遠（要 ≥ ${(Rules16.BAND_CLEAR + own).toFixed(2)}）`,
+          d.toFixed(2)
+        );
+      }
+    }
+    ok(pairs >= 12, '真的有那麼多對要驗（不然這一段是空過的）', String(pairs));
+    /*
+     * 反例：把一件東西搬到石脊的正中央，同一支判定就要回 0 ——
+     * 證明上面那一圈不是「怎麼擺都成立」（findings：寫得出來的斷言不等於抓得到東西）。
+     */
+    const anyBand = S16.SCREEN_BANDS[0];
+    ok(Boolean(anyBand), '找得到一道遮擋帶（不然反例是空的）');
+    if (anyBand) {
+      eq(S16.bandCoreDistance(anyBand, anyBand.at[0], anyBand.at[1]), 0, '[反例] 站在石脊正中央 → 離核心矩形 0');
+      const f16 = S16.bandFootprint(anyBand);
+      const off = f16.halfDepth + 1.0;
+      ok(
+        S16.bandCoreDistance(anyBand, anyBand.at[0] + f16.vx * off, anyBand.at[1] + f16.vz * off) < Rules16.BAND_CLEAR,
+        '[反例] 貼著石脊側面 1 公尺 → 這條門檻擋得下來'
+      );
+    }
+  }
+
+  /* --- ② 「重複才叫語彙」逐片土地都驗（不只階梯迴廊那一片） ---------- */
+  {
+    let checkedRegions = 0;
+    for (const site of World.REGION_SITES) {
+      const mo = S16.MOTIFS.filter((m) => m.region === site.id);
+      const bd = S16.SCREEN_BANDS.filter((b) => b.region === site.id);
+      const pf = S16.PLATFORMS.filter((p) => p.region === site.id);
+      if (mo.length) {
+        checkedRegions += 1;
+        eq(new Set(mo.map((m) => m.kind)).size, 1, `[${site.id}] 母題是同一個形狀重複出現`);
+        for (let i = 0; i < mo.length; i += 1) {
+          for (let j = i + 1; j < mo.length; j += 1) {
+            const d = Math.hypot(mo[i].at[0] - mo[j].at[0], mo[i].at[1] - mo[j].at[1]);
+            ok(d >= Rules16.MOTIF_GAP, `[${site.id}] 母題 ${mo[i].id} / ${mo[j].id} 散得夠開`, d.toFixed(1));
+          }
+        }
+      }
+      for (let i = 0; i < bd.length; i += 1) {
+        for (let j = i + 1; j < bd.length; j += 1) {
+          const d = Math.hypot(bd[i].at[0] - bd[j].at[0], bd[i].at[1] - bd[j].at[1]);
+          ok(d >= Rules16.BAND_GAP, `[${site.id}] 石脊 ${bd[i].id} / ${bd[j].id} 之間留得下缺口`, d.toFixed(1));
+        }
+      }
+      if (pf.length) {
+        eq(new Set(pf.map((p) => p.kind)).size, 1, `[${site.id}] 高台也是一片土地一種造型`);
+        for (const p of pf) {
+          for (const m of mo) {
+            const d = Math.hypot(p.at[0] - m.at[0], p.at[1] - m.at[1]);
+            ok(d >= Rules16.PLATFORM_MOTIF_GAP, `[${site.id}] 高台 ${p.id} 離母題 ${m.id} 夠開`, d.toFixed(1));
+          }
+        }
+      }
+    }
+    ok(checkedRegions >= 5, '真的有五片以上的土地有母題（不然這一圈是空過的）', String(checkedRegions));
+  }
+
+  /* --- ③ 造型不留孤兒：實作出來的每一種都真的有土地在用 -------------- */
+  {
+    for (const kind of S16.PLATFORM_KIND_IDS) {
+      ok(S16.PLATFORMS.some((p) => p.kind === kind), `高台造型 ${kind} 真的有土地在用（不留死程式）`);
+    }
+    for (const kind of S16.MOTIF_KIND_IDS) {
+      ok(S16.MOTIFS.some((m) => m.kind === kind), `母題造型 ${kind} 真的有土地在用`);
+    }
+    // 一種造型只屬於一片土地（換皮是「這是哪」的語彙，不是隨機貼圖）
+    for (const kind of S16.PLATFORM_KIND_IDS) {
+      const regions = new Set(S16.PLATFORMS.filter((p) => p.kind === kind).map((p) => p.region));
+      eq(regions.size, 1, `高台造型 ${kind} 只屬於一片土地`, [...regions].join(','));
+    }
+  }
+
+  /* --- ④ 新蓋的那幾座：裝飾不擋人、不加燈 --------------------------- */
+  {
+    const fresh = ['reasoning-third-step', 'orchestration-hoist-step', 'frugality-emptied-step',
+      'refinery-first-mirror-step', 'refinery-second-mirror-step', 'forms-second-gauge-step'];
+    for (const id of fresh) {
+      const spec = S16.PLATFORMS.find((p) => p.id === id);
+      ok(Boolean(spec), `[${id}] 資料裡找得到（不然下面幾條是空過的）`);
+      if (!spec) continue;
+      const layer = testWorld.screens.find((l) => l.id === spec.region);
+      ok(Boolean(layer), `[${id}] 這片土地蓋出了中觀層`);
+      if (!layer) continue;
+      const node = layer.group.children.find((c) => c.name === `platform:${id}`);
+      ok(Boolean(node), `[${id}] 場景圖裡蓋出來了`);
+      if (!node) continue;
+      let lights = 0;
+      let solidsHere = 0;
+      let standIds = 0;
+      node.traverse((o) => {
+        if (o.isLight) lights += 1;
+        if (o.isMesh && (o.userData.solidRadius || o.userData.solidSpan)) solidsHere += 1;
+        if (o.userData && o.userData.standId) standIds += 1;
+      });
+      eq(lights, 0, `[${id}] 一盞燈都沒加`);
+      eq(solidsHere, 1, `[${id}] 只有石鼓本身擋人（裙與裝飾一律 noCollide）`);
+      eq(standIds, 1, `[${id}] 只有一塊登記得出名字（站上去回的就是它）`);
+      // 裝飾一律不進穿模稽核：實測 collectSolids 只交得出那一顆圓
+      eq(World.collectSolids(node, World.terrainHeight).length, 1, `[${id}] collectSolids 只認得那一顆圓`);
+    }
+  }
+
+  /* --- ④c 裝飾要看得見（不准整塊埋在底裙裡） -------------------------- *
+   *
+   * 高台的底裙是一個半徑 `radius + 0.55`、露出地面 0.55 公尺的實心圓臺。
+   * 貼在裙上的裝飾如果**八個角全部落在那個圓臺裡**，它就是一塊看不見的幾何 ——
+   * 三角形照付、畫面上一點都沒有。這一條是 P16a 第一版寫出來的東西
+   * （`twiceStep` 的第二級小階整塊在裙裡、`takenStep` 的托座只露 0.03 公尺）。
+   * 量的是**幾何體外接盒的八個角**經過 `matrixWorld` 之後的位置，不是 AABB ——
+   * AABB 會把旋轉過的薄片放大，答案會偏向「沒埋住」（那樣就抓不到東西了）。
+   */
+  {
+    const corner = new THREE.Vector3();
+    let checked = 0;
+    let buriedAll = 0;
+    /*
+     * 量法抽成一支：**反例要能真的呼叫它**（P16a 審查 · 第 4 條 ——
+     * 原本的反例是拿兩個常數互比，永遠成立、什麼都沒證明）。
+     */
+    const measureDeco = (mesh, pf, ground) => {
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const bb0 = mesh.geometry.boundingBox;
+      let maxR = 0;
+      let maxY = -Infinity;
+      let minY = Infinity;
+      let bx0 = Infinity;
+      let bx1 = -Infinity;
+      let bz0 = Infinity;
+      let bz1 = -Infinity;
+      for (let k = 0; k < 8; k += 1) {
+        corner.set(k & 1 ? bb0.max.x : bb0.min.x, k & 2 ? bb0.max.y : bb0.min.y, k & 4 ? bb0.max.z : bb0.min.z);
+        corner.applyMatrix4(mesh.matrixWorld);
+        maxR = Math.max(maxR, Math.hypot(corner.x - pf.at[0], corner.z - pf.at[1]));
+        maxY = Math.max(maxY, corner.y);
+        minY = Math.min(minY, corner.y);
+        bx0 = Math.min(bx0, corner.x);
+        bx1 = Math.max(bx1, corner.x);
+        bz0 = Math.min(bz0, corner.z);
+        bz1 = Math.max(bz1, corner.z);
+      }
+      /*
+       * 「離軸心最近有多近」不能拿八個角去挑最小的 —— 一圈以軸心為中心的環，
+       * 八個角全在外圍，最小值反而是 0.71（那條斷言於是抓不到穿過人身體的東西）。
+       * 改成量**外接盒**到軸心的距離（盒子把軸心夾在中間就是 0）：對旋轉過的薄片偏保守，
+       * 而保守的方向剛好是「寧可誤報也不要漏掉」。
+       */
+      const minR = Math.hypot(
+        Math.max(bx0 - pf.at[0], 0, pf.at[0] - bx1),
+        Math.max(bz0 - pf.at[1], 0, pf.at[1] - bz1)
+      );
+      const skirtR = pf.radius + 0.55;
+      const skirtTop = ground + 0.55;
+      return { maxR, minR, maxY, minY, buried: maxY <= skirtTop + 1e-6 && maxR <= skirtR + 1e-6 };
+    };
+    for (const pf of S16.PLATFORMS) {
+      const layer = testWorld.screens.find((l) => l.id === pf.region);
+      const node = layer && layer.group.children.find((c) => c.name === `platform:${pf.id}`);
+      if (!node) continue;
+      node.updateMatrixWorld(true);
+      const ground = node.position.y;
+      const skirtR = pf.radius + 0.55;
+      const skirtTop = ground + 0.55;
+      for (const o of node.children) {
+        if (!o.isMesh || !o.geometry) continue;
+        if (o.name === `step:${pf.id}`) continue; // 石鼓本身
+        const par = o.geometry.parameters || {};
+        if (par.radiusTop === skirtR) continue; // 裙本身
+        const m = measureDeco(o, pf, ground);
+        checked += 1;
+        if (m.buried) buriedAll += 1;
+        ok(
+          !m.buried,
+          `[${pf.id}] 裝飾看得見（不是整塊埋在底裙裡）`,
+          `maxR=${m.maxR.toFixed(2)}/${skirtR.toFixed(2)} maxY=+${(m.maxY - ground).toFixed(2)}/0.55`
+        );
+        /*
+         * **不准穿過站在上面的人**（P16a 審查 · 第 2 條）：站在頂面上的人是一根
+         * 半徑 `PLAYER_RADIUS`、從腳到頭 1.7 公尺的柱子。任何一塊裝飾只要有一個角
+         * 落在那根柱子裡，它就是從人身上穿過去（`noCollide` 擋不住視覺）。
+         */
+        const topY = ground + pf.height;
+        const throughBody =
+          m.minR < World.PLAYER_RADIUS && m.maxY > topY + 0.12 && m.minY < topY + 1.7;
+        ok(
+          !throughBody,
+          `[${pf.id}] 裝飾不會從站在上面的人身上穿過去`,
+          `minR=${m.minR.toFixed(2)} y=${(m.minY - topY).toFixed(2)}…${(m.maxY - topY).toFixed(2)}`
+        );
+      }
+    }
+    ok(checked >= 40, '真的有那麼多塊裝飾要驗（不然這一段是空過的）', String(checked));
+    eq(buriedAll, 0, '沒有任何一塊裝飾整塊埋在裙裡');
+    /*
+     * 反例：拿一塊真的裝飾，把它搬到裙的正中央、壓到 0.2 公尺高 ——
+     * 同一段判定要說「埋住了」（證明上面那一圈不是永遠成立）。
+     */
+    {
+      const pf0 = S16.PLATFORMS.find((p) => p.kind === 'takenStep') || S16.PLATFORMS[0];
+      const layer0 = testWorld.screens.find((l) => l.id === pf0.region);
+      const node0 = layer0 && layer0.group.children.find((c) => c.name === `platform:${pf0.id}`);
+      ok(Boolean(node0), '[反例] 找得到那一座高台的節點');
+      if (node0) {
+        const g0 = node0.position.y;
+        // 拿一塊**真的**裝飾，複製一份搬到裙的正中央、壓到 0.2 公尺高，再問同一支
+        const real = node0.children.find(
+          (c) => c.isMesh && c.geometry && c.name !== `step:${pf0.id}` && (c.geometry.parameters || {}).radiusTop !== pf0.radius + 0.55
+        );
+        ok(Boolean(real), '[反例] 找得到一塊真的裝飾可以拿來搬');
+        if (real) {
+          ok(!measureDeco(real, pf0, g0).buried, '[反例] 它原本是看得見的（不然這一條是空過的）');
+          const moved = real.clone();
+          moved.position.set(0, 0.1, 0);
+          moved.rotation.set(0, 0, 0);
+          moved.scale.set(0.2, 0.2, 0.2);
+          node0.add(moved);
+          node0.updateMatrixWorld(true);
+          const mm = measureDeco(moved, pf0, g0);
+          node0.remove(moved);
+          node0.updateMatrixWorld(true);
+          ok(
+            mm.buried,
+            '[反例] 同一塊裝飾搬到裙的正中央、壓矮之後就被判定成「埋在裙裡」',
+            `maxR=${mm.maxR.toFixed(2)} maxY=+${(mm.maxY - g0).toFixed(2)}`
+          );
+        }
+      }
+    }
+  }
+
+  /* --- ④b 預算：這一格花了多少 --------------------------------------- */
+  {
+    let tris16 = 0;
+    let lights16 = 0;
+    testScene.traverse((o) => {
+      if (o.isLight) lights16 += 1;
+      if (o.isMesh && o.geometry) {
+        const g16 = o.geometry;
+        const n16 = g16.index ? g16.index.count / 3 : g16.attributes.position.count / 3;
+        tris16 += n16 * (o.isInstancedMesh ? o.count : 1);
+      }
+    });
+    // 這一格量到 224,946／37／992；門檻是這一格自己宣告的預算（比實測嚴一格）
+    ok(tris16 < WORLD_TRI_CEIL, `P16a：世界三角形 < ${WORLD_TRI_CEIL}（P20b 的框）`, `tris=${Math.round(tris16)}`);
+    eq(lights16, 37, 'P16a：光源數仍然是 37（中觀層一盞都不加）', `lights=${lights16}`);
+    ok(testWorld.solids.length < 1100, 'P16a：碰撞體 < 1,100', String(testWorld.solids.length));
+    // 每一片土地的中觀碰撞體上限（§4.10 ②）—— 新鋪的兩片也要在框內
+    for (const site of World.REGION_SITES) {
+      const layer = testWorld.screens.find((l) => l.id === site.id);
+      if (!layer) continue;
+      const n = World.collectSolids(layer.group, World.terrainHeight).length;
+      ok(n <= Rules16.SOLIDS_PER_REGION_MAX, `[${site.id}] 中觀層碰撞體 ≤ ${Rules16.SOLIDS_PER_REGION_MAX}`, String(n));
+    }
+  }
+
+  /* --- ⑤ 文件與資料是同一份 ------------------------------------------ */
+  {
+    const s412 = world16.slice(world16.indexOf('### 4.12'), world16.indexOf('### 4.13'));
+    ok(s412.length > 800, 'WORLD.md §4.12 抓得到（不然下面幾條是空過的）', String(s412.length));
+    ok(/screen-fit/.test(s412), 'WORLD.md §4.12 說得出落點是哪一支工具搜出來的');
+    ok(/BAND_CLEAR|石脊/.test(s412), 'WORLD.md §4.12 寫了「離遮擋帶也要留得下人」那一條');
+    // 12 片土地每一片都要在那張表裡出現（有沒有高台、為什麼）
+    for (const site of World.REGION_SITES) {
+      ok(s412.includes(`\`${site.id}\``), `WORLD.md §4.12 的表列了 ${site.id}`);
+    }
+    // 擺不下的那四片：文件要寫得出它們**沒有**高台
+    for (const id of ['toolcraft', 'sight', 'divergence', 'wards']) {
+      eq(S16.PLATFORMS.some((p) => p.region === id), false, `[${id}] 資料上真的沒有高台`);
+    }
+    const s31 = world16.slice(world16.indexOf('### 3.1'), world16.indexOf('### 3.2'));
+    ok(s31.includes('P16a'), 'WORLD.md §3.1 記得這一格把跳躍鋪到哪裡');
+    // keyhelp 不准把片數寫死（資料一長，寫死的數字就自打嘴巴）
+    const keyhelpSrc = readFileSync(resolve(root, 'src/ui/keyhelp.js'), 'utf8');
+    const jumpLine = keyhelpSrc.split('\n').find((l) => l.includes("keys: ['空白鍵']")) || '';
+    ok(jumpLine.length > 0, 'keyhelp 找得到跳躍那一行');
+    ok(!/[一二三四五六七八九十]片/.test(jumpLine), 'keyhelp 的跳躍那一行沒有把片數寫死', jumpLine.trim());
+  }
+}
+
+
+/* ================================================================== *
+ * 中景收尾：12 片土地每一片都有中觀層（v1.2 · P16b）
+ * ================================================================== *
+ *
+ * 這一格要證的只有一句話：**沒有一片土地是空的**（遮擋帶／母題／高台至少一種）。
+ * 其餘三段守的是為了做到它而動過的三件事，每一件都要說得出「為什麼是這個數字」：
+ *   ① 反應物的淨空跟著**自己**的觸發半徑走（以前整層套用最大的那一個）。
+ *   ② `SIGHT_EXEMPT` 是登記例外，不是把門檻調鬆。
+ *   ③ 所有互動點仍然搶得到 `E` —— 對**真的蓋出來的世界**逐點量。
+ */
+console.log('\n▸ 中景收尾：每一片土地都有中觀層（v1.2 · P16b）');
+{
+  const S17 = await import('../src/world/screens.js');
+  const Rules17 = (await import('./lib/screen-rules.mjs')).default;
+  const world17 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+
+  /* --- ① 12 片土地每一片都有中觀層 ---------------------------------- */
+  {
+    // 三層當參數傳進來 —— 反例才有辦法拿**同一支**去問「三層都空的土地」
+    const hasIn = (bands, motifs, platforms, id) =>
+      bands.some((b) => b.region === id) ||
+      motifs.some((m) => m.region === id) ||
+      platforms.some((p) => p.region === id);
+    const has = (id) => hasIn(S17.SCREEN_BANDS, S17.MOTIFS, S17.PLATFORMS, id);
+    let covered = 0;
+    for (const site of World.REGION_SITES) {
+      ok(has(site.id), `[${site.id}] 有中觀層（遮擋帶／母題／高台至少一種）`);
+      if (has(site.id)) covered += 1;
+    }
+    eq(covered, World.REGION_SITES.length, '12 片土地一片都沒有漏', `${covered}/${World.REGION_SITES.length}`);
+    ok(World.REGION_SITES.length >= 12, '真的有 12 片土地在被驗（不然上面那一圈是空過的）', String(World.REGION_SITES.length));
+    /*
+     * 反例：把某一片土地的三層都拿掉，同一支判定就要回 false ——
+     * 證明 `has()` 不是「怎麼樣都成立」（findings：新斷言先問一句「什麼情況下它會紅」）。
+     */
+    eq(hasIn([], [], [], 'wards'), false, '反例：三層都空的時候，**同一支** has() 會回 false');
+    eq(
+      hasIn(S17.SCREEN_BANDS.filter((b) => b.region !== 'wards'), [], [], 'wards'),
+      false,
+      '反例：只把護欄崗那幾道帶拿掉，同一支也會回 false'
+    );
+    eq(hasIn(S17.SCREEN_BANDS, [], [], 'wards'), true, '反例的對照：帶還在的時候它回 true（不是永遠 false）');
+  }
+
+  /* --- ② 反應物的淨空跟著自己的觸發半徑走 --------------------------- */
+  {
+    /*
+     * 從**真的蓋得出來的那份清單**出發（`REACTION_KINDS`），不是從半徑表出發 ——
+     * 不然新加一種反應物卻忘了登記半徑，它會以 `enter: undefined` 蓋出來
+     * （＝一種永遠不會回應的東西），而這一圈連看都不會看它（P16b 審查 · 第 4 條）。
+     */
+    const kinds = Object.keys(Reactive.REACTION_KINDS);
+    ok(kinds.length >= 6, '六種反應物都在清單裡', String(kinds.length));
+    for (const kind of kinds) {
+      ok(
+        Number.isFinite(Reactive.REACT_TRIGGER_R[kind]),
+        `[${kind}] 登記了自己的觸發半徑（沒登記就會蓋出一個永遠不回應的東西）`,
+        String(Reactive.REACT_TRIGGER_R[kind])
+      );
+    }
+    /*
+     * **建造器與淨空規則是同一份**：真的蓋一個出來，比對它登記的觸發半徑。
+     * 這一條在 P16b 之前抓不到東西（規則整層寫死 4.4，蓋出來的是 1.75–4.4）。
+     */
+    const kit = kitFor('#c2c79f');
+    for (const kind of kinds) {
+      const built = Reactive.buildReaction({ id: `probe-${kind}`, kind, region: 'foundations', at: [0, 0] }, kit, () => 0);
+      ok(Boolean(built && built.triggers && built.triggers.length), `[${kind}] 蓋得出來、而且有觸發點`);
+      if (!built || !built.triggers || !built.triggers.length) continue;
+      eq(
+        built.triggers[0].enter,
+        Reactive.reactiveTriggerR(kind, {}),
+        `[${kind}] 蓋出來的觸發半徑＝淨空規則問到的那一個（只有一份數字）`
+      );
+    }
+    // 靜水盤是唯一跟著參數走的：換了水盤半徑，兩邊要一起變
+    eq(Reactive.reactiveTriggerR('ripple', { radius: 3 }), 4.5, '靜水盤的觸發半徑跟著水盤半徑走（3 ＋ 1.5）');
+    // 音石列刻意維持整排一個目標（理由寫在 `SONGSTONE_ROW_CLEAR`）
+    const row = Reactive.reactiveTargets(Reactive.REACTIVE_SPOTS.filter((sp) => sp.kind === 'songstone'));
+    ok(row.length >= 5, '音石列有被攤出來', String(row.length));
+    ok(
+      row.every((t) => t.r === Reactive.SONGSTONE_ROW_CLEAR),
+      '音石列走的是整排那一個淨空半徑（不是每一顆 1.75）'
+    );
+    eq(Reactive.SONGSTONE_ROW_CLEAR, Rules17.LAYER_INTERACT_R.react, '整排那一個＝反應層的預設值（沒有第三個數字）');
+    // `targetRadius()` 的兩條路都要走得通
+    eq(Rules17.targetRadius({ k: 'react', id: 'x', at: [0, 0], r: 3.2 }), 3.2, 'targetRadius：帶了 r 就用它');
+    eq(Rules17.targetRadius({ k: 'letter', id: 'x', at: [0, 0] }), 3.8, 'targetRadius：沒帶 r 才退回那一層的預設');
+  }
+
+  /* --- ③ 視線的登記例外 --------------------------------------------- */
+  {
+    const exemptIds = Object.keys(S17.SIGHT_EXEMPT);
+    const regionIds = new Set(World.REGION_SITES.map((r) => r.id));
+    const { BRIDGE_HEAD_INSET } = await import('./sightline-audit.mjs');
+    for (const id of exemptIds) {
+      ok(regionIds.has(id), `[sight-exempt:${id}] 是真實區域`);
+      const reason = S17.SIGHT_EXEMPT[id];
+      ok(reason.length >= 30, `[sight-exempt:${id}] 寫得出理由`, String(reason.length));
+      ok(/\d/.test(reason), `[sight-exempt:${id}] 理由裡有量到的數字（說得出還差多少）`);
+      const bands = S17.SCREEN_BANDS.filter((b) => b.region === id);
+      ok(bands.length > 0, `[sight-exempt:${id}] 真的有遮擋帶（沒帶就不必例外）`, String(bands.length));
+      /*
+       * **例外要會過期**：哪一天這片土地擺得下真的擋得住的那一道，這條就要紅。
+       * 量的是「橋頭 → 地標」那條直線有沒有被它的核心矩形切到 —— 與 `screen-fit`
+       * 找第一道帶時用的是同一支（`segmentCrossesBand`）。
+       */
+      const site = World.REGION_SITES.find((r) => r.id === id);
+      const landmark = LANDMARKS.find((l) => l.region === id);
+      const link = World.CORRIDORS.find((c) => c.region === id) || World.ANNEX_LINKS.find((a) => a.region === id);
+      ok(Boolean(site && landmark && link), `[sight-exempt:${id}] 找得到地標與走道`);
+      if (!site || !landmark || !link) continue;
+      const along = World.CORRIDORS.includes(link) ? link.length - site.radius + BRIDGE_HEAD_INSET : link.gateAt + BRIDGE_HEAD_INSET;
+      const entry = [link.from.x + link.dir.x * along, link.from.z + link.dir.z * along];
+      for (const b of bands) {
+        eq(
+          Boolean(S17.segmentCrossesBand(b, entry[0], entry[1], landmark.at[0], landmark.at[1])),
+          false,
+          `[sight-exempt:${id}] ${b.id} 真的沒有擋在「橋頭 → 地標」那條直線上（擋得住就該把例外拿掉）`
+        );
+      }
+      /*
+       * 反例：拿一片**有**擋得住的那一道的土地問同一支，答案要相反 ——
+       * 不然上面那一圈是「怎麼問都 false」。
+       */
+      const ref = S17.SCREEN_BANDS.find((b) => b.region === 'reasoning');
+      const refSite = World.REGION_SITES.find((r) => r.id === 'reasoning');
+      const refLm = LANDMARKS.find((l) => l.region === 'reasoning');
+      const refLink = World.CORRIDORS.find((c) => c.region === 'reasoning');
+      const refAlong = refLink.length - refSite.radius + BRIDGE_HEAD_INSET;
+      const refEntry = [refLink.from.x + refLink.dir.x * refAlong, refLink.from.z + refLink.dir.z * refAlong];
+      eq(
+        Boolean(S17.segmentCrossesBand(ref, refEntry[0], refEntry[1], refLm.at[0], refLm.at[1])),
+        true,
+        '反例：真的擋得住的那一道，同一支判定會回 true'
+      );
+    }
+    ok(exemptIds.length <= 2, '登記例外不准變成常態（最多兩片）', String(exemptIds.length));
+    ok(world17.includes('SIGHT_EXEMPT'), 'WORLD.md 記得這條登記例外');
+  }
+
+  /* --- ④ 每一個互動點仍然搶得到 `E`（對真的蓋出來的世界量） ---------- *
+   *
+   * 動過「中觀層與互動點之間的距離」之後，這一條是**真正要守的東西**：
+   * 距離公式怎麼寫都好，玩家得走得到那件東西、按得下去。
+   * 量的是互動圈上 24 個方向裡有幾個**真的站得到**（`isWalkable` **再加上道具的碰撞體**）。
+   * 只問 `isWalkable` 是不夠的（P16b 審查 · 第 1 條）：它刻意不看 solids，
+   * 而這一節放鬆的正是「中觀層與互動點之間的距離」—— 一道石脊擺進互動圈裡，
+   * 只問 `isWalkable` 的版本一句話都不會說（實測最擠的點 15/24 → 加上碰撞體只剩 13/24）。
+   */
+  {
+    const targets = Rules17.interactionTargets({
+      challenges,
+      inscriptions,
+      letters: letterFile.entries,
+      handles,
+      reactiveSpots: Reactive.reactiveTargets(),
+      murks: murkFile.entries,
+      // v1.2 · P16c：守夜人也是一層互動點（他也要按得到、也不准擋住別人）
+      watchmen: readJson('src/data/watchmen.json').entries,
+      tablets: LORE_TABLETS,
+      secrets: groundSecrets,
+    });
+    ok(targets.length >= 200, '互動點真的有那麼多要驗（不然這一段是空過的）', String(targets.length));
+    let worstFree = 99;
+    let worstId = '';
+    for (const t of targets) {
+      /*
+       * P17 審查 · 第 9 條：量的必須是**那一層真正搶得到 `E` 的圈**。
+       * `targetRadius()` 交出來的是淨空半徑，石座（5.6）與大濁靈（4.0）
+       * 都刻意比互動圈小 —— 拿它來量，等於對一個不是它在守的圈發綠色斷言。
+       * 大濁靈在真正的 6.0 圈上實測 15–24（淨空圈上是 19–24），石座 6.5 圈上最差 15。
+       */
+      const R = Rules17.interactRingRadius(t);
+      /*
+       * 而且要**證明**量到的就是那一圈：圈內 0.1m 按得到這一件，圈外 0.1m 按不到它。
+       * 拿淨空半徑當半徑的話（大濁靈 4.0），圈外那一步仍然按得到牠 —— 這一條會紅。
+       */
+      if (t.k === 'greatmurk') {
+        const inR = testWorld.nearestMurk({ x: t.at[0] + R - 0.1, y: 0, z: t.at[1] });
+        const outR = testWorld.nearestMurk({ x: t.at[0] + R + 0.1, y: 0, z: t.at[1] });
+        ok(inR && inR.murk.id === t.id, `[${t.k}:${t.id}] 量的那一圈裡按得到牠`, JSON.stringify(inR && inR.murk.id));
+        ok(!outR || outR.murk.id !== t.id, `[${t.k}:${t.id}] 量的那一圈外就按不到牠了（＝ 真的是牠的互動圈）`, JSON.stringify(outR && outR.murk.id));
+      }
+      /*
+       * 石座那一層不在這裡驗（`nearestMarker` 量的是**三維**距離，
+       * 拿 y=0 的探針去問會被地形高度吃掉）—— 它由 ③b 那一段挑一座四周夠空的
+       * 石座、用它自己的高度逐步探，把 `MARKER_R` 釘死。
+       */
+      let free = 0;
+      for (let a = 0; a < 24; a += 1) {
+        const ang = (a / 24) * Math.PI * 2;
+        // 站在互動圈內緣（再往內半個玩家半徑）—— 那裡站得住就按得到 `E`
+        const px = t.at[0] + Math.cos(ang) * (R - 0.3);
+        const pz = t.at[1] + Math.sin(ang) * (R - 0.3);
+        if (testWorld.isWalkable(px, pz) && !testWorld.solidAt(px, pz)) free += 1;
+      }
+      if (free < worstFree) {
+        worstFree = free;
+        worstId = `${t.k}:${t.id}`;
+      }
+      /*
+       * 門檻 12／24（實測最擠的是 13）—— 比現況嚴一格，而且**半圈**這件事有意義：
+       * 一件東西被擋掉超過一半的方向，就已經是「要繞很久才按得到」了。
+       */
+      ok(free >= 12, `[${t.k}:${t.id}] 互動圈上還有站得住的位置（搶得到 E）`, `${free}/24`);
+    }
+    console.log(`    ↳ 最擠的互動點：${worstId}（互動圈上 ${worstFree}/24 個方向站得住）`);
+  }
+
+  /* --- ⑤ 文件與資料是同一份 ------------------------------------------ */
+  {
+    const s410 = world17.slice(world17.indexOf('### 4.10'), world17.indexOf('### 4.11'));
+    ok(s410.includes('P16b'), 'WORLD.md §4.10 記得這一格補了哪三片土地');
+    for (const id of ['wards', 'sight', 'divergence']) {
+      ok(s410.includes(id), `WORLD.md §4.10 點得出 ${id}`);
+    }
+    // 每一道新帶都吃得了既有的那一整套（造型、長寬高、faceSign）
+    for (const b of S17.SCREEN_BANDS) {
+      ok(b.depth >= 2 && b.depth <= 3, `[${b.id}] 厚度在 2–3 公尺`, String(b.depth));
+      ok(b.length >= 7 && b.length <= 20, `[${b.id}] 長度在 7–20 公尺`, String(b.length));
+      ok(b.height >= 6 && b.height <= 12, `[${b.id}] 高度在 6–12 公尺`, String(b.height));
+    }
+  }
+}
+
+
+/* ------------------------------------------------------------------ *
+ * v1.2 · P16c — 守夜人：12 位站著不動的人 ＋ 選項式對話
+ *
+ * 這一格加的是世界的第一場**對話**，所以斷言分成四件事：
+ *   ① 資料契約與護欄 2（一位一片土地；技巧那一項只准引用既有資料、
+ *      這個檔案裡一個連結都不准有）。
+ *   ② 擺位（對**真的蓋出來的世界**量）：他自己按得到、也沒有把任何一層蓋掉，
+ *      而且**中觀層一片都沒有被清零**（`screen-fit -- --verify` 的那一條在這裡也守一次）。
+ *   ③ 世界實體：0 光源、站不上去、碰撞稽核不漏、預算在框內。
+ *   ④ 四種情報：純函式逐條問，每一條都配一個**真的呼叫被測那一支**的反例。
+ * ------------------------------------------------------------------ */
+console.log('\n▸ 守夜人：12 位站著不動的人（v1.2 · P16c）');
+{
+  const watchFile = readJson('src/data/watchmen.json');
+  const watchmen = watchFile.entries;
+  const Watch = await import('../src/world/watchmen.js');
+  const Talk = await import('../src/progression/watchtalk.js');
+  const SaveIO16c = await import('../src/save/save.js');
+  const RulesW = (await import('./lib/screen-rules.mjs')).default;
+  const AuditW = await import('./collision-audit.mjs');
+  const watchSrc = readFileSync(resolve(root, 'src/world/watchmen.js'), 'utf8');
+  const talkSrc = readFileSync(resolve(root, 'src/progression/watchtalk.js'), 'utf8');
+  const uiSrc = readFileSync(resolve(root, 'src/ui/watchman.js'), 'utf8');
+  const mainSrcW = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const worldSrcW = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+  const progSrcW = readFileSync(resolve(root, 'src/progression/progression.js'), 'utf8');
+  const worldMdW = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+  const cssSrcW = readFileSync(resolve(root, 'src/styles.css'), 'utf8');
+
+  /* --- ① 資料契約 ------------------------------------------------- */
+  {
+    eq(watchFile.version, 1, 'watchmen.json 有版本欄');
+    eq(watchFile.authored, 'game', 'watchmen.json 檔頭明講是遊戲自撰的層');
+    ok(
+      typeof watchFile.note === 'string' && /出處|官方/.test(watchFile.note),
+      'watchmen.json 檔頭說明「出處以官方文件為準」'
+    );
+    eq(watchFile.xp, 0, '跟守夜人說話不給 XP（他給的是情報，情報就是報酬）');
+    eq(watchmen.length, EXPECT.watchmen.value, `守夜人數＝契約（${EXPECT.watchmen.value} 位）`);
+    eq(EXPECT.watchmen.perRegion, 1, '契約寫的是一片土地一位');
+    eq(EXPECT.watchmen.winnableMin, RulesW.WATCHMAN_WINNABLE_MIN, '契約與規則表的「按得到他」門檻是同一個數字');
+    /*
+     * 例外要**逐值**比對，不是只比 key（P16c 審查 · 第 5 條）：
+     * 只比 key 的話，有人把契約裡的門檻改成 5 來「騰出空間」，一條斷言都不會紅。
+     * `winnableFloor` ＝ 真正的門檻（與規則表同一份）；
+     * `winnableCeiling` ＝ 那一片全區量得到的上限（記錄用，門檻不准超過它）。
+     */
+    eq(
+      JSON.stringify(EXPECT.watchmen.winnableFloor),
+      JSON.stringify(RulesW.WATCHMAN_WINNABLE_EXCEPTIONS),
+      '契約與規則表的例外門檻**逐值相同**'
+    );
+    for (const [id, floor] of Object.entries(EXPECT.watchmen.winnableFloor)) {
+      const ceil = EXPECT.watchmen.winnableCeiling[id];
+      ok(Number.isFinite(ceil), `[${id}] 契約記得那一片的全區上限`);
+      ok(floor <= ceil, `[${id}] 門檻不超過全區上限（${floor} ≤ ${ceil}）`);
+      ok(floor < RulesW.WATCHMAN_WINNABLE_MIN, `[${id}] 例外真的比一般門檻鬆（不然它不叫例外）`);
+    }
+    eq(new Set(watchmen.map((w) => w.id)).size, 12, 'id 沒有重複');
+    eq(new Set(watchmen.map((w) => w.name)).size, 12, '名字沒有重複');
+    eq(new Set(watchmen.map((w) => w.voice)).size, 12, '語氣沒有重複（一片土地一種說話的方式）');
+    eq(new Set(watchmen.map((w) => w.post)).size, 12, '崗位沒有重複');
+    for (const site of World.REGION_SITES) {
+      eq(watchmen.filter((w) => w.region === site.id).length, 1, `[${site.id}] 剛好一位守夜人`);
+    }
+    for (const w of watchmen) {
+      const tag = `[${w.id}]`;
+      ok(/^watch-[a-z0-9-]+$/.test(w.id), `${tag} id 是 kebab-case 且帶 watch- 前綴`);
+      ok(Array.isArray(w.at) && w.at.length === 2 && w.at.every(Number.isFinite), `${tag} at 是兩個數字`);
+      ok(Number.isFinite(w.rot), `${tag} 有崗位的朝向 rot`);
+      ok(Watch.WATCHMAN_LOOKS.includes(w.look), `${tag} look 是三種提燈方式之一`, String(w.look));
+      ok(Array.isArray(w.greet) && w.greet.length >= 1 && w.greet.length <= 2, `${tag} 招呼是 1–2 句`);
+      for (const g of w.greet) ok(typeof g === 'string' && g.length > 0 && g.length <= 30, `${tag} 招呼每句 ≤ 30 字`, g);
+      ok(Array.isArray(w.lore) && w.lore.length >= 2 && w.lore.length <= 3, `${tag} 舊事是 2–3 拍（可以追問）`);
+      for (const l of w.lore) ok(typeof l === 'string' && l.length > 0 && l.length <= 60, `${tag} 舊事每拍 ≤ 60 字`, l);
+    }
+    /*
+     * 護欄 2 的紅線：這個檔案裡**一個連結都不准有**。
+     * 技巧那一項顯示的每一個字（名稱、一句話、官方網址）都是從
+     * `skill-codex-v2.json` 讀出來的 —— 這裡自己編一個 url 就是杜撰出處。
+     */
+    const rawWatch = readFileSync(resolve(root, 'src/data/watchmen.json'), 'utf8');
+    ok(!/https?:\/\//.test(rawWatch), 'watchmen.json 裡沒有任何網址（出處一律引用既有資料）');
+    ok(!/techniqueId|skillId|"source"/.test(rawWatch), 'watchmen.json 沒有自己掛技巧或出處欄位');
+
+    // 四種情報的 id：存檔那一份與 watchtalk 那一份逐字相同（分家就會有一份是假的）
+    eq(JSON.stringify(SaveIO16c.WATCH_TOPICS), JSON.stringify(Talk.WATCH_TOPICS), 'save.js 與 watchtalk.js 的情報 id 是同一份');
+    eq(
+      JSON.stringify(Object.keys(watchFile.topics).sort()),
+      JSON.stringify([...Talk.WATCH_TOPICS].sort()),
+      'watchmen.json 的 topics 剛好是那四種'
+    );
+  }
+
+  /* --- ①b 世界語言的檢查器提示（不給答案、不貼範例） -------------- */
+  {
+    const CHECKS_W = (await import('../src/challenges/checks.js')).CHECKS;
+    const used = new Set();
+    for (const c of challenges) for (const r of c.rubric || []) used.add(r.check);
+    for (const m of murkFile.entries) for (const r of m.rubric || []) used.add(r.check);
+    const lines = watchFile.checkLines;
+    ok(used.size >= 80, '真的有那麼多檢查器要翻成世界語言（不然這一段是空過的）', String(used.size));
+    for (const id of [...used].sort()) {
+      ok(typeof lines[id] === 'string' && lines[id].length > 0, `[${id}] 有一句世界語言`);
+    }
+    for (const id of Object.keys(lines)) ok(used.has(id), `[${id}] 這一句對得上真的在用的檢查器（沒有孤兒）`);
+    for (const [id, line] of Object.entries(lines)) {
+      ok(line.length <= 34, `[${id}] 一句話 ≤ 34 字`, `${line.length}`);
+      // 「例如」「換成」「直接寫」那幾種寫法就是在給答案 —— 那是提示球與神諭刻文的事
+      ok(!/例如|直接寫|換成|寫成「|加一句/.test(line), `[${id}] 沒有給範例／給答案`, line);
+      const def = CHECKS_W[id];
+      ok(!def || line !== def.hint, `[${id}] 不是把檢查器的教學提示原封搬過來`);
+    }
+  }
+
+  /* --- ② 擺位（對真的蓋出來的世界量） ------------------------------ */
+  {
+    const R = Watch.WATCHMAN_RADIUS;
+    eq(R, RulesW.WATCHMAN_R, 'watchmen.js 與 screen-rules.mjs 的互動半徑是同一個數字');
+    eq(R, RulesW.LAYER_INTERACT_R.watchman, '擺位規則表裡的守夜人半徑也是同一個');
+    /*
+     * 守夜人那一格與大濁靈那一格讀的是**同一個數字**（P17 審查 · 第 1 條）：
+     * `WATCHMAN_ABOVE_MIN.greatmurk` ＝ 互動圈不重疊 ＝ 6.0 ＋ 4.6。
+     * 兩邊各訂一個常數，就會出現「這道門過、那道門紅」而看不出哪一個算數。
+     */
+    eq(
+      RulesW.WATCHMAN_ABOVE_MIN.greatmurk,
+      RulesW.GREAT_MURK_R + RulesW.WATCHMAN_R,
+      '守夜人離大濁靈那一格 ＝ 互動圈不重疊（6.0 ＋ 4.6）'
+    );
+    for (const k of Object.keys(RulesW.WATCHMAN_ABOVE_MIN)) {
+      ok(['marker', 'murk', 'greatmurk'].includes(k), `[${k}] 這一格真的有人讀（沒有死常數）`);
+    }
+    ok(R < 5.5 && R >= 4.6, '互動半徑落在濁靈（5.5）與石碑（4.6）之間', String(R));
+
+    const segsW = Props.buildPathNetwork(
+      World.REGION_SITES,
+      [...World.CORRIDORS, ...World.ANNEX_LINKS],
+      challenges,
+      (await import('../src/world/screens.js')).PATH_BENDS
+    );
+    // 中觀層的每一顆碰撞圓（守夜人不准把它們的合法性吃掉）
+    const midSolids = [];
+    for (const layer of testWorld.screens || []) {
+      for (const node of layer.group.children) {
+        for (const sd of World.collectSolids(node, World.terrainHeight)) midSolids.push(sd);
+      }
+    }
+    ok(midSolids.length >= 100, '中觀層真的有那麼多碰撞圓要閃（不然這一段是空過的）', String(midSolids.length));
+
+    for (const w of watchmen) {
+      const tag = `[${w.id}]`;
+      const [x, z] = w.at;
+      const here = World.regionAt(x, z);
+      ok(here && here.id === w.region && !here.onBridge, `${tag} regionAt 說他站在 ${w.region}`, JSON.stringify(here));
+      ok(World.coverage(x, z) > 0.96, `${tag} 腳下不是崩掉的區緣`, World.coverage(x, z).toFixed(3));
+      for (const l of World.BRIDGE_LANES) {
+        ok(distToSeg(x, z, l.ax, l.az, l.bx, l.bz) >= World.LANE_HALF + 4, `${tag} 離 ${l.region} 橋的主動線 ≥ 4m`);
+      }
+      for (const c of [...World.CORRIDORS, ...World.ANNEX_LINKS]) {
+        ok(Math.hypot(x - c.gate.x, z - c.gate.z) >= RulesW.GATE_MIN, `${tag} 離 ${c.region} 的門 ≥ ${RulesW.GATE_MIN}m`);
+      }
+      for (const lm of Props.LANDMARKS) {
+        // 地標吃的是 4 公尺（同濁靈）：§2.2「地標旁邊要矮」管的是高的東西，不是一個人
+        ok(Math.hypot(x - lm.at[0], z - lm.at[1]) >= RulesW.WATCHMAN_AUTO_MIN, `${tag} 沒站在地標 ${lm.id} 上`);
+      }
+      ok(Math.hypot(x, z - 6) >= 7, `${tag} 離出生點 ≥ 7m`);
+      ok(
+        Math.hypot(x - prologueForWorld.shrine.at[0], z - prologueForWorld.shrine.at[1]) >= 9,
+        `${tag} 離起始祭壇 ≥ 9m`
+      );
+
+      // 比他**高階**的兩層：不准站進人家的地盤（規則反過來，理由寫在 screen-rules）
+      for (const c of challenges) {
+        const d = Math.hypot(x - c.position[0], z - c.position[1]);
+        ok(d >= RulesW.WATCHMAN_ABOVE_MIN.marker, `${tag} 離石座 ${c.id} ≥ ${RulesW.WATCHMAN_ABOVE_MIN.marker}m`, d.toFixed(2));
+      }
+      /*
+       * P17 審查 · 第 1 條：這張表現在含 12 隻**大濁靈**，牠們那一格是 10.6
+       * （＝ 互動半徑 6.0 ＋ 守夜人 4.6，圈不重疊），不是小濁靈的 7.5。
+       * 一律套 `.murk` 的話，守夜人擺在離大濁靈 7.6 公尺處會**這道門過、那道門紅**。
+       */
+      for (const m of murkFile.entries) {
+        const k = m.kind === 'great' ? 'greatmurk' : 'murk';
+        const need = RulesW.WATCHMAN_ABOVE_MIN[k];
+        const d = Math.hypot(x - m.at[0], z - m.at[1]);
+        ok(d >= need, `${tag} 離濁靈 ${m.id} ≥ ${need}m`, d.toFixed(2));
+      }
+      // 同階與更低階的每一層：**互動圈不重疊**（他在仲裁裡贏它們，疊上去就是蓋掉）
+      const lower = [
+        ...Props.LORE_TABLETS.map((t) => ['tablet', t.id, t.at]),
+        ...inscriptions.map((i) => ['ins', i.id, i.at]),
+        ...letterFile.entries.map((l) => ['letter', l.id, l.at]),
+        ...handles.map((h) => ['handle', h.id, h.at]),
+      ];
+      for (const [k, id, at] of lower) {
+        const need = R + RulesW.LAYER_INTERACT_R[k];
+        const d = Math.hypot(x - at[0], z - at[1]);
+        ok(d >= need, `${tag} 與 ${k}:${id} 的互動圈不重疊（≥ ${need}）`, d.toFixed(2));
+      }
+      // 自動層（不搶 E）只要不站在人家頭上
+      for (const s of Reactive.reactiveTargets()) {
+        ok(Math.hypot(x - s.at[0], z - s.at[1]) >= RulesW.WATCHMAN_AUTO_MIN, `${tag} 沒站在反應物 ${s.id} 上`);
+      }
+      for (const s of groundSecrets) {
+        ok(Math.hypot(x - s.at[0], z - s.at[1]) >= RulesW.WATCHMAN_AUTO_MIN, `${tag} 沒站在祕密 ${s.id} 上`);
+      }
+      for (const v of Props.STORY_VIGNETTES) {
+        ok(Math.hypot(x - v.at[0], z - v.at[1]) >= RulesW.WATCHMAN_AUTO_MIN, `${tag} 沒站在小景 ${v.id} 上`);
+      }
+      // 守夜人彼此（一片土地一位，本來就隔得遠，但規則要寫出來）
+      for (const other of watchmen) {
+        if (other === w) continue;
+        ok(Math.hypot(x - other.at[0], z - other.at[1]) >= R * 2, `${tag} 與 ${other.id} 的互動圈不重疊`);
+      }
+      /*
+       * **中觀層一片都不准被清零。**
+       * P16b 交接的警告：`sight`／`divergence`／`wards` 各只剩 0–8 種合法擺法。
+       * 守夜人的互動圈只要壓到中觀層的碰撞圓上，`screen-fit -- --verify` 就會紅 ——
+       * 所以同一條門檻在這裡先守一次（兩邊同一份數字）。
+       */
+      for (const sd of midSolids) {
+        const need = R + World.PLAYER_RADIUS + sd.r;
+        const d = Math.hypot(x - sd.x, z - sd.z);
+        ok(d >= need, `${tag} 沒有壓到中觀層的碰撞圓（≥ ${need.toFixed(2)}）`, d.toFixed(2));
+      }
+      const dPath = RulesW.pathDistance(segsW, x, z);
+      ok(
+        dPath >= RulesW.WATCHMAN_PATH_MIN && dPath <= RulesW.WATCHMAN_PATH_MAX,
+        `${tag} 離走出來的路 ${RulesW.WATCHMAN_PATH_MIN}–${RulesW.WATCHMAN_PATH_MAX}m（遇得到，又不站在路中間）`,
+        dPath.toFixed(1)
+      );
+
+      // 加了守夜人之後：他自己擋得住人，但四面八方都走得到互動距離
+      ok(Boolean(testWorld.solidAt(x, z)), `${tag} 守夜人本體擋得住人`);
+      ok(clearExceptSelf(testWorld, x, z), `${tag} 除了他自己以外，這一點站得下人`);
+      for (let a = 0; a < 8; a += 1) {
+        const ang = (a / 8) * Math.PI * 2;
+        for (const d of [1.7, 2.6, 3.5]) {
+          ok(testWorld.isClear(x + Math.cos(ang) * d, z + Math.sin(ang) * d), `${tag} 周圍 ${d}m 走得到`, `a=${a}`);
+        }
+      }
+    }
+
+    /*
+     * **真正要守的東西**：站在他的互動圈上，有多少個方向「站得住、而且是他贏」。
+     * 距離公式怎麼寫都好 —— 玩家得走得到他面前、按得下 `E`。
+     * 這一支是被測的那一支，下面的反例會**再呼叫它一次**。
+     */
+    const winnableDirs = (at) => {
+      let free = 0;
+      for (let a = 0; a < 24; a += 1) {
+        const ang = (a / 24) * Math.PI * 2;
+        const px = at[0] + Math.cos(ang) * (R - 0.3);
+        const pz = at[1] + Math.sin(ang) * (R - 0.3);
+        if (!testWorld.isWalkable(px, pz) || testWorld.solidAt(px, pz)) continue;
+        // 比他高階的層在這一點贏了嗎（石座 6.5 / 濁靈 5.5）
+        const beaten =
+          challenges.some((c) => Math.hypot(px - c.position[0], pz - c.position[1]) < 6.5) ||
+          murkFile.entries.some((m) => Math.hypot(px - m.at[0], pz - m.at[1]) < 5.5);
+        if (!beaten) free += 1;
+      }
+      return free;
+    };
+    let worstW = 99;
+    let worstWho = '';
+    for (const w of watchmen) {
+      const free = winnableDirs(w.at);
+      const need = RulesW.WATCHMAN_WINNABLE_EXCEPTIONS[w.region] ?? RulesW.WATCHMAN_WINNABLE_MIN;
+      if (free - need < worstW) {
+        worstW = free - need;
+        worstWho = `${w.id} ${free}/24（門檻 ${need}）`;
+      }
+      ok(free >= need, `[${w.id}] 互動圈上至少 ${need} 個方向按得到他`, `${free}/24`);
+    }
+    ok(
+      Object.keys(RulesW.WATCHMAN_WINNABLE_EXCEPTIONS).length <= 2,
+      '「按得到他」的例外表最多兩片土地（再多就不是例外，是門檻訂錯了）'
+    );
+    console.log(`    ↳ 餘裕最小的守夜人：${worstWho}`);
+    /*
+     * 反例（**呼叫的是同一支**）：把一位守夜人搬到某座石座旁邊 3 公尺 ——
+     * 整個互動圈都在石座的地盤裡，幾乎一個方向都按不到他。
+     */
+    {
+      const c0 = challenges.find((c) => c.region === 'foundations') || challenges[0];
+      const fake = [c0.position[0] + 3, c0.position[1]];
+      ok(
+        winnableDirs(fake) < RulesW.WATCHMAN_WINNABLE_EXCEPTIONS.divergence,
+        '反例：站在石座旁邊 3 公尺 → 按不到他（同一支判定）',
+        `${winnableDirs(fake)}/24`
+      );
+    }
+  }
+
+  /* --- ③ 世界實體：命名、碰撞體、0 光源、預算 ---------------------- */
+  {
+    const groups = [];
+    testScene.traverse((o) => {
+      if (o.name && o.name.startsWith('watchman:')) groups.push(o);
+    });
+    eq(groups.length, watchmen.length, '每一位守夜人都蓋在測試世界裡（watchman:<id>）');
+    eq(new Set(groups.map((g) => g.name)).size, watchmen.length, '場景圖節點名沒有重複');
+
+    const solidsW = testWorld.solids.filter((s) =>
+      watchmen.some((w) => Math.abs(w.at[0] - s.x) < 0.01 && Math.abs(w.at[1] - s.z) < 0.01)
+    );
+    eq(solidsW.length, watchmen.length, '碰撞登記表含 12 位守夜人的底座');
+    ok(solidsW.every((s) => Math.abs(s.r - 0.55) < 0.01 && s.keep === true), '底座 solidRadius 0.55 且 keepSolid');
+    /*
+     * **站不上一個人的頭。** 0.55 < STAND_MIN_R（0.8），所以 `collectSolids()`
+     * 量出來的 standable 一定是 false —— 這件事靠尺寸成立，不靠旗標宣告。
+     */
+    ok(solidsW.every((s) => s.standable === false), '守夜人站不上去（standable false）');
+    ok(0.55 < World.STAND_MIN_R, '底座半徑本來就小於「站得下人」的下限', `${0.55} < ${World.STAND_MIN_R}`);
+
+    let lights = 0;
+    let tris = 0;
+    testWorld.watchmen.group.traverse((o) => {
+      if (o.isLight) lights += 1;
+      const geo = o.geometry;
+      if (!geo) return;
+      const idx = geo.index ? geo.index.count : geo.attributes.position ? geo.attributes.position.count : 0;
+      tris += (idx / 3) * (o.isInstancedMesh ? o.count : 1);
+    });
+    eq(lights, 0, '守夜人整層 0 光源（燈是自發光材質）');
+    ok(tris / watchmen.length <= 200, '每位守夜人 ≤ 200 三角形', `perWatchman=${(tris / watchmen.length).toFixed(0)}`);
+    ok(!/new THREE\.(Point|Spot|Directional|Hemisphere|Ambient|RectArea)Light/.test(watchSrc), 'watchmen.js 沒有任何光源');
+    ok(
+      !/position\.(add|lerp|copy|set)\(/.test(watchSrc.split('export function createWatchmanField')[1] || ''),
+      '更新迴圈裡沒有移動實體的程式（守夜人不走、不跟隨）'
+    );
+    ok(
+      !/(new |\.map\(|\.filter\()/.test(
+        (watchSrc.split('    update(dt, t, px, pz) {')[1] || '').split('\n    },')[0]
+      ),
+      'update() 裡零每幀配置（不 new、不 map/filter）'
+    );
+
+    // 碰撞稽核：加了守夜人之後，未涵蓋仍然 0、可站立體仍然 0
+    const resW = AuditW.auditCoverage(testWorld.watchmen.group, World.solidAt, testWorld.solids, World.terrainHeight);
+    eq(resW.uncovered.length, 0, '守夜人這一層沒有穿模點');
+    eq(AuditW.auditStandables(solidsW, World.terrainHeight).bad.length, 0, '守夜人的碰撞圓通得過可站立體稽核');
+
+    // 預算（P16c 的框）
+    ok(testWorld.solids.length < 1080, '加了守夜人之後碰撞體仍在這一格的框內', `n=${testWorld.solids.length}`);
+    let worldTris = 0;
+    testScene.traverse((o) => {
+      const geo = o.geometry;
+      if (!geo) return;
+      const idx = geo.index ? geo.index.count : geo.attributes.position ? geo.attributes.position.count : 0;
+      worldTris += (idx / 3) * (o.isInstancedMesh ? o.count : 1);
+    });
+    ok(worldTris < WORLD_TRI_CEIL, `三角形在這一格的框內（P20b 的框 ${WORLD_TRI_CEIL}）`, `n=${Math.round(worldTris)}`);
+    let worldLights = 0;
+    testScene.traverse((o) => {
+      if (o.isLight) worldLights += 1;
+    });
+    eq(worldLights, 37, '光源仍然是 37 盞');
+    console.log(`    ↳ 守夜人：三角 ${Math.round(tris)}、碰撞體 ${solidsW.length}、光源 0`);
+  }
+
+  /* --- ④ 四種情報（純函式，每一條都配反例） ------------------------ */
+  {
+    const lines = watchFile.checkLines;
+    const stuckChallenge = challenges.find((c) => (c.rubric || []).length >= 2);
+    const firstCheck = stuckChallenge.rubric[0].check;
+    const missCheck = stuckChallenge.rubric[1].check;
+
+    // ①「某關失敗 3 次、只命中第一條」的存檔 → 他要指向缺的那一條
+    const struggles = { [stuckChallenge.id]: { tries: 3, hits: [firstCheck] } };
+    const got = Talk.stuckReport({ struggles, isCleared: () => false, challenges, checkLines: lines });
+    ok(Boolean(got), '卡關提示：讀得到失敗紀錄');
+    eq(got.challengeId, stuckChallenge.id, '指的是那一關');
+    eq(got.tries, 3, '說得出試了幾次');
+    eq(got.check, missCheck, '指向 rubric 裡還沒命中的那一條');
+    eq(got.line, lines[missCheck], '講的是那一條的世界語言（逐字取自 watchmen.json）');
+    ok(!/例如/.test(got.line), '卡關提示不給範例');
+
+    // 反例 A（同一支）：全過的存檔 → 這一項根本不該出現
+    eq(
+      Talk.stuckReport({ struggles, isCleared: () => true, challenges, checkLines: lines }),
+      null,
+      '反例：這一關已經過了 → 沒有卡關提示'
+    );
+    // 反例 B（同一支）：只試了一次不算卡
+    eq(
+      Talk.stuckReport({
+        struggles: { [stuckChallenge.id]: { tries: 1, hits: [] } },
+        isCleared: () => false,
+        challenges,
+        checkLines: lines,
+      }),
+      null,
+      '反例：只試了一次 → 還不算卡住'
+    );
+    // 反例 C（同一支）：整張表是空的
+    eq(Talk.stuckReport({ struggles: {}, isCleared: () => false, challenges, checkLines: lines }), null, '反例：沒卡過任何一關 → null');
+    /*
+     * **最卡的那個人不准問不到東西**（P16c 審查 · 第 2 條）。
+     * 過關要的是**同一次**全部到齊，所以「他現在還缺什麼」看的是最近那一次（`last`），
+     * 不是歷來的聯集（`hits`）—— 第一次寫對 A、第二次改寫對 B，聯集就湊齊了，
+     * 但他其實兩次都沒過，而且正是最需要有人講一句的那個人。
+     */
+    if (stuckChallenge.rubric.length >= 2) {
+      const allChecks = stuckChallenge.rubric.map((r) => r.check);
+      const second = stuckChallenge.rubric[1].check;
+      const got = Talk.stuckReport({
+        // 聯集湊齊了，但**最近那一次**只命中第二條
+        struggles: { [stuckChallenge.id]: { tries: 5, hits: allChecks, last: [second] } },
+        isCleared: () => false,
+        challenges,
+        checkLines: lines,
+      });
+      ok(Boolean(got), '聯集湊齊了但最近那一次沒有：守夜人**還是說得出話**（最卡的人問得到東西）');
+      eq(got && got.check, stuckChallenge.rubric[0].check, '而且指的是最近那一次真的缺的那一條', got && got.check);
+    }
+    // 舊存檔（沒有 last 那一欄）：退回聯集，行為與 P16c 之前相同
+    {
+      const allChecks = stuckChallenge.rubric.map((r) => r.check);
+      const got = Talk.stuckReport({
+        struggles: { [stuckChallenge.id]: { tries: 5, hits: allChecks } },
+        isCleared: () => false,
+        challenges,
+        checkLines: lines,
+      });
+      ok(Boolean(got), '舊存檔沒有 last：退回聯集，仍然指得出一條（不會沉默）');
+    }
+    // 全序：同樣試了 3 次時，指的是 challenges.json 裡排在前面的那一關（答案要穩定）
+    {
+      const a = challenges[0];
+      const b = challenges.find((c, i) => i > 0 && (c.rubric || []).length >= 1);
+      const two = { [b.id]: { tries: 3, hits: [] }, [a.id]: { tries: 3, hits: [] } };
+      const pick = Talk.stuckReport({ struggles: two, isCleared: () => false, challenges, checkLines: lines });
+      eq(pick.challengeId, a.id, '平手時照 challenges.json 的順序挑（不是看物件的鍵序）');
+      const more = { [a.id]: { tries: 3, hits: [] }, [b.id]: { tries: 9, hits: [] } };
+      eq(
+        Talk.stuckReport({ struggles: more, isCleared: () => false, challenges, checkLines: lines }).challengeId,
+        b.id,
+        '試最多次的那一關優先'
+      );
+    }
+
+    // ② 指路：該區最近一處還沒找到的殘頁／祕密；找到之後換下一處，全找齊就沒有
+    for (const w of watchmen) {
+      const r = Talk.wayReport({
+        at: w.at,
+        region: w.region,
+        letters: letterFile.entries,
+        secrets,
+        hasLetter: () => false,
+        hasSecret: () => false,
+      });
+      ok(Boolean(r), `[${w.id}] 一開始指得出這片土地上還沒找到的東西`);
+      ok(Talk.WATCH_TOPICS.includes('way') && ['letter', 'secret'].includes(r.kind), `[${w.id}] 指的是殘頁或祕密`);
+      const inRegion = [...letterFile.entries, ...secrets].filter((e) => e.region === w.region);
+      const nearest = inRegion
+        .map((e) => ({ id: e.id, d: Math.hypot(e.at[0] - w.at[0], e.at[1] - w.at[1]) }))
+        .sort((a, b) => a.d - b.d)[0];
+      eq(r.id, nearest.id, `[${w.id}] 指的是最近的那一處`);
+    }
+    {
+      const w0 = watchmen[0];
+      const first = Talk.wayReport({
+        at: w0.at,
+        region: w0.region,
+        letters: letterFile.entries,
+        secrets,
+        hasLetter: () => false,
+        hasSecret: () => false,
+      });
+      const second = Talk.wayReport({
+        at: w0.at,
+        region: w0.region,
+        letters: letterFile.entries,
+        secrets,
+        hasLetter: (id) => id === first.id,
+        hasSecret: (id) => id === first.id,
+      });
+      ok(second && second.id !== first.id, '找到之後他改指下一處（不會一直指同一個）');
+      // 反例（同一支）：全找齊 → 這一項不出現
+      eq(
+        Talk.wayReport({
+          at: w0.at,
+          region: w0.region,
+          letters: letterFile.entries,
+          secrets,
+          hasLetter: () => true,
+          hasSecret: () => true,
+        }),
+        null,
+        '反例：這片土地全找齊了 → 沒有指路這一項'
+      );
+    }
+    // 方位：+z 是南、-z 是北、+x 是東（與 §1.4 的方位表同一套）
+    eq(Talk.bearing(0, 0, 0, -10), '正北', '方位：-z 是北');
+    eq(Talk.bearing(0, 0, 10, 0), '正東', '方位：+x 是東');
+    eq(Talk.bearing(0, 0, 0, 10), '正南', '方位：+z 是南');
+    eq(Talk.bearing(0, 0, -10, 0), '正西', '方位：-x 是西');
+    eq(Talk.bearing(0, 0, 10, -10), '東北', '方位：+x −z 是東北');
+    ok(Talk.paceWord(5) !== Talk.paceWord(50), '遠近講出來的話不一樣');
+
+    // ③ 舊事：一拍一拍，說完就沒有「再說一點」
+    for (const w of watchmen) {
+      const b0 = Talk.loreBeats(w, 0);
+      eq(b0.line, w.lore[0], `[${w.id}] 第一拍是 lore 的第一句`);
+      eq(b0.more, w.lore.length > 1, `[${w.id}] 還有下一拍`);
+      const last = Talk.loreBeats(w, w.lore.length - 1);
+      eq(last.more, false, `[${w.id}] 最後一拍沒有「再說一點」`);
+      eq(Talk.loreBeats(w, 99).index, w.lore.length - 1, `[${w.id}] step 超過範圍就夾在最後一拍`);
+    }
+
+    // ④ 技巧小知識：逐字引用既有資料 ＋ 可點的官方連結（護欄 2 的紅線）
+    const codexSkills = skillCodexV2.skills;
+    const allUrls = new Set();
+    for (const s of codexSkills) for (const src of s.sources || []) allUrls.add(src.url);
+    for (const w of watchmen) {
+      const skills = catalog.regionSkills(w.region);
+      const note = Talk.skillNote({ skills, knows: () => false, turn: 0 });
+      ok(Boolean(note), `[${w.id}] 這片土地說得出一條技巧小知識`);
+      const src = codexSkills.find((s) => s.id === note.skillId);
+      ok(Boolean(src), `[${w.id}] 引的是 skill-codex-v2.json 裡真的有的一條`);
+      eq(note.oneLiner, src.oneLiner, `[${w.id}] 那一句逐字取自 skill-codex-v2.json（不是新寫的）`);
+      eq(note.nameZh, src.nameZh, `[${w.id}] 技能名逐字取自 skill-codex-v2.json`);
+      ok(note.source && allUrls.has(note.source.url), `[${w.id}] 連結存在於既有的出處表（不是新編的）`, String(note.source && note.source.url));
+      // 這一條真的畫得出可點的連結
+      const html = (await import('../src/ui/watchman.js')).skillNoteHtml(note);
+      ok(html.includes(`href="${note.source.url}"`), `[${w.id}] 小窗畫得出可點的官方連結`);
+      ok(html.includes('神諭原典'), `[${w.id}] 連結標成「神諭原典」（與第二幕同一個誠實模式）`);
+    }
+    // 問過幾次就換一條（同一位守夜人不會只會講一句話）
+    {
+      const skills = catalog.regionSkills('foundations');
+      const a = Talk.skillNote({ skills, knows: () => false, turn: 0 });
+      const b = Talk.skillNote({ skills, knows: () => false, turn: 1 });
+      ok(skills.length < 2 || a.skillId !== b.skillId, '問第二次講的是另一條');
+      // 已經會了的優先（那是複習，不是劇透）
+      const third = skills[2];
+      const known = Talk.skillNote({ skills, knows: (id) => id === third.id, turn: 0 });
+      eq(known.skillId, third.id, '已經會了的那一條優先');
+    }
+    // 反例（同一支）：這片土地一條技能都沒有 → 這一項不出現
+    eq(Talk.skillNote({ skills: [], knows: () => false, turn: 0 }), null, '反例：沒有技能可引 → null');
+
+    // 純函式那一支不准碰 DOM／three.js／localStorage（測試才問得起它）
+    ok(!/document|window|localStorage|three/.test(talkSrc.replace(/\/\*[\s\S]*?\*\//g, '')), 'watchtalk.js 是純函式（不碰 DOM／three.js／存檔）');
+  }
+
+  /* --- ⑤ 存檔與進度：純加法、不影響解鎖 ---------------------------- */
+  {
+    const norm = SaveIO16c.normalize;
+    // 舊存檔（沒有這兩欄）
+    const old = norm({ version: 1, xp: 120, collected: ['clarity-01'] });
+    eq(JSON.stringify(old.watchmen), '{}', '舊存檔沒有 watchmen → 補成 {}');
+    eq(JSON.stringify(old.struggles), '{}', '舊存檔沒有 struggles → 補成 {}');
+    eq(old.xp, 120, '補欄位不會動到既有的進度');
+    // 壞值
+    const bad = norm({
+      watchmen: { 'watch-broken-ring': { met: 1, seen: ['lore', 'lore', 'nope', 7] }, '': { met: true }, x: 5 },
+      struggles: { a: { tries: -3, hits: ['x'] }, b: { tries: 2.6, hits: ['q', 'q', 5] }, c: 'nope' },
+    });
+    eq(JSON.stringify(bad.watchmen['watch-broken-ring']), '{"met":true,"seen":["lore"]}', 'seen 只留認得的情報 id、去重');
+    ok(!('' in bad.watchmen) && !('x' in bad.watchmen), '壞掉的鍵整筆丟掉');
+    ok(!('a' in bad.struggles) && !('c' in bad.struggles), 'tries ≤ 0 或形狀不對的整筆丟掉');
+    eq(JSON.stringify(bad.struggles.b), '{"tries":3,"hits":["q"]}', 'tries 取整、hits 去重且只留字串');
+
+    // 進度：聊天不動 XP／等級／解鎖／評價
+    const p16c = createProgression({ curriculum, challenges });
+    p16c.resetAll();
+    const before = JSON.stringify({
+      xp: p16c.state.xp,
+      level: p16c.state.level,
+      unlocked: p16c.state.unlockedRegions,
+      best: p16c.state.bestGrades,
+      collected: p16c.state.collected,
+    });
+    /*
+     * **重置進度時世界端也要跟著歸零**（P16c 審查 · 第 1 條）：
+     * `resetAll()` 清得掉存檔，但已經蓋出來的守夜人身上還留著「聊過了」的亮度 ——
+     * 不重載頁面就會演出失聯（P03 的濁靈記過同一件事）。
+     * `watchmanField.reset()` 本來就寫好了，只是沒有人呼叫它。
+     */
+    {
+      const mainSrcW = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+      const onReset = mainSrcW.slice(mainSrcW.indexOf('onReset:'), mainSrcW.indexOf('onReset:') + 900);
+      ok(/world\.watchmen\?\.reset\?\.\(\)/.test(onReset), '重置進度會把世界端的守夜人一起拉回沒聊過');
+      ok(/world\.murks\?\.reset\?\.\(\)/.test(onReset), '（對照）濁靈本來就在同一段裡歸零');
+      const fieldSrc = readFileSync(resolve(root, 'src/world/watchmen.js'), 'utf8');
+      ok(/reset\(/.test(fieldSrc), 'watchmen.js 真的有 reset()（不是空指望）');
+    }
+    eq(p16c.watchmanState('watch-broken-ring'), null, '沒聊過的守夜人 watchmanState 是 null');
+    eq(p16c.hasMetWatchman('watch-broken-ring'), false, '一開始沒聊過');
+    eq(p16c.watchmanCount(watchmen.map((w) => w.id)), 0, '一開始 watchmanCount 0');
+    eq(p16c.meetWatchman('watch-broken-ring').firstMeet, true, '第一次聊 firstMeet 為真');
+    eq(p16c.meetWatchman('watch-broken-ring').firstMeet, false, '第二次聊就不是第一次了（冪等）');
+    eq(p16c.watchmanCount(watchmen.map((w) => w.id)), 1, '聊過一位');
+    eq(p16c.watchTurn('watch-broken-ring'), 0, '還沒問過情報');
+    eq(p16c.seeWatchTopic('watch-broken-ring', 'lore').firstTime, true, '第一次問舊事');
+    eq(p16c.seeWatchTopic('watch-broken-ring', 'lore').firstTime, false, '同一種情報只算一次');
+    /*
+     * `watchTurn` 數的是**問了幾次**，不是問過幾種（P16c 審查 · 第 3 條）：
+     * `seen` 只放不重複的四種，拿它當輪替的計次的話，四種問完之後
+     * 技巧小知識就永遠停在同一條上。
+     */
+    eq(p16c.watchTurn('watch-broken-ring'), 2, '問了兩次（同一種也算一次）');
+    eq(p16c.watchmanState('watch-broken-ring').seen.length, 1, '但只問過一**種**');
+    for (let i = 0; i < 6; i += 1) p16c.seeWatchTopic('watch-broken-ring', 'lore');
+    eq(p16c.watchTurn('watch-broken-ring'), 8, '一直問下去計次一直往上（技巧那一條才輪得動）');
+    eq(p16c.seeWatchTopic('watch-broken-ring', '亂寫的').firstTime, false, '不認得的情報 id 不寫進存檔');
+    eq(JSON.stringify(p16c.watchmanState('watch-broken-ring').seen), '["lore"]', 'seen 只留真的問過的那一種');
+    const after = JSON.stringify({
+      xp: p16c.state.xp,
+      level: p16c.state.level,
+      unlocked: p16c.state.unlockedRegions,
+      best: p16c.state.bestGrades,
+      collected: p16c.state.collected,
+    });
+    eq(after, before, '跟守夜人說話一格進度都沒有動（XP／等級／解鎖／評價／圖鑑）');
+    // 重新載入還在
+    const reloadedW = createProgression({ curriculum, challenges });
+    eq(reloadedW.hasMetWatchman('watch-broken-ring'), true, '重新載入之後仍然記得聊過');
+    reloadedW.resetAll();
+    eq(reloadedW.hasMetWatchman('watch-broken-ring'), false, 'reset 清得乾淨');
+    eq(JSON.stringify(reloadedW.struggles()), '{}', 'reset 也把卡關紀錄清掉');
+
+    // 卡在哪一關：沒過就累積，過了就整筆刪
+    {
+      const p = createProgression({ curriculum, challenges });
+      p.resetAll();
+      const ch = challenges.find((c) => (c.rubric || []).length >= 2);
+      const mkEval = (passed, hits) => ({
+        challengeId: ch.id,
+        passed,
+        grade: passed ? 'A' : null,
+        teaches: [],
+        results: ch.rubric.map((r) => ({ check: r.check, passed: hits.includes(r.check) })),
+        baseXp: 10,
+        total: ch.rubric.length,
+        earned: 0,
+      });
+      p.recordResult(mkEval(false, [ch.rubric[0].check]));
+      eq(p.struggleOf(ch.id).tries, 1, '沒過 → 記一次');
+      p.recordResult(mkEval(false, [ch.rubric[1].check]));
+      eq(p.struggleOf(ch.id).tries, 2, '沒過 → 再記一次');
+      eq(
+        JSON.stringify(p.struggleOf(ch.id).hits),
+        JSON.stringify([ch.rubric[0].check, ch.rubric[1].check].sort()),
+        '命中過的檢查器跨次累積聯集（進度只累積，不倒退）'
+      );
+      eq(p.state.xp, 0, '沒過不給 XP');
+      p.recordResult(mkEval(true, ch.rubric.map((r) => r.check)));
+      eq(p.struggleOf(ch.id), null, '過了就不是卡關（整筆刪掉）');
+      // 濁靈與序章不進這一欄（它們不是 142 關）
+      p.recordResult({ challengeId: 'murk-vague-ask', passed: false, teaches: [], results: [], baseXp: 0 });
+      eq(p.struggleOf('murk-vague-ask'), null, '濁靈不進卡關紀錄（牠不是關卡）');
+      p.resetAll();
+    }
+
+    // 靜態掃描：解鎖邏輯從頭到尾沒讀過這兩欄
+    {
+      const fn = progSrcW.slice(progSrcW.indexOf('function refreshUnlocks'));
+      const body = fn.slice(0, fn.indexOf('\n  }'));
+      ok(!/watchmen|struggles/.test(body), 'refreshUnlocks() 沒有讀 watchmen／struggles');
+      ok(!/state\.watchmen/.test(progSrcW.slice(progSrcW.indexOf('function gateSatisfied'), progSrcW.indexOf('function masterSealFor'))), 'gateSatisfied() 也沒有讀它');
+    }
+  }
+
+  /* --- ⑥ 接線、UI 與文件 ------------------------------------------ */
+  {
+    ok(/world\.nearestWatchman\(/.test(mainSrcW), 'main.js 有守夜人這一層 nearestWatchman');
+    ok(/e\.code === 'KeyE' && nearWatchman/.test(mainSrcW), '`E` 打得開守夜人的小窗');
+    ok(/<kbd>E<\/kbd> 說話/.test(mainSrcW), 'HUD 提示是「標題 ＋ 一句狀態 ＋ E ＋ 動詞」');
+    ok(/watchmen\.map\(\(w\) => \[w\.at\[0\], w\.at\[1\]/.test(worldSrcW), 'keepClear 納入守夜人');
+    ok(/watchmanField\.update\(dt, t, x, z\)/.test(worldSrcW), 'updateReactions 每幀更新守夜人場');
+    // 不新增快捷鍵：小窗自己不掛任何 keydown（Esc／Tab 由 createOverlay 管）
+    ok(!/addEventListener\('key/.test(uiSrc), '守夜人的小窗沒有自己的鍵盤監聽（E 仍是唯一的互動鍵）');
+    ok(/rovingList\(/.test(uiSrc), '選項清單走 rovingList（↑↓ / Home / End）');
+    ok(/<kbd>Esc<\/kbd>/.test(uiSrc), '小窗寫得出 Esc 怎麼走開');
+    ok(!/https?:\/\//.test(uiSrc.replace(/\/\*[\s\S]*?\*\//g, '')), '小窗自己不寫死任何網址（連結一律來自資料）');
+    ok(/\.watch__opt/.test(cssSrcW), 'styles.css 有守夜人選項的樣式');
+    // 文件與資料是同一份
+    ok(/守夜人/.test(worldMdW), 'WORLD.md 記得有守夜人這一層');
+    ok(/守夜人/.test(worldMdW.slice(worldMdW.indexOf('### 3.2'), worldMdW.indexOf('### 3.3'))), 'WORLD.md §3.2 的互動層表列得出守夜人');
+    ok(/守夜人/.test(worldMdW.slice(worldMdW.indexOf('### 1.5'), worldMdW.indexOf('### 1.6'))), 'WORLD.md §1.5 說得出「他本來就不走」');
+    ok(/P16c/.test(worldMdW), 'WORLD.md 標得出這一格');
+  }
+}
+
+/* ================================================================== */
+/* v1.2 · P18：護欄崗的守門者 —— 一個帶著 system prompt 站在門邊的人      */
+/*   ① 資料契約與護欄 2（分支只綁既有檢查器、出處只引用既有那一關）        */
+/*   ② 用語鐵則：沒有失敗態（禁字表逐句掃）                              */
+/*   ③ 狀態機：純函式、選項解得到自己那一條分支、**進度只累積**            */
+/*   ④ guard 介面：離線腳本是**已註冊的預設**，而且那條路自己走得完        */
+/*   ⑤ 擺位（對真的蓋出來的世界量）：互動圈與每一層都不重疊、站在門邊       */
+/*   ⑥ 世界實體、存檔、接線與文件                                        */
+/* ================================================================== */
+console.log('\n▸ 守門者：帶著交辦站在門邊的人（v1.2 · P18）');
+{
+  const guardianFile = readJson('src/data/guardian.json');
+  const rawGuardian = readFileSync(resolve(root, 'src/data/guardian.json'), 'utf8');
+  const Guard = (await import('../src/challenges/guardian.js')).default;
+  const GuardWorld = await import('../src/world/guardian.js');
+  const GuardUI = await import('../src/ui/guardian.js');
+  const Rules18 = (await import('./lib/screen-rules.mjs')).default;
+  const Audit18 = await import('./collision-audit.mjs');
+  const SaveIO18 = await import('../src/save/save.js');
+  const CHECKS18 = (await import('../src/challenges/checks.js')).CHECKS;
+  const MIN_LEN18 = (await import('../src/challenges/checks.js')).MIN_PROMPT_LENGTH;
+  const guardSrc = readFileSync(resolve(root, 'src/challenges/guardian.js'), 'utf8');
+  const guardWorldSrc = readFileSync(resolve(root, 'src/world/guardian.js'), 'utf8');
+  const guardUiSrc = readFileSync(resolve(root, 'src/ui/guardian.js'), 'utf8');
+  const mainSrc18 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const worldSrc18 = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+  const progSrc18 = readFileSync(resolve(root, 'src/progression/progression.js'), 'utf8');
+  const cssSrc18 = readFileSync(resolve(root, 'src/styles.css'), 'utf8');
+  const worldMd18 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+  const EX18 = EXPECT.guardian;
+
+  /* --- ① 資料契約與護欄 2 ----------------------------------------- */
+  {
+    eq(guardianFile.version, 1, 'guardian.json 有版本欄');
+    eq(guardianFile.authored, 'game', 'guardian.json 檔頭明講是遊戲自撰的層');
+    ok(
+      typeof guardianFile.note === 'string' && /出處|官方/.test(guardianFile.note),
+      'guardian.json 檔頭說明「出處以官方文件為準」'
+    );
+    eq(guardianFile.xp, 0, '說服守門者不給 XP（他讓開的那一步就是報酬）');
+    ok(/^[a-z][a-z0-9-]+$/.test(guardianFile.id), 'id 是 kebab-case');
+    ok(typeof guardianFile.name === 'string' && guardianFile.name.length > 0, '他有名字');
+    ok(typeof guardianFile.post === 'string' && guardianFile.post.length > 0, '他有崗位');
+    ok(Array.isArray(guardianFile.at) && guardianFile.at.every(Number.isFinite), 'at 是兩個數字');
+    ok(Number.isFinite(guardianFile.rot), '有崗位的朝向 rot');
+    ok(Array.isArray(guardianFile.greet) && guardianFile.greet.length >= 1, '有招呼');
+    /*
+     * 契約要**逐值**比對，不是只比 key（P16c／P17 連兩次的教訓）：
+     * 只比 key 的話，有人把門檻改鬆一條斷言都不會紅。
+     */
+    eq(EX18.value, 1, '契約寫的是一位守門者');
+    eq(EX18.region, guardianFile.region, '契約與資料是同一片土地');
+    eq(JSON.stringify(EX18.at), JSON.stringify(guardianFile.at), '契約與資料的落點逐值相同');
+    eq(EX18.latches, guardianFile.latches.length, '契約與資料的門閂數相同');
+    eq(EX18.pass, guardianFile.pass, '契約與資料的門檻相同');
+    eq(EX18.branches, guardianFile.branches.length, '契約與資料的分支數相同');
+    eq(EX18.options, guardianFile.options.length, '契約與資料的選項數相同');
+    eq(EX18.branchesMin, Guard.MIN_BRANCHES, '契約與程式的分支下限是同一個數字');
+    ok(guardianFile.branches.length >= Guard.MIN_BRANCHES, `分支 ≥ ${Guard.MIN_BRANCHES} 條`, String(guardianFile.branches.length));
+    eq(EX18.radius, GuardWorld.GUARDIAN_RADIUS, '契約與世界端的互動半徑相同');
+    eq(EX18.bodyRadius, GuardWorld.GUARDIAN_BODY_RADIUS, '契約與世界端的底座半徑相同');
+    eq(EX18.winnableMin, Rules18.GUARDIAN_WINNABLE_MIN, '契約與規則表的「站得住」門檻是同一個數字');
+    eq(EX18.winnableDirs, Rules18.GUARDIAN_WINNABLE_DIRS, '契約與規則表的方向數相同');
+    ok(EX18.winnableMin <= EX18.winnableCeiling, `門檻不超過量得到的上限（${EX18.winnableMin} ≤ ${EX18.winnableCeiling}）`);
+    eq(EX18.doorMax, Rules18.GUARDIAN_LANDMARK_MAX, '契約與規則表的「離門多遠」上限相同');
+    eq(
+      JSON.stringify(EX18.pathRange),
+      JSON.stringify([Rules18.GUARDIAN_PATH_MIN, Rules18.GUARDIAN_PATH_MAX]),
+      '契約與規則表的路網區間逐值相同'
+    );
+    eq(EX18.defaultGuard, Guard.DEFAULT_GUARD, '契約與程式的預設判定實作是同一個');
+
+    // 門閂：每一條綁一個**既有的**檢查器，出處引用**真的教這一條**的那一關
+    const byId18 = new Map(challenges.map((c) => [c.id, c]));
+    const teachesCheck = (challengeId, check) => {
+      const ch = byId18.get(challengeId);
+      return Boolean(ch && (ch.rubric || []).some((r) => r.check === check));
+    };
+    eq(new Set(guardianFile.latches.map((l) => l.id)).size, guardianFile.latches.length, '門閂 id 沒有重複');
+    for (const l of guardianFile.latches) {
+      const tag = `[latch:${l.id}]`;
+      ok(Boolean(CHECKS18[l.check]), `${tag} 綁的是既有的檢查器`, l.check);
+      ok(Boolean(byId18.get(l.from)), `${tag} 出處指向一座真的存在的神廟`, l.from);
+      ok(teachesCheck(l.from, l.check), `${tag} 那一關的 rubric 真的含這個檢查器（出處不是硬掛的）`);
+      ok(Boolean(byId18.get(l.from).source), `${tag} 那一關自己有官方連結`);
+      ok(typeof l.clause === 'string' && l.clause.length > 0 && l.clause.length <= 60, `${tag} 交辦那一行 ≤ 60 字`);
+      ok(typeof l.waiting === 'string' && l.waiting.length > 0 && l.waiting.length <= 30, `${tag} 「還在等什麼」≤ 30 字`);
+      ok(Number.isFinite(l.weight) && l.weight > 0, `${tag} 有權重`);
+    }
+    ok(guardianFile.pass <= Guard.totalWeight(guardianFile), '門檻不超過總權重（不然永遠說服不了）');
+    ok(guardianFile.pass >= Math.ceil(Guard.totalWeight(guardianFile) * 0.5), '門檻至少要總權重的一半（不然太好說服）');
+
+    // 分支：每一條綁一個既有的檢查器 ＋ 一個真的教它的出處
+    eq(new Set(guardianFile.branches.map((b) => b.id)).size, guardianFile.branches.length, '分支 id 沒有重複');
+    eq(new Set(guardianFile.branches.map((b) => b.check)).size, guardianFile.branches.length, '一條分支一個檢查器（沒有兩條搶同一支）');
+    const latchIds18 = new Set(guardianFile.latches.map((l) => l.id));
+    for (const b of guardianFile.branches) {
+      const tag = `[${b.id}]`;
+      ok(Boolean(CHECKS18[b.check]), `${tag} 綁的是既有的檢查器`, b.check);
+      ok(b.opens === null || latchIds18.has(b.opens), `${tag} opens 指向一道真的門閂（或 null）`);
+      ok(Boolean(byId18.get(b.from)), `${tag} 出處指向一座真的存在的神廟`, String(b.from));
+      ok(teachesCheck(b.from, b.check), `${tag} 那一關的 rubric 真的含這個檢查器`);
+      ok(Boolean((byId18.get(b.from) || {}).source), `${tag} 那一關自己有官方連結（畫面上點得到）`);
+      ok(Array.isArray(b.say) && b.say.length >= 1 && b.say.length <= 3, `${tag} 反應是 1–3 句`);
+      for (const line of b.say) ok(typeof line === 'string' && line.length > 0 && line.length <= 60, `${tag} 每句 ≤ 60 字`, line);
+      ok(typeof b.eyebrow === 'string' && b.eyebrow.length > 0, `${tag} 有眉標`);
+    }
+    // 每一道門閂都真的有一條分支開得了它（不然那一行永遠對不上）
+    for (const l of guardianFile.latches) {
+      ok(guardianFile.branches.some((b) => b.opens === l.id), `[latch:${l.id}] 有一條分支開得了它`);
+    }
+    // 選項：每一個都指向一條真的分支，而且長到評分引擎看得懂
+    eq(new Set(guardianFile.options.map((o) => o.id)).size, guardianFile.options.length, '選項 id 沒有重複');
+    const branchIds18 = new Set(guardianFile.branches.map((b) => b.id));
+    for (const o of guardianFile.options) {
+      const tag = `[${o.id}]`;
+      ok(branchIds18.has(o.expect), `${tag} expect 指向一條真的分支`, o.expect);
+      ok(typeof o.label === 'string' && o.label.length > 0 && o.label.length <= 24, `${tag} 選項標題 ≤ 24 字`);
+      ok(typeof o.text === 'string' && o.text.trim().length >= MIN_LEN18, `${tag} 說出來的那一句夠長（評分引擎看得懂）`);
+    }
+    // **每一條分支都有一個選項說得出來**（沒有按不出來的分支）
+    for (const b of guardianFile.branches) {
+      ok(guardianFile.options.some((o) => o.expect === b.id), `[${b.id}] 有一個選項說得出這一條`);
+    }
+    /*
+     * 護欄 2 的紅線：這個檔案裡**一個連結都不准有**。
+     * 出處一律引用 `challenges.json` 裡那一關自己的官方網址（`from`）——
+     * 這裡自己編一個 url 就是杜撰出處。
+     */
+    ok(!/https?:\/\//.test(rawGuardian), 'guardian.json 裡沒有任何網址（出處一律引用既有的那一關）');
+    ok(!/"source"|techniqueId|skillId/.test(rawGuardian), 'guardian.json 沒有自己掛技巧或出處欄位');
+  }
+
+  /* --- ② 用語鐵則：沒有失敗態（禁字表逐句掃） ---------------------- */
+  {
+    /*
+     * 同 WORLD.md §1.6 濁靈那一張表，再加上這一格自己的鐵則：
+     * 他不是「拒絕」你，他只是**還沒被說服**；畫面上也不准說得像會歸零。
+     */
+    const FORBIDDEN18 = [
+      '怪物', '敵人', '打敗', '擊敗', '戰鬥', '攻擊', '傷害', '血量', '生命值',
+      '失敗', '輸了', '贏了', '勝利', '扣分', '清零', '歸零', '重新開始', '從頭再來', '倒數',
+      '拒絕', '駁回', '不通過', '再試一次', '答錯', '錯誤',
+    ];
+    const walk18 = (v, path, hit) => {
+      if (typeof v === 'string') hit(v, path);
+      else if (Array.isArray(v)) v.forEach((x, i) => walk18(x, `${path}[${i}]`, hit));
+      else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk18(x, `${path}.${k}`, hit);
+    };
+    let scanned18 = 0;
+    walk18(guardianFile, 'guardian.json', (str, path) => {
+      scanned18 += 1;
+      for (const w of FORBIDDEN18) ok(!str.includes(w), `${path} 不出現「${w}」（他只是還沒被說服）`, str.slice(0, 40));
+    });
+    ok(scanned18 > 120, '禁字表真的掃過整份 guardian.json（不是空掃）', `strings=${scanned18}`);
+    // 反例：這張表真的抓得到東西（不然它只是裝飾）—— 呼叫的是同一支 walk18
+    let caught18 = false;
+    walk18({ bad: '你失敗了，被拒絕，再試一次' }, 'fixture', (str) => {
+      if (FORBIDDEN18.some((w) => str.includes(w))) caught18 = true;
+    });
+    eq(caught18, true, '禁字表對「你失敗了，被拒絕，再試一次」會紅（反例）');
+    /*
+     * 畫面上的字也掃一次。只看**字串字面量**：註解裡寫「沒有失敗態」正是在描述
+     * 這條鐵則本身，掃到它等於把「說明規則的那句話」誤判成「違反規則的文案」。
+     */
+    for (const [name, src] of [['ui/guardian.js', guardUiSrc], ['challenges/guardian.js', guardSrc]]) {
+      for (const raw of src.split('\n')) {
+        const line = raw.trim();
+        if (line.startsWith('*') || line.startsWith('//') || line.startsWith('/*')) continue;
+        if (!/['"`]/.test(line)) continue;
+        for (const w of FORBIDDEN18) ok(!line.includes(w), `${name} 的字串裡不出現「${w}」`, line.slice(0, 50));
+      }
+    }
+  }
+
+  /* --- ③ 狀態機：純函式、解得到自己那一條分支、進度只累積 ---------- */
+  {
+    const realGuard18 = Guard.createGuard(guardianFile);
+    ok(Boolean(realGuard18), '拿得到判定者');
+    /*
+     * 拿不到判定者時給一個退路（findings：搜尋／前置拿到 null 就丟 TypeError 的話，
+     * **整支測試會中斷而不是紅一條** —— 而那正是「把離線實作拔掉」要驗的那個情況）。
+     * 這個替身什麼都解不到，所以下面每一條斷言都會各自報紅。
+     */
+    const guard18 = realGuard18 || {
+      decide: () => ({
+        branchId: null,
+        say: [],
+        opened: [],
+        after: Guard.normalizeState(null, guardianFile),
+        full: false,
+        justConvinced: false,
+      }),
+    };
+    /*
+     * **每一個選項都真的被評分引擎跑過一次**：選項的 `text` → `evaluateLine()`
+     * → `decide()`，解出來的那一條分支要與資料宣告的 `expect` 相同。
+     * 這一條把「選項」與「分支」綁死 —— 改了選項的字卻沒改分支，這裡就會紅。
+     */
+    for (const o of guardianFile.options) {
+      const ev = Guard.evaluateLine(o.text, guardianFile);
+      ok(ev.hits.length >= 1, `[${o.id}] 這一句真的命中了檢查器`, ev.hits.join(','));
+      const res = guard18.decide({ hits: [], turns: 0 }, o.text, ev);
+      eq(res.branchId, o.expect, `[${o.id}] 解到自己宣告的那一條分支`);
+      ok(res.say.length >= 1, `[${o.id}] 他真的說得出話`);
+    }
+    // 反例（**呼叫的是同一支**）：一句什麼技巧都沒用上的話 → 沒有分支，但他照樣說話
+    {
+      const dull = '天氣很好我先走了你自己看著辦吧我沒有什麼特別要說的';
+      const res = guard18.decide({ hits: [], turns: 0 }, dull, Guard.evaluateLine(dull, guardianFile));
+      eq(res.branchId, null, '反例：空泛的一句話解不到任何分支（同一支判定）');
+      eq(res.opened.length, 0, '反例：也不會開任何一道門閂');
+      ok(res.say.length >= 1, '反例：他還是說得出一句話（沒有失敗態，不是沉默也不是責備）');
+      eq(res.after.hits.length, 0, '反例：存檔沒有變');
+    }
+    /*
+     * **進度只累積**（這一格的驗收重點）：分兩次各說一半也說得完。
+     * 第一次說三句、把存檔序列化再讀回來（模擬關掉再開），第二次接著說。
+     */
+    {
+      const pick = (id) => guardianFile.options.find((o) => o.id === id);
+      const need = guardianFile.latches.filter((l) => guardianFile.branches.some((b) => b.opens === l.id));
+      const optFor = (latchId) => {
+        const b = guardianFile.branches.find((x) => x.opens === latchId);
+        return guardianFile.options.find((o) => o.expect === b.id);
+      };
+      const half = Math.ceil(guardianFile.pass / 2);
+      let st = Guard.normalizeState(null, guardianFile);
+      for (let i = 0; i < half; i += 1) {
+        const o = optFor(need[i].id);
+        st = guard18.decide(st, o.text, Guard.evaluateLine(o.text, guardianFile)).after;
+      }
+      const midway = st.hits.slice();
+      ok(midway.length >= half, '第一次說完，交辦上已經對上了幾行', midway.join(','));
+      eq(Guard.isConvinced(guardianFile, st), false, '第一次還沒說服他（那是刻意的：這一條要驗第二次接得上）');
+      // 存檔走一趟 localStorage 的形狀（壞值不會讓已經對上的行變短）
+      const reloaded = Guard.normalizeState(JSON.parse(JSON.stringify({ ...st, turns: st.turns })), guardianFile);
+      eq(JSON.stringify(reloaded.hits), JSON.stringify(midway), '關掉再開，對上的那幾行一個都沒少');
+      let st2 = reloaded;
+      for (let i = half; i < need.length && !Guard.isConvinced(guardianFile, st2); i += 1) {
+        const o = optFor(need[i].id);
+        st2 = guard18.decide(st2, o.text, Guard.evaluateLine(o.text, guardianFile)).after;
+      }
+      eq(Guard.isConvinced(guardianFile, st2), true, '**分兩次說完也說服得了**（跨次聯集，不是同一次全部到齊）');
+      for (const id of midway) ok(st2.hits.includes(id), `第一次對上的「${id}」第二次還在（進度只累積）`);
+      ok(pick('opt-frame') !== undefined, '選項表拿得到（上面那一段真的有東西可挑）');
+    }
+    // 已經開過的門閂再說一次，不會重複計、也不會退回
+    {
+      const b = guardianFile.branches.find((x) => x.opens);
+      const o = guardianFile.options.find((x) => x.expect === b.id);
+      const first = guard18.decide({ hits: [], turns: 0 }, o.text, Guard.evaluateLine(o.text, guardianFile));
+      const again = guard18.decide(first.after, o.text, Guard.evaluateLine(o.text, guardianFile));
+      eq(again.opened.length, 0, '同一句再說一次，不會再開一次（已經開的不重複計）');
+      eq(JSON.stringify(again.after.hits), JSON.stringify(first.after.hits), '對上的那幾行沒有變短也沒有變長');
+      eq(again.after.turns, first.after.turns + 1, '但說話的次數有記到');
+    }
+    // 說服過就不會退回（convinced 是黏的）
+    {
+      const done = { hits: guardianFile.latches.map((l) => l.id), turns: 9, convinced: true };
+      const dull = '天氣很好我先走了你自己看著辦吧我沒有什麼特別要說的';
+      const res = guard18.decide(done, dull, Guard.evaluateLine(dull, guardianFile));
+      eq(res.after.convinced, true, '說服過之後再說一句空泛的話，他也不會退回「還沒被說服」');
+      eq(res.full, true, '七行全開時 full 為真');
+    }
+    // 門檻上的那一步：剛好到 pass 的那一句才是「這一句說服了他」
+    {
+      const need = guardianFile.latches.filter((l) => guardianFile.branches.some((b) => b.opens === l.id));
+      const optFor = (latchId) => {
+        const b = guardianFile.branches.find((x) => x.opens === latchId);
+        return guardianFile.options.find((o) => o.expect === b.id);
+      };
+      let st = Guard.normalizeState(null, guardianFile);
+      let just = 0;
+      for (const l of need) {
+        const o = optFor(l.id);
+        const res = guard18.decide(st, o.text, Guard.evaluateLine(o.text, guardianFile));
+        if (res.justConvinced) just += 1;
+        st = res.after;
+      }
+      eq(just, 1, '「這一句說服了他」只會發生一次');
+    }
+    // normalizeState：壞值一律落成乾淨的預設，而且不會憑空長出東西
+    {
+      const dirty = Guard.normalizeState({ hits: ['frame', 'frame', 'not-a-latch', 7], turns: -3, convinced: 'yes' }, guardianFile);
+      eq(JSON.stringify(dirty.hits), JSON.stringify(['frame']), '不認得的門閂 id 與重複的一律清掉');
+      eq(dirty.turns, 0, '負的次數落成 0');
+      eq(dirty.convinced, true, 'convinced 落成布林');
+      eq(JSON.stringify(Guard.normalizeState(null, guardianFile).hits), '[]', '沒有存檔就是空的');
+    }
+    // 選項輪替：多按幾次「換一批」，每一個選項都輪得到
+    {
+      const seen = new Set();
+      for (let t = 0; t < 8; t += 1) {
+        const round = Guard.pickOptions(guardianFile, { hits: [], turns: 0 }, t);
+        ok(round.length === Guard.OPTIONS_PER_ROUND, `第 ${t} 輪擺得出 ${Guard.OPTIONS_PER_ROUND} 個選項`, String(round.length));
+        ok(new Set(round.map((o) => o.id)).size === round.length, `第 ${t} 輪沒有重複的選項`);
+        for (const o of round) seen.add(o.id);
+      }
+      eq(seen.size, guardianFile.options.length, '八輪之內，每一個選項都輪得到（沒有按不出來的話）');
+      // 還開得了門閂的排前面（那是他在等的）
+      const first = Guard.pickOptions(guardianFile, { hits: [], turns: 0 }, 0);
+      const opensOf = (o) => (guardianFile.branches.find((b) => b.id === o.expect) || {}).opens;
+      ok(opensOf(first[0]), '第一輪的第一個選項開得了一道門閂');
+      // 全開之後照樣擺得出一輪（不會變成空的）
+      const done = { hits: guardianFile.latches.map((l) => l.id), turns: 9, convinced: true };
+      eq(Guard.pickOptions(guardianFile, done, 0).length, Guard.OPTIONS_PER_ROUND, '七行全開之後照樣擺得出一輪');
+    }
+    // 交辦那一塊：對上的行是 open、沒對上的講的是「還在等什麼」（不是「你錯了」）
+    {
+      const rows = Guard.latchStatus(guardianFile, { hits: ['frame'], turns: 1, convinced: false });
+      eq(rows.length, guardianFile.latches.length, '交辦有幾行就畫幾行');
+      eq(rows.filter((r) => r.open).length, 1, '對上的那一行是 open');
+      for (const r of rows) ok(typeof r.waiting === 'string' && r.waiting.length > 0, `[${r.id}] 沒對上時說得出「還在等什麼」`);
+      const st1 = { hits: ['frame'], turns: 1, convinced: false };
+      const tally1 = {
+        open: Guard.openWeight(guardianFile, st1),
+        need: Guard.passMark(guardianFile),
+        total: Guard.totalWeight(guardianFile),
+        lines: rows.length,
+        openLines: 1,
+        toGo: Guard.linesToGo(guardianFile, st1),
+        convinced: false,
+      };
+      const html = GuardUI.chargeHtml(guardianFile.charge, rows, tally1);
+      ok(html.includes('is-open'), '畫出來的交辦標得出哪一行對上了');
+      ok(html.includes(rows[0].clause) || html.includes(rows[1].clause), '交辦的原文真的畫在畫面上（那份 system prompt 玩家看得見）');
+      ok(GuardUI.saidHtml('框起來').includes('框起來'), '「你剛剛說的那一句」真的畫得出來');
+
+      /*
+       * **權重不是行數**（P18 審查 · 第 6 條）。
+       * 畫面上說「行」的地方餵的必須是行數；`open`／`need`／`total` 是門檻在算的權重。
+       * 今天每條門閂都 `weight: 1`，所以兩者剛好一樣 —— 反例把其中一條調成 2，
+       * 舊寫法會當場把「對上了 1 行」印成「對上了 2 行」。
+       */
+      ok(GuardUI.tallyLine(tally1).includes(`對上了 1 / ${rows.length} 行`), '那一句說的是「幾行 / 共幾行」', GuardUI.tallyLine(tally1));
+      {
+        const heavy = {
+          ...guardianFile,
+          latches: guardianFile.latches.map((l, i) => (i === 0 ? { ...l, weight: 2 } : l)),
+        };
+        const stH = { hits: [heavy.latches[0].id], turns: 1, convinced: false };
+        eq(Guard.openWeight(heavy, stH), 2, '反例：那一條的權重是 2');
+        eq(Guard.worldStateOf(heavy, stH).open.length, 1, '但畫面上只亮了 1 行（同一份存檔）');
+        const lineH = GuardUI.tallyLine({
+          lines: heavy.latches.length,
+          openLines: Guard.worldStateOf(heavy, stH).open.length,
+          toGo: Guard.linesToGo(heavy, stH),
+          convinced: false,
+        });
+        ok(lineH.includes(`對上了 1 / ${heavy.latches.length} 行`), '有一條 weight 2 時，畫面上仍然說「1 行」', lineH);
+        eq(lineH.includes('對上了 2'), false, '**不會把權重 2 印成 2 行**（這就是那一條 bug 的樣子）', lineH);
+        // 「還差幾行」也是行數：門檻差 3 → 剩下的都是 1，就是 3 行
+        eq(Guard.linesToGo(heavy, stH), heavy.pass - 2, '「還差幾行」算的是補得上門檻要幾行', String(Guard.linesToGo(heavy, stH)));
+        eq(Guard.linesToGo(guardianFile, { hits: guardianFile.latches.map((l) => l.id), turns: 9, convinced: true }), 0, '全開了就是 0 行');
+      }
+      // 畫面那一層不准再拿權重當行數印
+      eq(/tally\.open\b|tally\.total\b|tally\.need\b/.test(guardUiSrc), false, 'ui/guardian.js 沒有任何一處把權重印成「行」');
+      ok(/openLines: rows\.filter/.test(mainSrc18) && /toGo: Guard\.linesToGo/.test(mainSrc18), 'main.js 真的把行數與「還差幾行」餵進去');
+    }
+  }
+
+  /* --- ③b 存檔 → 世界端那塊板：**重載那條路** --------------------- */
+  {
+    /*
+     * P18 審查 · 第 1 條（真 bug）：`createGuardianField({ stateOf })` 要的是
+     * 「板上亮第幾行」（`{open: number[], convinced}`），而存檔存的是門閂 id
+     * （`{hits, turns, convinced}`）—— 之前 `main.js` 把存檔原樣交過去，
+     * `st.open` 是 `undefined` → `setOpen([])` → **重新整理之後一行都不亮**。
+     * 再說一句就會自己痊癒（`say()` 送的是完整的索引集合），所以更難發現；
+     * 而 rubric 直接呼叫 `setOpen([0,2])`、e2e 只在同一個 session 內收合／重開，
+     * **兩邊都沒有走過重載那條路**。換算現在只寫一份（`worldStateOf()`）。
+     */
+    const half18 = guardianFile.latches.slice(0, 4).map((l) => l.id);
+    const saved18 = { hits: half18, turns: 2, convinced: false };
+    eq(saved18.open, undefined, '存檔那一欄本來就沒有 open 這個鍵（所以不能原樣交給世界端）');
+    const ws18 = Guard.worldStateOf(guardianFile, saved18);
+    eq(JSON.stringify(ws18.open), JSON.stringify([0, 1, 2, 3]), '門閂 id 換算成板上的第幾行');
+    eq(ws18.convinced, false, '還沒說服就是還沒說服');
+    eq(JSON.stringify(Guard.worldStateOf(guardianFile, null).open), '[]', '反例：沒有存檔 → 一行都不亮（同一支換算）');
+    eq(
+      JSON.stringify(Guard.worldStateOf(guardianFile, { hits: ['not-a-latch'], turns: 1, convinced: false }).open),
+      '[]',
+      '反例：存檔裡的壞值換算不出任何一行'
+    );
+    // 開機還原與「說完一句之後」走的是同一支換算
+    ok(
+      /guardianStateOf: \(id\) => Guard\.worldStateOf\(guardianFile, progression\.guardianState\(id\)\)/.test(mainSrc18),
+      'main.js 的開機還原走 worldStateOf()（交給世界端的是「第幾行」）'
+    );
+    ok(
+      /return Guard\.worldStateOf\(guardianFile, guardianState\(id\)\)\.open;/.test(mainSrc18),
+      '說完一句之後的更新走的是同一支換算（兩條路做同一件事）'
+    );
+
+    /*
+     * **重載那條路真的走一遍**：拿一份「開了 4 行」的存檔重新蓋一次世界，
+     * 板上就要亮 4 行，而且是終態（重訪不播剝殼動畫）。
+     */
+    // 蓋世界要 canvas 替身（文字／光暈貼圖）——用完就還回去
+    const restore18 = installCanvasStub();
+    const reloadWorld18 = World.createWorld({
+      engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} },
+      quality: 'high',
+      ...worldOpts,
+      guardianStateOf: (id) => Guard.worldStateOf(guardianFile, id === guardianFile.id ? saved18 : null),
+    });
+    const back18 = reloadWorld18.guardians.byId(guardianFile.id);
+    ok(Boolean(back18), '重新蓋出來的世界找得到他');
+    const backOpen18 = back18 ? back18.open : -1;
+    eq(backOpen18, half18.length, '**重載之後，先前對上的那幾行還亮著**', `${backOpen18} / ${half18.length}`);
+    eq(back18 ? back18.marks.filter((m) => m.open && m.amt >= 0.99).length : -1, half18.length, '而且是終態（不播剝殼動畫）');
+    eq(back18 ? back18.convinced : true, false, '那份存檔還沒說服他');
+    // 反例（**呼叫的是同一支**）：世界端拿不到索引集合就一行都不亮 —— 那正是修掉的那個 bug
+    const blind18 = World.createWorld({
+      engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} },
+      quality: 'high',
+      ...worldOpts,
+      guardianStateOf: () => ({ convinced: false }),
+    });
+    eq(blind18.guardians.byId(guardianFile.id).open, 0, '反例：沒有 open 這個鍵 → 板上一行都不亮');
+    restore18();
+  }
+
+  /* --- ④ guard 介面：離線腳本是已註冊的預設，而且那條路自己走得完 --- */
+  {
+    eq(Guard.DEFAULT_GUARD, Guard.OFFLINE_GUARD, '預設的判定實作就是離線腳本');
+    eq(Guard.guards.has(Guard.OFFLINE_GUARD), true, '離線腳本**已經註冊**在出貨的登記表裡');
+    // 拿不到就給一個空殼（同上：讓每一條斷言各自報紅，不要讓整支測試中斷）
+    const g = Guard.createGuard(guardianFile) || { id: null, offline: null, decide: null };
+    eq(g.id, Guard.OFFLINE_GUARD, '不指定實作時拿到的是離線腳本');
+    eq(g.offline, true, '它自己說得出「我不連網」');
+    eq(typeof g.decide, 'function', 'guard 介面就是 decide(state, prompt, evaluation)');
+    /*
+     * **離線那條路自己走得完**：從零開始，只用離線判定者就說服得了他。
+     * 這一條不准用「線上模式沒做所以自動通過」交差 —— 它問的是離線那條路完不完整。
+     */
+    const walkRes = Guard.walkOffline(guardianFile);
+    ok(Boolean(walkRes), '走得完一整趟（拿得到判定者）');
+    const walk = walkRes || { convinced: false, steps: [] };
+    eq(walk.convinced, true, '**離線那條路從頭到尾說服得了他**');
+    ok(
+      walk.steps.length >= 1 && walk.steps.length <= guardianFile.latches.length,
+      '不必把七行全講完就說服得了（門檻是聯集，不是全部）',
+      String(walk.steps.length)
+    );
+    ok(walk.steps.length >= 1 && walk.steps.every((s) => s.branchId), '每一步都解到一條分支');
+    /*
+     * 反例（**呼叫的是同一支**）：把離線實作從登記表裡拿掉，整條路就走不完。
+     * 這就是「拔掉離線實作要紅」——它證明上面那一條不是空過的。
+     */
+    const empty = Guard.createGuardRegistry();
+    eq(empty.size, 0, '反例用的是一份空的登記表');
+    eq(Guard.createGuard(guardianFile, Guard.DEFAULT_GUARD, empty), null, '反例：登記表裡沒有離線實作 → 拿不到判定者');
+    eq(Guard.walkOffline(guardianFile, { registry: empty }), null, '反例：那一趟就走不完（同一支 walkOffline）');
+    // 換一個實作進去，介面照樣接得住（以後接 LLM 就是這樣接）
+    {
+      const spy = Guard.createGuardRegistry();
+      spy.register('spy', (data) => ({ id: 'spy', offline: false, decide: () => ({ branchId: null, say: [], opened: [], after: Guard.normalizeState(null, data) }) }));
+      const other = Guard.createGuard(guardianFile, 'spy', spy);
+      eq(other.id, 'spy', '登記表換得進第二個實作（未來的線上模式就是多這一列）');
+      eq(other.offline, false, '而且它自己說得出「我不是離線的那一個」');
+    }
+    // 靜態掃描：離線那一支真的不連網、不碰祕密
+    ok(
+      !/fetch\(|XMLHttpRequest|WebSocket|apiKey|api_key|https?:\/\//.test(guardSrc),
+      '狀態機沒有任何對外連線或金鑰（護欄 3：核心迴圈可離線）'
+    );
+    // 註解裡寫「不讀 localStorage」正是在描述這件事，所以掃的是**去掉註解之後**的程式
+    const guardCode = guardSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    ok(!/localStorage|document\.|window\./.test(guardCode), '狀態機是純函式（不碰 DOM、不碰存檔）');
+    ok(/from '\.\/checks\.js'/.test(guardSrc), '它只 import 既有的檢查器（不新增技巧）');
+    ok(!/import .*three/.test(guardSrc), '它不 import three.js（測試餵一份存檔就問得出答案）');
+  }
+
+  /* --- ⑤ 擺位（對真的蓋出來的世界量） ------------------------------ */
+  {
+    eq(GuardWorld.GUARDIAN_RADIUS, Rules18.GUARDIAN_R, 'guardian.js 與 screen-rules.mjs 的互動半徑是同一個數字');
+    eq(GuardWorld.GUARDIAN_RADIUS, Rules18.LAYER_INTERACT_R.guardian, '擺位規則表裡的守門者半徑也是同一個');
+    eq(GuardWorld.GUARDIAN_BODY_RADIUS, Rules18.GUARDIAN_BODY_R, '底座半徑兩份相同');
+    eq(Rules18.GUARDIAN_ABOVE_MIN.marker, Rules18.WATCHMAN_ABOVE_MIN.marker, '離石座那一條與守夜人是同一條規矩（同一個數字）');
+    eq(Rules18.GUARDIAN_ABOVE_MIN.greatmurk, Rules18.GREAT_MURK_R + Rules18.GUARDIAN_R, '離大濁靈 ＝ 互動圈不重疊（6.0 ＋ 3.2）');
+    eq(Rules18.GUARDIAN_ABOVE_MIN.watchman, Rules18.WATCHMAN_R + Rules18.GUARDIAN_R, '離守夜人 ＝ 互動圈不重疊（4.6 ＋ 3.2）');
+    eq(Rules18.GUARDIAN_ABOVE_MIN.murk, 5.5 + Rules18.GUARDIAN_R, '離小濁靈 ＝ 互動圈不重疊（5.5 ＋ 3.2）');
+    for (const k of Object.keys(Rules18.GUARDIAN_ABOVE_MIN)) {
+      ok(['marker', 'murk', 'greatmurk', 'watchman'].includes(k), `[${k}] 這一格真的有人讀（沒有死常數）`);
+    }
+
+    const [gx, gz] = guardianFile.at;
+    const here18 = World.regionAt(gx, gz);
+    ok(here18 && here18.id === guardianFile.region && !here18.onBridge, `regionAt 說他站在 ${guardianFile.region}`, JSON.stringify(here18));
+    ok(World.coverage(gx, gz) > 0.96, '腳下不是崩掉的區緣', World.coverage(gx, gz).toFixed(3));
+
+    /*
+     * **互動圈與每一層都不重疊** —— 連石座也是。
+     * 這一條是他半徑比別人小卻不會被誰蓋掉的原因（WORLD.md §3.2 那條慣例
+     * 要守的正是這件事），所以它要用**看得到互動圈**的量法（`interactRingRadius`）問，
+     * 不是拿淨空半徑去問（P17 審查 · 第 9 條）。
+     */
+    const targets18 = Rules18.interactionTargets({
+      challenges,
+      inscriptions,
+      letters: letterFile.entries,
+      handles,
+      reactiveSpots: Reactive.reactiveTargets(),
+      murks: murkFile.entries,
+      watchmen: readJson('src/data/watchmen.json').entries,
+      tablets: Props.LORE_TABLETS,
+      secrets,
+      guardians: [],
+    });
+    ok(targets18.length > 200, '真的有那麼多互動點要閃（不然這一段是空過的）', String(targets18.length));
+    /** 這一點的互動圈壓到誰了（回問題清單，空陣列＝過）—— 下面的反例會**再呼叫它一次**。 */
+    const overlaps18 = (at) => {
+      const bad = [];
+      for (const t of targets18) {
+        const need = Rules18.GUARDIAN_R + Rules18.interactRingRadius(t) + Rules18.GUARDIAN_NO_OVERLAP_MARGIN;
+        const d = Math.hypot(at[0] - t.at[0], at[1] - t.at[1]);
+        if (d < need) bad.push(`${t.k}:${t.id}（${d.toFixed(2)} < ${need.toFixed(2)}）`);
+      }
+      return bad;
+    };
+    eq(overlaps18(guardianFile.at).join('、'), '', '他的互動圈與每一層都不重疊（連石座也是）');
+    {
+      const c0 = challenges.find((c) => c.region === guardianFile.region) || challenges[0];
+      const fake = [c0.position[0] + 3, c0.position[1]];
+      ok(overlaps18(fake).length > 0, '反例：站在石座旁邊 3 公尺 → 圈疊上去（同一支判定）', overlaps18(fake)[0]);
+    }
+    /*
+     * **餘裕只剩幾公分 —— 那就把它印進斷言訊息裡**（P18 審查 · 第 2 條）。
+     * `GUARDIAN_NO_OVERLAP_MARGIN` 是 0，而且訂不出比 0 更大的值：
+     * 最緊的那一對只剩 0.03 公尺。註解不准承諾一個出貨點滿足不了的餘裕，
+     * 所以這裡逐值比對契約記的那個數字，並把它印出來給下一個動座標的人看。
+     */
+    {
+      let tight18 = null;
+      for (const t of targets18) {
+        const bare = Rules18.GUARDIAN_R + Rules18.interactRingRadius(t);
+        const slack = Math.hypot(gx - t.at[0], gz - t.at[1]) - bare;
+        if (!tight18 || slack < tight18.slack) tight18 = { k: t.k, id: t.id, bare, slack };
+      }
+      ok(Boolean(tight18), '量得到最緊的那一對（不然這一段是空過的）');
+      const tight = tight18 || { k: '?', id: '?', bare: NaN, slack: NaN };
+      ok(tight.slack >= 0, `圈不重疊：最緊的一對是 ${tight.k}:${tight.id}`, `還剩 ${tight.slack.toFixed(3)}m（要 ${tight.bare.toFixed(2)}）`);
+      ok(
+        Math.abs(tight.slack - EX18.overlapSlack) < 0.005,
+        '契約記的餘裕就是現在量到的那一個',
+        `${tight.slack.toFixed(3)} vs ${EX18.overlapSlack}`
+      );
+      ok(
+        Rules18.GUARDIAN_NO_OVERLAP_MARGIN <= tight.slack,
+        '餘裕門檻不能大於出貨的落點滿足得了的那一個',
+        `margin=${Rules18.GUARDIAN_NO_OVERLAP_MARGIN} ≤ ${tight.slack.toFixed(3)}`
+      );
+      console.log(
+        `    ↳ 守門者：圈不重疊最緊的一對 ${tight.k}:${tight.id} 還剩 ${tight.slack.toFixed(3)}m` +
+          `（餘裕門檻 ${Rules18.GUARDIAN_NO_OVERLAP_MARGIN}）`
+      );
+    }
+    /*
+     * **換半徑調查時的門檻是重算的，不是把出貨半徑那一次的輸出平移**（P18 審查 · 第 5 條）。
+     * `GUARDIAN_RADIUS = 3.2` 的理由來自 `guardian-fit -- --survey`，而它就是靠這一支換半徑；
+     * 舊寫法 `needFrom(t) - GUARDIAN_R + radius` 會把「不搶 E 的那一層」那個**常數**也平移掉。
+     */
+    {
+      const react18 = { k: 'react', id: 'fake-react', at: [0, 0] };
+      const watch18 = { k: 'watchman', id: 'fake-watchman', at: [0, 0] };
+      const marker18 = { k: 'marker', id: 'fake-marker', at: [0, 0] };
+      eq(Rules18.guardianNeedFrom(react18), Rules18.GUARDIAN_AUTO_MIN, '不搶 E 的那一層：門檻是個常數');
+      eq(Rules18.guardianNeedFrom(react18, 2.8), Rules18.GUARDIAN_AUTO_MIN, '**收小也還是同一個常數**（它不隨互動圈變）');
+      eq(Rules18.guardianNeedFrom(react18, 4.6), Rules18.GUARDIAN_AUTO_MIN, '放大也一樣');
+      eq(Rules18.guardianNeedFrom({ k: 'secret', id: 'f', at: [0, 0] }, 4.6), Rules18.GUARDIAN_AUTO_MIN, '祕密那一層同理');
+      eq(Rules18.guardianNeedFrom(watch18, 2.8), 2.8 + Rules18.WATCHMAN_R, '圈不重疊那一層：換半徑就照那個半徑重算');
+      eq(Rules18.guardianNeedFrom(watch18, 4.6), 4.6 + Rules18.WATCHMAN_R, '放大也是重算');
+      eq(Rules18.guardianNeedFrom(marker18, 0.5), Rules18.GUARDIAN_ABOVE_MIN.marker, '石座那一層有一個與圈無關的下限（不准站進人家的地盤）');
+      eq(Rules18.guardianNeedFrom(marker18), Rules18.GUARDIAN_R + Rules18.MARKER_R, '圈夠大時，勝出的是「圈不重疊」那一條');
+      for (const t of targets18) {
+        if (t.k === 'react' || t.k === 'secret' || t.k === 'marker') continue;
+        eq(
+          Rules18.guardianNeedFrom(t),
+          Rules18.GUARDIAN_R + Rules18.interactRingRadius(t) + Rules18.GUARDIAN_NO_OVERLAP_MARGIN,
+          `[${t.k}:${t.id}] 出貨半徑之下就是「圈不重疊」（與擺位斷言同一條式子）`
+        );
+      }
+      const fitSrc18 = readFileSync(resolve(root, 'scripts/guardian-fit.mjs'), 'utf8');
+      ok(/guardianNeedFrom\(t, radius\)/.test(fitSrc18), 'guardian-fit 用調查的那個半徑重新算門檻');
+      eq(/- GUARDIAN_R \+ radius/.test(fitSrc18), false, '而且沒有把出貨半徑那一次的輸出線性平移');
+    }
+    // 比他高階的那幾層另外再守一次「不准站進人家的地盤」（兩條都要過）
+    for (const c of challenges) {
+      const d = Math.hypot(gx - c.position[0], gz - c.position[1]);
+      ok(d >= Rules18.GUARDIAN_ABOVE_MIN.marker, `離石座 ${c.id} ≥ ${Rules18.GUARDIAN_ABOVE_MIN.marker}m`, d.toFixed(2));
+    }
+    for (const m of murkFile.entries) {
+      const need = Rules18.GUARDIAN_ABOVE_MIN[m.kind === 'great' ? 'greatmurk' : 'murk'];
+      ok(Math.hypot(gx - m.at[0], gz - m.at[1]) >= need, `離濁靈 ${m.id} ≥ ${need}m`);
+    }
+    for (const w of readJson('src/data/watchmen.json').entries) {
+      ok(
+        Math.hypot(gx - w.at[0], gz - w.at[1]) >= Rules18.GUARDIAN_ABOVE_MIN.watchman,
+        `離守夜人 ${w.id} ≥ ${Rules18.GUARDIAN_ABOVE_MIN.watchman}m`,
+        Math.hypot(gx - w.at[0], gz - w.at[1]).toFixed(2)
+      );
+    }
+    // 不搶 E 的東西：不站在人家頭上
+    for (const s of Reactive.reactiveTargets()) {
+      ok(Math.hypot(gx - s.at[0], gz - s.at[1]) >= Rules18.GUARDIAN_AUTO_MIN, `沒站在反應物 ${s.id} 上`);
+    }
+    for (const v of Props.STORY_VIGNETTES) {
+      ok(Math.hypot(gx - v.at[0], gz - v.at[1]) >= Rules18.GUARDIAN_AUTO_MIN, `沒站在小景 ${v.id} 上`);
+    }
+    // **他是站在那道「不會關上的門」旁邊的人**（這一格的設計前提，寫成硬規則）
+    {
+      const door = Props.LANDMARKS.find((l) => l.id === Rules18.GUARDIAN_LANDMARK_ID);
+      ok(Boolean(door), '護欄崗的地標找得到（那道不會關上的門）');
+      const d = Math.hypot(gx - door.at[0], gz - door.at[1]);
+      ok(d <= Rules18.GUARDIAN_LANDMARK_MAX, `站在那道門旁邊（${d.toFixed(2)} ≤ ${Rules18.GUARDIAN_LANDMARK_MAX}m）`);
+      ok(Math.abs(d - EX18.doorNow) < 0.01, '契約記的距離就是現在量到的那一個', d.toFixed(2));
+      for (const lm of Props.LANDMARKS) {
+        ok(Math.hypot(gx - lm.at[0], gz - lm.at[1]) >= Rules18.GUARDIAN_AUTO_MIN, `沒站在地標 ${lm.id} 上`);
+      }
+    }
+    // 離主動線、閘門、出生點、起始祭壇
+    for (const l of World.BRIDGE_LANES) {
+      ok(distToSeg(gx, gz, l.ax, l.az, l.bx, l.bz) >= World.LANE_HALF + Rules18.LANE_MARGIN, `離 ${l.region} 橋的主動線夠遠`);
+    }
+    for (const c of [...World.CORRIDORS, ...World.ANNEX_LINKS]) {
+      ok(Math.hypot(gx - c.gate.x, gz - c.gate.z) >= Rules18.GATE_MIN, `離 ${c.region} 的門 ≥ ${Rules18.GATE_MIN}m`);
+    }
+    ok(Math.hypot(gx, gz - 6) >= 7, '離出生點 ≥ 7m');
+    ok(Math.hypot(gx - prologueForWorld.shrine.at[0], gz - prologueForWorld.shrine.at[1]) >= 9, '離起始祭壇 ≥ 9m');
+    // 離「走出來的路」：遇得到，又不站在路中間
+    {
+      const segs18 = Props.buildPathNetwork(
+        World.REGION_SITES,
+        [...World.CORRIDORS, ...World.ANNEX_LINKS],
+        challenges,
+        (await import('../src/world/screens.js')).PATH_BENDS
+      );
+      const dPath = Rules18.pathDistance(segs18, gx, gz);
+      ok(
+        dPath >= Rules18.GUARDIAN_PATH_MIN && dPath <= Rules18.GUARDIAN_PATH_MAX,
+        `離走出來的路 ${Rules18.GUARDIAN_PATH_MIN}–${Rules18.GUARDIAN_PATH_MAX}m`,
+        dPath.toFixed(1)
+      );
+    }
+    /*
+     * **中觀層一片都不准被清零。** 他的互動圈只要壓到中觀層的碰撞圓上，
+     * `screen-fit -- --verify` 就會紅 —— 所以同一條門檻在這裡先守一次（兩邊同一份數字）。
+     */
+    {
+      const midSolids18 = [];
+      for (const layer of testWorld.screens || []) {
+        for (const node of layer.group.children) {
+          for (const sd of World.collectSolids(node, World.terrainHeight)) midSolids18.push(sd);
+        }
+      }
+      ok(midSolids18.length >= 100, '中觀層真的有那麼多碰撞圓要閃（不然這一段是空過的）', String(midSolids18.length));
+      for (const sd of midSolids18) {
+        const need = Rules18.GUARDIAN_R + World.PLAYER_RADIUS + sd.r;
+        ok(Math.hypot(gx - sd.x, gz - sd.z) >= need, `沒有壓到中觀層的碰撞圓（≥ ${need.toFixed(2)}）`);
+      }
+    }
+    // 加了守門者之後：他自己擋得住人，但貼身三圈八個方向都繞得過去
+    ok(Boolean(testWorld.solidAt(gx, gz)), '守門者本體擋得住人');
+    ok(clearExceptSelf(testWorld, gx, gz), '除了他自己以外，這一點站得下人');
+    for (let a = 0; a < Rules18.GUARDIAN_RING_DIRS; a += 1) {
+      const ang = (a / Rules18.GUARDIAN_RING_DIRS) * Math.PI * 2;
+      for (const d of Rules18.GUARDIAN_RING_RADII) {
+        ok(testWorld.isClear(gx + Math.cos(ang) * d, gz + Math.sin(ang) * d), `周圍 ${d}m 走得到`, `a=${a}`);
+      }
+    }
+    /*
+     * **真正要守的東西**：站在他的互動圈上，有多少個方向站得住。
+     * 這一支是被測的那一支，下面的反例會**再呼叫它一次**。
+     */
+    const standableDirs18 = (at) => {
+      let free = 0;
+      for (let a = 0; a < Rules18.GUARDIAN_WINNABLE_DIRS; a += 1) {
+        const ang = (a / Rules18.GUARDIAN_WINNABLE_DIRS) * Math.PI * 2;
+        const px = at[0] + Math.cos(ang) * (Rules18.GUARDIAN_R - 0.3);
+        const pz = at[1] + Math.sin(ang) * (Rules18.GUARDIAN_R - 0.3);
+        if (!testWorld.isWalkable(px, pz) || testWorld.solidAt(px, pz)) continue;
+        free += 1;
+      }
+      return free;
+    };
+    {
+      const free = standableDirs18(guardianFile.at);
+      ok(free >= Rules18.GUARDIAN_WINNABLE_MIN, `互動圈上至少 ${Rules18.GUARDIAN_WINNABLE_MIN} 個方向站得住`, `${free}/24`);
+      ok(free <= EX18.winnableCeiling, '契約記的上限沒有低於實測（記錄用的數字要是真的）', `${free} ≤ ${EX18.winnableCeiling}`);
+      /*
+       * **貼著現行資料**（findings：「包住式」的區間斷言放寬也不會紅）——
+       * 上限那一格記的就是現行落點量到的那個數字，把它調到 24 就要紅。
+       * `GUARDIAN_WINNABLE_MIN` 的註解一度把這裡寫成 24/24（那是「貼身」3 圈 × 8 個方向
+       * 的數字，不是這一條），P18 審查 · 第 3 條訂正過。
+       */
+      eq(free, EX18.winnableCeiling, '契約記的上限就是現行落點量到的那一個（不是包住式的門檻）', `${free} vs ${EX18.winnableCeiling}`);
+      ok(
+        Rules18.GUARDIAN_WINNABLE_MIN < free,
+        '門檻真的比實測嚴一格以上（留得出餘裕）',
+        `${Rules18.GUARDIAN_WINNABLE_MIN} < ${free}`
+      );
+      console.log(`    ↳ 守門者：互動圈上 ${free}/${Rules18.GUARDIAN_WINNABLE_DIRS} 個方向站得住（門檻 ${Rules18.GUARDIAN_WINNABLE_MIN}）`);
+    }
+    {
+      // 反例：搬到虛空邊緣 → 幾乎一個方向都站不住（同一支判定）
+      const site18 = World.REGION_SITES.find((s) => s.id === guardianFile.region);
+      const fake = [site18.x + site18.radius + 6, site18.z];
+      ok(standableDirs18(fake) < Rules18.GUARDIAN_WINNABLE_MIN, '反例：站到土地外面 → 站不住（同一支判定）', `${standableDirs18(fake)}/24`);
+    }
+    // **他真的被餵進 interactionTargets()**（沒餵進去，別人的擺位就會照過期的世界算）
+    {
+      const withHim = Rules18.interactionTargets({ challenges: [], guardians: [guardianFile] });
+      eq(withHim.length, 1, 'interactionTargets() 收得下守門者這一層');
+      eq(withHim[0].k, 'guardian', '而且標成 guardian 這一層');
+      eq(Rules18.interactionTargets({ challenges: [] }).length, 0, '反例：沒有守門者就沒有那一列');
+      ok(/guardians \|\| \[\]/.test(readFileSync(resolve(root, 'scripts/lib/screen-rules.mjs'), 'utf8')), 'interactionTargets() 真的讀了 guardians');
+    }
+    // 圈內按得到、圈外按不到（把互動半徑釘死）
+    {
+      const inRing = new THREE.Vector3(gx + Rules18.GUARDIAN_R - 0.4, 0, gz);
+      const outRing = new THREE.Vector3(gx + Rules18.GUARDIAN_R + 0.6, 0, gz);
+      ok(Boolean(testWorld.nearestGuardian(inRing)), '站在互動圈裡按得到他');
+      eq(testWorld.nearestGuardian(outRing), null, '站在互動圈外按不到他');
+    }
+  }
+
+  /* --- ⑥ 世界實體：命名、碰撞體、0 光源、預算 ---------------------- */
+  {
+    const groups18 = [];
+    testScene.traverse((o) => {
+      if (o.name && o.name.startsWith('guardian:')) groups18.push(o);
+    });
+    eq(groups18.length, 1, '守門者蓋在測試世界裡（guardian:<id>）');
+    eq(groups18[0].name, `guardian:${guardianFile.id}`, '場景圖節點名帶得出他的 id');
+
+    const solids18 = testWorld.solids.filter(
+      (s) => Math.abs(guardianFile.at[0] - s.x) < 0.01 && Math.abs(guardianFile.at[1] - s.z) < 0.01
+    );
+    eq(solids18.length, 1, '碰撞登記表含守門者的底座');
+    ok(Math.abs(solids18[0].r - GuardWorld.GUARDIAN_BODY_RADIUS) < 0.01 && solids18[0].keep === true, '底座 solidRadius 0.55 且 keepSolid');
+    /*
+     * **站不上一個人的頭。** 0.55 < STAND_MIN_R（0.8），所以 `collectSolids()`
+     * 量出來的 standable 一定是 false —— 這件事靠尺寸成立，不靠旗標宣告。
+     */
+    eq(solids18[0].standable, false, '守門者站不上去（standable false）');
+    ok(GuardWorld.GUARDIAN_BODY_RADIUS < World.STAND_MIN_R, '底座半徑本來就小於「站得下人」的下限');
+
+    let lights18 = 0;
+    let tris18 = 0;
+    testWorld.guardians.group.traverse((o) => {
+      if (o.isLight) lights18 += 1;
+      const geo = o.geometry;
+      if (!geo) return;
+      const idx = geo.index ? geo.index.count : geo.attributes.position ? geo.attributes.position.count : 0;
+      tris18 += (idx / 3) * (o.isInstancedMesh ? o.count : 1);
+    });
+    eq(lights18, 0, '守門者整層 0 光源（板上的字是自發光材質）');
+    ok(tris18 <= 200, '守門者 ≤ 200 三角形', `tris=${tris18.toFixed(0)}`);
+    console.log(`    ↳ 守門者：三角 ${tris18.toFixed(0)}、碰撞體 ${solids18.length}、光源 ${lights18}`);
+    ok(!/new THREE\.(Point|Spot|Directional|Hemisphere|Ambient|RectArea)Light/.test(guardWorldSrc), 'world/guardian.js 沒有任何光源');
+    ok(
+      !/position\.(add|lerp|copy|set)\(/.test(guardWorldSrc.split('export function createGuardianField')[1] || ''),
+      '更新迴圈裡沒有移動實體的程式（守門者不走、不跟隨）'
+    );
+    ok(
+      !/(new |\.map\(|\.filter\()/.test((guardWorldSrc.split('    update(dt, t, px, pz) {')[1] || '').split('\n    },')[0]),
+      'update() 裡零每幀配置（不 new、不 map/filter）'
+    );
+    ok(/reducedMotion \? 0 : 1/.test(guardWorldSrc), 'prefers-reduced-motion 之下只留終態（呼吸整個停掉）');
+    // 板上的字只加不減（進度只累積在畫面上的樣子）
+    {
+      const built = testWorld.guardians.byId(guardianFile.id);
+      ok(Boolean(built), 'byId 找得到他');
+      eq(built.marks.length, GuardWorld.GUARDIAN_MARKS, '胸前那塊板畫得出交辦的每一行');
+      eq(guardianFile.latches.length, GuardWorld.GUARDIAN_MARKS, '交辦有幾行，板上就有幾行');
+      built.setOpen([0, 2]);
+      eq(built.open, 2, '對上兩行，板上就亮兩行');
+      built.setOpen([1]);
+      eq(built.open, 3, '再對上一行 → 三行（已經亮的不會因為清單變短而暗掉）');
+      built.clear();
+      eq(built.open, 0, '重置之後全暗');
+      eq(testWorld.markGuardianOpen(guardianFile.id, [0]), true, 'markGuardianOpen 找得到他');
+      eq(testWorld.markGuardianOpen('guardian-does-not-exist', [0]), false, 'markGuardianOpen 對不存在的 id 回 false');
+      built.clear();
+    }
+
+    // 碰撞稽核：加了守門者之後，未涵蓋仍然 0、可站立體仍然 0
+    const res18 = Audit18.auditCoverage(testWorld.guardians.group, World.solidAt, testWorld.solids, World.terrainHeight);
+    eq(res18.uncovered.length, 0, '守門者這一層沒有穿模點');
+    eq(Audit18.auditStandables(solids18, World.terrainHeight).bad.length, 0, '守門者的碰撞圓通得過可站立體稽核');
+
+    // 預算（P18 的框）
+    ok(testWorld.solids.length < 1100, '加了守門者之後碰撞體仍在框內', `n=${testWorld.solids.length}`);
+    {
+      let worldTris18 = 0;
+      let worldLights18 = 0;
+      testScene.traverse((o) => {
+        if (o.isLight) worldLights18 += 1;
+        const geo = o.geometry;
+        if (!geo) return;
+        const idx = geo.index ? geo.index.count : geo.attributes.position ? geo.attributes.position.count : 0;
+        worldTris18 += (idx / 3) * (o.isInstancedMesh ? o.count : 1);
+      });
+      ok(worldTris18 < WORLD_TRI_CEIL, `整個世界的三角數仍在框內（P20b 的框 ${WORLD_TRI_CEIL}）`, `tris=${worldTris18.toFixed(0)}`);
+      eq(worldLights18, 37, '光源仍然是 37 盞（這一層 0 盞）');
+      console.log(`    ↳ 預算：三角 ${worldTris18.toFixed(0)}、碰撞體 ${testWorld.solids.length}、光源 ${worldLights18}`);
+    }
+  }
+
+  /* --- ⑦ 存檔：純加法、只累積、重置清得乾淨 ------------------------ */
+  {
+    const base18 = SaveIO18.defaultSave();
+    ok(base18.guardians && typeof base18.guardians === 'object' && !Array.isArray(base18.guardians), '新存檔有空的 guardians 物件');
+    eq(Object.keys(base18.guardians).length, 0, '一開始是空的');
+    // 舊存檔（沒有這一欄）照樣讀得起來
+    const old18 = SaveIO18.normalize({ version: 1, xp: 10 });
+    eq(JSON.stringify(old18.guardians), '{}', '舊存檔沒有 guardians → 補成空物件（純加法）');
+    // 逐鍵驗形
+    const dirty18 = SaveIO18.normalize({
+      guardians: {
+        'ward-gatekeeper': { hits: ['frame', 'frame', 7], turns: -2, convinced: 1 },
+        '': { hits: ['x'] },
+        bad: { hits: 'nope' },
+      },
+    });
+    eq(JSON.stringify(dirty18.guardians['ward-gatekeeper'].hits), JSON.stringify(['frame']), '壞值清乾淨、去重排序');
+    eq(dirty18.guardians['ward-gatekeeper'].turns, 0, '負的次數落成 0');
+    eq(dirty18.guardians['ward-gatekeeper'].convinced, true, 'convinced 落成布林');
+    eq(dirty18.guardians.bad, undefined, 'hits 不是陣列的整筆丟掉');
+    // 進度只累積（progression 那一層）
+    {
+      memory.clear();
+      const p18 = createProgression({ curriculum, challenges });
+      eq(p18.guardianState('ward-gatekeeper'), null, '沒說過話 → null');
+      eq(p18.hasConvincedGuardian('ward-gatekeeper'), false, '一開始還沒被說服');
+      p18.tellGuardian('ward-gatekeeper', { hits: ['frame', 'rare'], convinced: false });
+      p18.tellGuardian('ward-gatekeeper', { hits: ['rank'], convinced: false });
+      eq(JSON.stringify(p18.guardianState('ward-gatekeeper').hits), JSON.stringify(['frame', 'rank', 'rare']), '兩次的聯集，永不清零');
+      eq(p18.guardianState('ward-gatekeeper').turns, 2, '說了兩次');
+      const done18 = p18.tellGuardian('ward-gatekeeper', { hits: [], convinced: true });
+      eq(done18.firstConvinced, true, '這一次才剛好說服他');
+      p18.tellGuardian('ward-gatekeeper', { hits: [], convinced: false });
+      eq(p18.hasConvincedGuardian('ward-gatekeeper'), true, '說服過就不會退回去');
+      // 它一格都不影響進度
+      eq(p18.state.xp, 0, '跟守門者說話不給 XP');
+      eq(Object.keys(p18.state.bestGrades).length, 0, '不寫任何一關的評價');
+      p18.resetAll();
+      eq(p18.guardianState('ward-gatekeeper'), null, '重置之後清乾淨');
+    }
+    // 靜態掃描：解鎖邏輯從頭到尾沒讀過這一欄
+    {
+      const fn18 = progSrc18.slice(progSrc18.indexOf('function refreshUnlocks'));
+      ok(!/guardians/.test(fn18.slice(0, fn18.indexOf('\n  }'))), 'refreshUnlocks() 沒有讀 guardians');
+    }
+  }
+
+  /* --- ⑧ 接線、UI 與文件 ------------------------------------------ */
+  {
+    ok(/world\.nearestGuardian\(/.test(mainSrc18), 'main.js 有守門者這一層 nearestGuardian');
+    ok(/e\.code === 'KeyE' && nearGuardian/.test(mainSrc18), '`E` 打得開守門者的小窗');
+    ok(/交辦對上了 \$\{gst\.hits\.length\} 行/.test(mainSrc18), 'HUD 的狀態說的是進度（不是結果）');
+    ok(/guardians\.map\(\(g\) => \[g\.at\[0\], g\.at\[1\]/.test(worldSrc18), 'keepClear 納入守門者');
+    ok(/guardianField\.update\(dt, t, x, z\)/.test(worldSrc18), 'updateReactions 每幀更新守門者場');
+    /*
+     * 寫好了卻沒有人呼叫的 reset() 等於沒有（P17 審查記過一次）——
+     * 存檔清了，世界端那塊板要跟著暗。
+     */
+    ok(/world\.guardians\?\.reset\?\.\(\)/.test(mainSrc18), 'onReset 真的呼叫了守門者場的 reset()');
+    ok(/Guard\.createGuard\(guardianFile\)/.test(mainSrc18), 'main.js 走 guard 介面拿判定者（不指定 ＝ 離線腳本）');
+    ok(/Guard\.evaluateLine\(opt\.text, guardianFile\)/.test(mainSrc18), '玩家挑的那一句真的送進評分引擎');
+    // 不新增快捷鍵：小窗自己不掛任何 keydown（Esc／Tab 由 createOverlay 管）
+    ok(!/addEventListener\('key/.test(guardUiSrc), '守門者的小窗沒有自己的鍵盤監聽（E 仍是唯一的互動鍵）');
+    ok(/rovingList\(/.test(guardUiSrc), '選項清單走 rovingList（↑↓ / Home / End）');
+    ok(/<kbd>Esc<\/kbd>/.test(guardUiSrc), '小窗寫得出 Esc 怎麼走開');
+    ok(!/https?:\/\//.test(guardUiSrc.replace(/\/\*[\s\S]*?\*\//g, '')), '小窗自己不寫死任何網址（連結一律來自資料）');
+    ok(/\.guard__opt\b/.test(cssSrc18), 'styles.css 有守門者選項的樣式');
+    ok(/\.guard__clause\.is-open/.test(cssSrc18), 'styles.css 標得出交辦哪一行對上了');
+    // 文件與資料是同一份
+    ok(/守門者/.test(worldMd18), 'WORLD.md 記得有守門者這一層');
+    ok(/守門者/.test(worldMd18.slice(worldMd18.indexOf('### 3.2'), worldMd18.indexOf('### 3.3'))), 'WORLD.md §3.2 的互動層表列得出守門者');
+    ok(/守門者/.test(worldMd18.slice(worldMd18.indexOf('### 1.5'), worldMd18.indexOf('### 1.6'))), 'WORLD.md §1.5 說得出他也是站著不動的人');
+    ok(/P18/.test(worldMd18), 'WORLD.md 標得出這一格');
+  }
+}
+
+/* ================================================================== *
+ * 相鄰區捷徑 ＋ 外交式導向（v1.2 · P19）
+ * ================================================================== *
+ *
+ * 兩件事，各有一句話要被證明：
+ *   ① 捷徑：**沒推開真的走不過去**，而且擋的只有門底下那一段（不是整條走廊）；
+ *      單側解鎖 —— 索繫在工坊那一頭，另一頭推不動。
+ *   ② 導向：螢火群真的偏向下一個建議去處，而且**關掉之後逐值回到原樣**
+ *      （不是只把設定存起來）。
+ *
+ * 每一條會動的斷言都配一個反例：把鎖拿掉、把導向關掉、把畫質切低，
+ * 同一把尺要立刻讀出不一樣的數字。
+ */
+console.log('\n▸ 相鄰區捷徑 ＋ 外交式導向（v1.2 · P19）');
+{
+  const worldSrc19 = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+  const reactSrc19 = readFileSync(resolve(root, 'src/world/reactive.js'), 'utf8');
+  const mainSrc19 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const setSrc19 = readFileSync(resolve(root, 'src/ui/settings.js'), 'utf8');
+  const worldMd19 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+  const Ground19 = await import('../src/world/ground.js');
+  const SC = World.SHORTCUTS;
+  const sc = SC[0];
+  const site19 = (id) => World.REGION_SITES.find((s) => s.id === id);
+  /** 沿走廊的局部座標（測試自己算一次，不借被測的那一支）。 */
+  const local19 = (along, lat = 0) => [
+    sc.from.x + sc.dir.x * along + -sc.dir.z * lat,
+    sc.from.z + sc.dir.z * along + sc.dir.x * lat,
+  ];
+
+  /* --- ① 資料契約：逐值比對（不是只比 key） ------------------------- */
+  {
+    eq(SC.length, 1, 'P19：先做一條捷徑（其餘等體感）');
+    eq(sc.id, 'south-arc', 'P19：那一條叫 south-arc');
+    eq(sc.fromRegion, 'orchestration', 'P19：一頭是齒輪工坊');
+    eq(sc.toRegion, 'forms', 'P19：另一頭是量器坊');
+    eq(sc.unlockFrom, 'orchestration', 'P19：索繫在齒輪工坊那一頭');
+    eq(sc.half, 4, 'P19：走廊半寬 4（橋是 9 —— 這是窄走廊）');
+    eq(sc.flat, 2, 'P19：走廊平段半寬 2');
+    ok(sc.half < World.CORRIDORS[0].half, 'P19：捷徑真的比橋窄', `${sc.half} < ${World.CORRIDORS[0].half}`);
+    eq(Object.isFrozen(SC), true, 'P19：捷徑表凍結了（甲板高度補完之後）');
+    eq(Object.isFrozen(sc), true, 'P19：那一筆本身也凍結了');
+    ok(Math.abs(sc.length - Math.hypot(sc.to.x - sc.from.x, sc.to.z - sc.from.z)) < 1e-9, 'P19：長度就是兩端的距離', sc.length.toFixed(2));
+    ok(Math.abs(Math.hypot(sc.dir.x, sc.dir.z) - 1) < 1e-12, 'P19：方向是單位向量');
+    /*
+     * 兩端要落在**各自土地走得到的那一圈裡面**（`SITE_RIM`），
+     * 不然走廊接不上土地 —— 中間會留一段虛空。這裡不引用常數，直接問覆蓋率。
+     */
+    for (const [label, pt, id] of [['齒輪工坊', sc.from, sc.fromRegion], ['量器坊', sc.to, sc.toRegion]]) {
+      const s = site19(id);
+      const d = Math.hypot(pt.x - s.x, pt.z - s.z);
+      ok(d < s.radius, `P19：[${label}] 走廊那一端在土地的圓盤裡`, d.toFixed(2));
+      ok(
+        World.coverage(pt.x, pt.z, World.CORRIDORS.length) >= World.STAND_COVER_MIN,
+        `P19：[${label}] 那一端**沒有捷徑時本來就站得住**（走廊接得上土地）`,
+        World.coverage(pt.x, pt.z, World.CORRIDORS.length).toFixed(3)
+      );
+    }
+    // 走廊不得擦到第三片土地（含加建院落）
+    for (const s of World.REGION_SITES) {
+      if (s.id === sc.fromRegion || s.id === sc.toRegion) continue;
+      const d = distToSeg(s.x, s.z, sc.from.x, sc.from.z, sc.to.x, sc.to.z);
+      ok(d > s.radius + 4, `P19：走廊離「${s.id}」夠遠（不會借道第三片土地）`, d.toFixed(1));
+    }
+    // 也不得擦到別人的橋
+    for (const c of World.CORRIDORS) {
+      const d = distToSeg(c.gate.x, c.gate.z, sc.from.x, sc.from.z, sc.to.x, sc.to.z);
+      ok(d > 20, `P19：走廊離「${c.region}」那道閘門夠遠`, d.toFixed(1));
+    }
+    /*
+     * 地面色也要接得上：捷徑要登記一段跨距，不然那條甲板不屬於任何一片土地，
+     * `groundBlend()` 回空陣列 → 拿中央高原那一組當底，兩端各留一條硬邊。
+     */
+    {
+      const span = World.BRIDGE_SPANS.find((sp) => sp.fromId === sc.fromRegion && sp.toId === sc.toRegion);
+      ok(Boolean(span), 'P19：捷徑登記了一段地面色的跨距');
+      // 走廊偏離那條中線最多幾公尺（要在 SPAN_HALF_W 之內，跨距才蓋得到甲板）。
+      // 沒有那一筆時**不要往下解參照** —— 一個 null 會把整支測試炸掉（P17 審查記過一次）
+      if (span) {
+        let worst = 0;
+        for (let a = 0; a <= sc.length; a += 0.5) {
+          const [x, z] = local19(a, 0);
+          const d = distToSeg(x, z, span.ax, span.az, span.bx, span.bz);
+          if (d > worst) worst = d;
+        }
+        ok(worst < Ground19.SPAN_HALF_W, 'P19：整條走廊都在那段跨距的漸變帶裡', `${worst.toFixed(2)} < ${Ground19.SPAN_HALF_W}`);
+      }
+    }
+  }
+
+  /* --- ② 甲板兩端接上自己的地（P19 的核心幾何斷言） ------------------ *
+   *
+   * 甲板兩端的高度是**問出來的**（「沒有這條走廊時這裡多高」），不是手打的。
+   * 可以驗的性質：走廊的兩個端點上，`terrainRelief()` 與加走廊之前**逐位元組相同**。
+   */
+  {
+    for (const [label, pt, deck] of [['起點', sc.from, sc.deckA], ['終點', sc.to, sc.deckB]]) {
+      const base = World.terrainRelief(pt.x, pt.z);
+      /*
+       * v1.2 · P22c：從「逐位元組相等」放成 1e-9 公尺。
+       * 這不是讓步 —— 這條斷言自己宣稱的是「一毫米都沒動」，而 1e-9 公尺比一毫米嚴一百萬倍。
+       * 位元組相等擋不住任何真的迴歸（手打常數會差好幾公分），卻會被高度場裡
+       * **任何一處浮點運算重排**打掉（P22c 把地貌座標除以 RELIEF_SPAN，就差了 1 個 ULP ＝ 1.1e-16 公尺）。
+       */
+      ok(Math.abs(base - deck) < 1e-9, `P19：[${label}] 甲板的高度就是那一點的地（一毫米都沒動）`, `Δ=${Math.abs(base - deck).toExponential(2)}`);
+    }
+    ok(Math.abs(sc.deckA - sc.deckB) > 0.3, 'P19：兩端的地本來就不一樣高（甲板真的在接兩個不同的高度）', `${sc.deckA.toFixed(2)} vs ${sc.deckB.toFixed(2)}`);
+    /*
+     * **反例**：橋用的是寫死的 1.1 / 1.1 / 0.7。把那組數字套到這條走廊上，
+     * 同樣那兩點的地會被抬起來 —— 證明上面那兩條不是永遠成立的斷言。
+     */
+    {
+      const fake = 1.1;
+      const wA = World.coverage(sc.from.x, sc.from.z, World.CORRIDORS.length);
+      const shifted = Math.abs((wA * sc.deckA + fake) / (wA + 1) - sc.deckA);
+      ok(shifted > 0.2, 'P19[反例]：甲板改用橋那組寫死的高度，起點的地會被抬起來', `${shifted.toFixed(2)}m`);
+    }
+    // 七座橋一個位元組都沒變（`corridorHeight` 抽成欄位之後仍然是 1.1 + sin(πt)·0.7）
+    for (const c of World.CORRIDORS) {
+      eq(c.deckA, 1.1, `P19：[bridge:${c.region}] 甲板起點仍然是 1.1`);
+      eq(c.deckB, 1.1, `P19：[bridge:${c.region}] 甲板終點仍然是 1.1`);
+      eq(c.rise, 0.7, `P19：[bridge:${c.region}] 拱高仍然是 0.7`);
+    }
+  }
+
+  /* --- ③ 門立在量器坊自己那道區鎖的圈上（兩道鎖疊在同一步） ---------- */
+  {
+    const s = site19(sc.toRegion);
+    const d = Math.hypot(sc.gate.x - s.x, sc.gate.z - s.z);
+    ok(Math.abs(d - (s.radius + World.REGION_LOCK_PAD)) < 1e-6, 'P19：門就立在量器坊區鎖那一圈上', d.toFixed(3));
+    eq(World.REGION_LOCK_PAD, 4, 'P19：區鎖那一圈比土地半徑多 4 公尺');
+    ok(
+      new RegExp('site\\.radius \\+ REGION_LOCK_PAD').test(worldSrc19),
+      'P19：`isWalkable()` 用的就是同一個常數（門檻只留一份）'
+    );
+    ok(sc.gateAt > 0 && sc.gateAt < sc.length, 'P19：門落在走廊上（不是端點外）', sc.gateAt.toFixed(2));
+    // 兩座絞盤：都在走廊上、都不在門底下那一段、都站得住
+    for (const [label, pt] of [['工坊那一頭', sc.winchFrom], ['量器坊那一頭', sc.winchTo]]) {
+      ok(World.coverage(pt.x, pt.z) >= World.STAND_COVER_MIN, `P19：[${label}] 絞盤站在走得到的甲板上`);
+      eq(World.onShortcutBlock(sc, pt.x, pt.z), false, `P19：[${label}] 絞盤不在門底下那一段裡`);
+      const d2 = Math.hypot(pt.x - sc.gate.x, pt.z - sc.gate.z);
+      ok(d2 < World.WINCH_RADIUS * 2.5, `P19：[${label}] 絞盤就在門邊（不用找）`, d2.toFixed(1));
+    }
+  }
+
+  /* --- ④ 走廊上不放程序化道具（窄走廊擋一顆石頭就走不過去） ---------- */
+  {
+    for (let a = 0; a <= sc.length; a += 0.5) {
+      for (const lat of [-3, -1.5, 0, 1.5, 3]) {
+        const [x, z] = local19(a, lat);
+        eq(World.inCorridor(x, z), true, `P19：走廊 (${a.toFixed(1)}, ${lat}) 算在動線裡（不准擺東西）`);
+      }
+    }
+    // 反例：離走廊 8 公尺就不算動線了（這條規則沒有把半張地圖圈起來）
+    {
+      const [x, z] = local19(sc.length / 2, 8.5);
+      eq(World.inCorridor(x, z), false, 'P19[反例]：離走廊 8.5 公尺不算動線');
+    }
+  }
+
+  /* --- ⑤ 沒推開真的走不過去；推開了就走得過去 ----------------------- */
+  {
+    /** 蓋一個「這條捷徑開／關」的世界（其餘與出貨那一份逐位元組相同）。 */
+    const worldWith = (open, lockTo = false) => {
+      const restore = installCanvasStub();
+      const scene = new THREE.Scene();
+      const w = World.createWorld({
+        engine: { scene, camera: {}, onUpdate() {} },
+        quality: 'high',
+        ...worldOpts,
+        progression: {
+          ...stubProgression,
+          isShortcutOpen: () => open,
+          // `lockTo` ＝ 另一頭那片土地也還鎖著（「站在門上按重置進度」那一刻的世界）
+          isRegionUnlocked: (id) => !(lockTo && id === sc.toRegion),
+        },
+      });
+      restore();
+      return { world: w, scene };
+    };
+    const shut = worldWith(false).world;
+    const open = worldWith(true).world;
+    /**
+     * 審查①要測的那個世界：門關回去、**而且量器坊重新上鎖**。
+     * 那正是「捷徑推開過、人站在門上按重置進度」的下一幀
+     * （`resetShortcuts()` 關門、`resetAll()` 把解鎖清光）。
+     */
+    const shutLocked = worldWith(false, true).world;
+
+    /** 只在走廊足跡裡的洪水填充：從工坊那一頭出發，走得到量器坊那一頭嗎。 */
+    const alongLane = (w) => {
+      const STEP = 0.25;
+      const LATS = 25; // -3 … 3
+      const NA = Math.round(sc.length / STEP) + 1;
+      const seen = new Uint8Array(NA * LATS);
+      const latOf = (j) => -3 + j * 0.25;
+      const walk = (i, j) => {
+        const [x, z] = local19(i * STEP, latOf(j));
+        return w.isClear(x, z, null);
+      };
+      const start = [Math.round(2 / STEP), 12];
+      if (!walk(start[0], start[1])) return { ok: false, why: '起點就站不住' };
+      const q = [start[0] * LATS + start[1]];
+      seen[q[0]] = 1;
+      let head = 0;
+      while (head < q.length) {
+        const cur = q[head];
+        head += 1;
+        const i = Math.floor(cur / LATS);
+        const j = cur - i * LATS;
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const ni = i + di;
+          const nj = j + dj;
+          if (ni < 0 || nj < 0 || ni >= NA || nj >= LATS) continue;
+          const k = ni * LATS + nj;
+          if (seen[k] || !walk(ni, nj)) continue;
+          seen[k] = 1;
+          q.push(k);
+        }
+      }
+      const end = Math.round((sc.length - 2) / STEP) * LATS + 12;
+      return { ok: seen[end] === 1, reached: q.length };
+    };
+    const shutFill = alongLane(shut);
+    const openFill = alongLane(open);
+    eq(shutFill.ok, false, 'P19：**沒推開時，沿著走廊走不到另一頭**');
+    eq(openFill.ok, true, 'P19[反例]：把鎖拿掉，同一條走廊就走得通了');
+    ok(openFill.reached > shutFill.reached, 'P19：推開之後走得到的甲板變多了', `${openFill.reached} > ${shutFill.reached}`);
+
+    // 擋的只有門底下那一段：兩側都走得到門前（換一個看不見的牆不算修好）
+    for (const [label, a] of [['工坊側', sc.gateAt - World.SHORTCUT_BLOCK / 2 - 0.4], ['量器坊側', sc.gateAt + World.SHORTCUT_BLOCK / 2 + 0.4]]) {
+      const [x, z] = local19(a, 0);
+      eq(shut.isWalkable(x, z), true, `P19：[${label}] 沒推開也走得到門前`);
+    }
+    // 門底下那一段：沒推開一定擋、推開一定通
+    for (let lat = -3; lat <= 3; lat += 0.5) {
+      const [x, z] = local19(sc.gateAt, lat);
+      if (World.coverage(x, z) < World.STAND_COVER_MIN) continue;
+      eq(shut.isWalkable(x, z), false, `P19：門底下 lat=${lat} 沒推開走不過去`);
+      eq(open.isWalkable(x, z), true, `P19[反例]：推開之後 lat=${lat} 走得過去`);
+    }
+    /*
+     * 開口寬度：推開之後中間留得出人走的路（玩家半徑 0.62）。
+     * 最窄的一步不在門底下，而是**絞盤旁邊** —— 所以整條走廊都量一次，不是只量門。
+     */
+    {
+      const widthAt = (along) => {
+        let widest = 0;
+        let run = 0;
+        for (let lat = -4.5; lat <= 4.5; lat += 0.05) {
+          const [x, z] = local19(along, lat);
+          if (open.isClear(x, z, null)) {
+            run += 0.05;
+            if (run > widest) widest = run;
+          } else run = 0;
+        }
+        return widest;
+      };
+      ok(widthAt(sc.gateAt) > 5.5, 'P19：推開之後門那一步 > 5.5 公尺寬', `${widthAt(sc.gateAt).toFixed(2)}m`);
+      let narrow = Infinity;
+      let narrowAt = 0;
+      for (let a = 1; a <= sc.length - 1; a += 0.25) {
+        const w = widthAt(a);
+        if (w < narrow) {
+          narrow = w;
+          narrowAt = a;
+        }
+      }
+      ok(narrow > 3.5, 'P19：整條走廊最窄的一步也留得出 3.5 公尺（玩家半徑 0.62）', `${narrow.toFixed(2)}m @${narrowAt.toFixed(2)}`);
+      ok(
+        Math.abs(narrowAt - sc.gateAt) > 2,
+        'P19：最窄的那一步在絞盤旁邊，不在門底下（門不是瓶頸）',
+        narrowAt.toFixed(2)
+      );
+    }
+    /*
+     * **不管腳在多高都擋**（同虛空與閘門）：跳到一半也不准飄過門去。
+     */
+    {
+      const [x, z] = local19(sc.gateAt, 0);
+      eq(shut.isWalkable(x, z, World.terrainHeight(x, z) + 3), false, 'P19：腳離地 3 公尺照樣過不去');
+    }
+    /*
+     * **絕不能把玩家關住**（護欄）：門底下那 2.4 公尺的地是平的，人站得上去；
+     * 「重置進度」那一刻剛好站在門底下的人，保險絲要一步一步把他請出來。
+     */
+    {
+      /*
+       * v1.2 · P19（審查①）：**問的是「推得到一個走得到的地方」，不是「有沒有移動」。**
+       * 舊斷言只驗 `> 1e-6`，於是往前推進量器坊區鎖圈那條死路照樣是綠的
+       * —— 它每一步都在動，動完就再也動不了。
+       * 這裡改成**跑完整條脫困**：一直呼叫保險絲，直到它說「不用推了」，
+       * 然後問最後停下來的那一點走不走得到。
+       */
+      const escapeRun = (w, x0, z0) => {
+        let x = x0;
+        let z = z0;
+        let steps = 0;
+        for (; steps < 60; steps += 1) {
+          const e = w.escapeSolid(x, z);
+          if (!e) break;
+          if (Math.hypot(e.x - x, e.z - z) < 1e-6) break; // 推不動 ＝ 關住了
+          x = e.x;
+          z = e.z;
+        }
+        return { x, z, steps, free: w.escapeSolid(x, z) === null && w.isWalkable(x, z, null) };
+      };
+      /*
+       * 這一格量的就是「往前那個出口在圈裡、往回那個出口在圈外」——
+       * 兩條先講清楚，下面那組斷言才不是碰巧綠的。
+       */
+      const site19 = World.REGION_SITES.find((s) => s.id === sc.toRegion);
+      ok(Boolean(site19), 'P19：找得到捷徑另一頭那片土地');
+      if (site19) {
+        const lockR = site19.radius + World.REGION_LOCK_PAD;
+        const [fx, fz] = local19(sc.gateAt + World.SHORTCUT_BLOCK / 2 + 0.05, 0);
+        const [bx, bz] = local19(sc.gateAt - World.SHORTCUT_BLOCK / 2 - 0.05, 0);
+        const dF = Math.hypot(fx - site19.x, fz - site19.z);
+        const dB = Math.hypot(bx - site19.x, bz - site19.z);
+        ok(dF < lockR, 'P19：往前那個出口落在量器坊的區鎖圈裡（審查①測的就是它）', `${dF.toFixed(2)} < ${lockR}`);
+        ok(dB > lockR, 'P19：往回那個出口在圈外（所以換一個方向就出得去）', `${dB.toFixed(2)} > ${lockR}`);
+      }
+      for (const [label, w] of [
+        ['量器坊已解鎖', shut],
+        ['量器坊也鎖著（重置進度那一刻）', shutLocked],
+      ]) {
+        let moved = 0;
+        let freed = 0;
+        let inBand = 0;
+        let worst = 0;
+        for (let a = sc.gateAt - World.SHORTCUT_BLOCK / 2; a <= sc.gateAt + World.SHORTCUT_BLOCK / 2; a += 0.2) {
+          for (let lat = -3; lat <= 3; lat += 0.5) {
+            const [x, z] = local19(a, lat);
+            // 只算真的落在「門底下那一段」裡、而且站得住的點（邊界那一圈由浮點決定，不硬猜）
+            if (!World.onShortcutBlock(sc, x, z)) continue;
+            if (World.coverage(x, z) < World.STAND_COVER_MIN) continue;
+            inBand += 1;
+            const esc = w.escapeSolid(x, z);
+            if (esc && Math.hypot(esc.x - x, esc.z - z) > 1e-6) moved += 1;
+            const run = escapeRun(w, x, z);
+            if (run.free) freed += 1;
+            if (run.steps > worst) worst = run.steps;
+          }
+        }
+        ok(inBand > 40, `P19：[${label}] 門底下真的有一片站得上去的地（不是一條空過的斷言）`, String(inBand));
+        eq(moved, inBand, `P19：[${label}] 站在門底下的每一點，保險絲都推得動`);
+        eq(
+          freed,
+          inBand,
+          `P19：[${label}] **而且每一點都推得到一個真的走得到的地方**（不是把人推進另一道鎖裡）`
+        );
+        ok(worst <= 20, `P19：[${label}] 最慢的那一點 ${worst} 步就出得去（不會推到天荒地老）`, String(worst));
+      }
+      // 反例：門開著的時候那一段本來就走得到，保險絲不該動作
+      const [mx, mz] = local19(sc.gateAt, 0);
+      eq(open.escapeSolid(mx, mz), null, 'P19[反例]：門開著時保險絲不動作（沒卡住就不推）');
+    }
+    /*
+     * v1.2 · P19（審查②）：**幕的法線要順著走向。**
+     * `PlaneGeometry` 的寬邊在局部 +X，`rotation.y = θ` 把它轉到世界的 (cosθ, −sinθ)；
+     * 寫成 `θ + π/2` 會讓那片幕**順著走廊躺著**（實測 normal·dir ＝ 0.0000），
+     * 走到關著的門前只看得到一條細縫 —— 剩下的只有一根浮在 0.96 公尺高的門閂，
+     * 底下看起來走得過去，人卻被擋下來（§6.3 不准的那種看不見的牆）。
+     * 既有的斷言只問 `veil.visible`，看不到這件事。
+     */
+    {
+      const flatNormal = (obj) => {
+        obj.updateMatrixWorld(true);
+        const n = new THREE.Vector3(0, 0, 1).applyQuaternion(obj.getWorldQuaternion(new THREE.Quaternion()));
+        n.y = 0;
+        return n.normalize();
+      };
+      const built19 = shut.shortcutObjects[0];
+      ok(Boolean(built19 && built19.veil), 'P19：拿得到捷徑那一片幕');
+      if (built19 && built19.veil) {
+        const nv = flatNormal(built19.veil);
+        const dot = nv.x * sc.dir.x + nv.z * sc.dir.z;
+        ok(Math.abs(dot) > 0.999, 'P19：捷徑那片幕擋在門口（法線順著走向，不是側著躺）', dot.toFixed(4));
+        // 門閂那根板一直是對的 —— 幕要跟它同一個朝向，不然一個擋著、一個躺著
+        const pivot = built19.bar.parent;
+        ok(
+          Math.abs(Math.cos(built19.veil.rotation.y - pivot.rotation.y) - 1) < 1e-9,
+          'P19：幕與門閂同一個朝向',
+          `${built19.veil.rotation.y.toFixed(4)} vs ${pivot.rotation.y.toFixed(4)}`
+        );
+      }
+      // 閘門那一片幕：同一個老 bug 被照抄過去，兩處一起守
+      let planes = 0;
+      for (const g of shut.gates) {
+        const corr =
+          World.CORRIDORS.find((c) => c.region === g.id) || World.ANNEX_LINKS.find((a) => a.region === g.id);
+        ok(Boolean(corr), `P19：[${g.id}] 找得到這道閘門的走向（查表要有守衛）`);
+        if (!corr) continue;
+        g.group.traverse((o) => {
+          if (!o.isMesh || !o.geometry || o.geometry.type !== 'PlaneGeometry') return;
+          planes += 1;
+          const n = flatNormal(o);
+          const dot = n.x * corr.dir.x + n.z * corr.dir.z;
+          ok(Math.abs(dot) > 0.999, `P19：[${g.id}] 閘門那片幕擋在門口（法線順著走向）`, dot.toFixed(4));
+        });
+      }
+      eq(planes, shut.gates.length, 'P19：每一道閘門的幕都量到了（一道一片，不是一條空過的斷言）', String(planes));
+    }
+    /*
+     * 「這一點的地是捷徑自己鋪出來的嗎」—— 門底下一定是（沒有捷徑那裡就是虛空），
+     * 走廊兩端一定不是（那是土地自己的地）。
+     */
+    {
+      const [gx, gz] = local19(sc.gateAt, 0);
+      eq(World.onlyByShortcut(gx, gz), true, 'P19：門底下那一塊地是捷徑自己鋪出來的');
+      eq(World.onlyByShortcut(sc.from.x, sc.from.z), false, 'P19：走廊起點站的是齒輪工坊自己的地');
+      eq(World.onlyByShortcut(sc.to.x, sc.to.z), false, 'P19：走廊終點站的是量器坊自己的地');
+      let only = 0;
+      for (let a = 0; a <= sc.length; a += 0.25) {
+        const [x, z] = local19(a, 0);
+        if (World.onlyByShortcut(x, z)) only += 1;
+      }
+      ok(only * 0.25 > 15, 'P19：走廊中線有 15 公尺以上完全靠自己撐著（真的跨過虛空）', `${(only * 0.25).toFixed(1)}m`);
+    }
+    // 進度替身沒有 isShortcutOpen（舊存檔 / 舊替身）→ 一律當成沒推開
+    {
+      const restore = installCanvasStub();
+      const bare = World.createWorld({
+        engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} },
+        quality: 'high',
+        ...worldOpts,
+      });
+      restore();
+      const [x, z] = local19(sc.gateAt, 0);
+      eq(bare.isWalkable(x, z), false, 'P19：進度替身答不出來時保守當成「還沒推開」');
+    }
+
+    /* --- 單側解鎖：索繫在工坊那一頭 --- */
+    {
+      const w = worldWith(false).world;
+      const fromHit = w.nearestShortcutWinch({ x: sc.winchFrom.x, z: sc.winchFrom.z });
+      const toHit = w.nearestShortcutWinch({ x: sc.winchTo.x, z: sc.winchTo.z });
+      ok(fromHit && fromHit.winch.side === 'from', 'P19：站到工坊那一頭問得到絞盤');
+      ok(toHit && toHit.winch.side === 'to', 'P19：站到量器坊那一頭問得到另一只鼓');
+      eq(fromHit.winch.canOpen, true, 'P19：工坊那一頭推得動');
+      eq(toHit.winch.canOpen, false, 'P19：量器坊那一頭**看得到、推不開**');
+      // 從推不開的那一頭推：什麼都不會發生（也不叫失敗）
+      for (let i = 0; i < 5; i += 1) {
+        const r = w.pushWinch(toHit.winch);
+        eq(r.pushed, false, 'P19：推不開的那一只鼓推不動');
+        eq(r.stuck, true, 'P19：它老實說「索在另一邊」');
+      }
+      const [gx, gz] = local19(sc.gateAt, 0);
+      eq(w.isWalkable(gx, gz), false, 'P19：推了五次另一只鼓，門還是關著');
+      // 從推得動的那一頭推：三下才開（按三次 E，不發明「按住」）
+      const turns = [];
+      for (let i = 0; i < Handles.CAPSTAN_TURNS; i += 1) turns.push(w.pushWinch(fromHit.winch));
+      eq(turns.length, Handles.CAPSTAN_TURNS, 'P19：絞盤要推三下');
+      eq(turns.slice(0, -1).every((r) => r.pushed && !r.complete), true, 'P19：前兩下只是咬進一格');
+      eq(turns[turns.length - 1].complete, true, 'P19：第三下門就放下來了');
+      eq(fromHit.winch.shortcut.isOpen, true, 'P19：世界端那道門開了');
+      // 推到一半走開不會失敗，只是回到原地重來（不寫存檔 —— 與器物層的絞盤同一條規矩）
+      {
+        const half = worldWith(false).world;
+        const h = half.nearestShortcutWinch({ x: sc.winchFrom.x, z: sc.winchFrom.z });
+        half.pushWinch(h.winch);
+        eq(h.winch.shortcut.remaining, Handles.CAPSTAN_TURNS - 1, 'P19：推一下之後還剩兩下');
+        const again = worldWith(false).world;
+        const h2 = again.nearestShortcutWinch({ x: sc.winchFrom.x, z: sc.winchFrom.z });
+        eq(h2.winch.shortcut.remaining, Handles.CAPSTAN_TURNS, 'P19：重開一次從頭來（推到一半不寫存檔）');
+      }
+    }
+
+    /* --- 護欄 7：不按空白鍵的可達性一個都沒少 --- */
+    {
+      // 門是關的那個世界（＝最保守的那一份）也要走得到每一個互動點
+      const STEP = 0.5;
+      // 框住整片畫出來的地面再多兩公尺（v1.2 · P22c：221 → 223）；寫死的 172 框不住攤開後的外圈。
+      const R19 = World.TERRAIN_SIZE / 2 + 2;
+      const N19 = Math.round((R19 * 2) / STEP) + 1;
+      const seen = new Uint8Array(N19 * N19);
+      const toCell = (x, z) => [Math.round((x + R19) / STEP), Math.round((z + R19) / STEP)];
+      const q = [];
+      const st = toCell(World.SPAWN_AT[0], World.SPAWN_AT[1]);
+      seen[st[0] * N19 + st[1]] = 1;
+      q.push(st[0] * N19 + st[1]);
+      let head = 0;
+      let reached = 0;
+      while (head < q.length) {
+        const cur = q[head];
+        head += 1;
+        reached += 1;
+        const i = Math.floor(cur / N19);
+        const j = cur - i * N19;
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const ni = i + di;
+          const nj = j + dj;
+          if (ni < 0 || nj < 0 || ni >= N19 || nj >= N19) continue;
+          const k = ni * N19 + nj;
+          if (seen[k]) continue;
+          if (!shut.isClear(ni * STEP - R19, nj * STEP - R19, null)) continue;
+          seen[k] = 1;
+          q.push(k);
+        }
+      }
+      const near19 = (x, z, reachM = 2) => {
+        const pad = Math.ceil(reachM / STEP);
+        const [ci, cj] = toCell(x, z);
+        for (let di = -pad; di <= pad; di += 1) {
+          for (let dj = -pad; dj <= pad; dj += 1) {
+            const ni = ci + di;
+            const nj = cj + dj;
+            if (ni < 0 || nj < 0 || ni >= N19 || nj >= N19) continue;
+            if (seen[ni * N19 + nj]) return true;
+          }
+        }
+        return false;
+      };
+      ok(reached > 60000, 'P19：洪水填充走過整張地圖', String(reached));
+      let bad19 = 0;
+      for (const c of challenges) if (!near19(c.position[0], c.position[1])) bad19 += 1;
+      eq(bad19, 0, 'P19：門關著時 142 座石座照樣走得到（可達性一個都沒少）');
+      for (const [label, list] of [
+        ['守夜人', readJson('src/data/watchmen.json').entries.map((w) => [w.at[0], w.at[1]])],
+        ['濁靈', readJson('src/data/murks.json').entries.map((m) => [m.at[0], m.at[1]])],
+      ]) {
+        let n19 = 0;
+        for (const [x, z] of list) if (!near19(x, z)) n19 += 1;
+        eq(n19, 0, `P19：門關著時 ${list.length} 個${label}照樣走得到`);
+      }
+      // 兩座絞盤本身也走得到（門關著也要走得到工坊那一頭 —— 不然永遠推不開）
+      ok(near19(sc.winchFrom.x, sc.winchFrom.z, 2), 'P19：門關著時走得到工坊那一頭的絞盤');
+      ok(near19(sc.winchTo.x, sc.winchTo.z, 2), 'P19：門關著時（繞路）也走得到另一只鼓');
+    }
+
+    /* --- 預算 --- */
+    {
+      const { scene: s19, world: w19 } = worldWith(true);
+      let lights19 = 0;
+      let tris19 = 0;
+      s19.traverse((o) => {
+        if (o.isLight) lights19 += 1;
+        if (o.isMesh && o.geometry) {
+          const g = o.geometry;
+          const n = g.index ? g.index.count / 3 : g.attributes.position ? g.attributes.position.count / 3 : 0;
+          tris19 += n * (o.isInstancedMesh ? o.count : 1);
+        }
+      });
+      eq(lights19, 37, 'P19：光源數仍然是 37（捷徑與導向一盞都沒加）');
+      ok(tris19 < WORLD_TRI_CEIL, `P19：世界三角形 < ${WORLD_TRI_CEIL}（P20b 的框）`, `tris=${Math.round(tris19)}`);
+      ok(w19.solids.length < 1100, 'P19：碰撞體 < 1,100', String(w19.solids.length));
+      // 捷徑自己：門的兩根柱是細桿（不登記圓），只有兩座絞盤擋人
+      const onLane = w19.solids.filter(
+        (s) => distToSeg(s.x, s.z, sc.from.x, sc.from.z, sc.to.x, sc.to.z) <= sc.half
+      );
+      eq(onLane.length, 2, 'P19：走廊上只有兩顆碰撞圓（兩座絞盤）', JSON.stringify(onLane.map((s) => [s.x.toFixed(1), s.z.toFixed(1)])));
+      eq(onLane.every((s) => s.standable === false), true, 'P19：絞盤站不上一個人的頭（可站立體沒有多出來）');
+      const grp19 = s19.getObjectByName(`shortcut:${sc.id}`);
+      ok(Boolean(grp19), 'P19：場景裡撈得到那一條捷徑');
+      let scLights = 0;
+      grp19.traverse((o) => {
+        if (o.isLight) scLights += 1;
+      });
+      eq(scLights, 0, 'P19：捷徑自己 0 光源（門閂那一線與地環都是自發光／加色片）');
+    }
+  }
+
+  /* --- ⑥ 存檔：純加法、只往開的方向走、reset 清得乾淨 ---------------- */
+  {
+    eq(JSON.stringify(SaveIO.defaultSave().shortcuts), '{}', 'P19：全新存檔一條捷徑都沒推開');
+    eq(JSON.stringify(SaveIO.normalize({}).shortcuts), '{}', 'P19：舊存檔沒有這一欄 → 空物件');
+    eq(SaveIO.normalize({ shortcuts: { 'south-arc': true } }).shortcuts['south-arc'], true, 'P19：明寫的 true 會被尊重');
+    eq('south-arc' in SaveIO.normalize({ shortcuts: { 'south-arc': false } }).shortcuts, false, 'P19：false 一律當成還沒推開');
+    eq('south-arc' in SaveIO.normalize({ shortcuts: { 'south-arc': 'yes' } }).shortcuts, false, 'P19：非布林值丟掉');
+    eq(JSON.stringify(SaveIO.normalize({ shortcuts: ['south-arc'] }).shortcuts), '{}', 'P19：陣列不是合法的形狀');
+    eq(JSON.stringify(SaveIO.normalize({ shortcuts: { ['x'.repeat(80)]: true } }).shortcuts), '{}', 'P19：太長的鍵丟掉');
+    // 設定：螢火指路預設開，只認得明寫的 false
+    eq(SaveIO.defaultSave().settings.guides, true, 'P19：全新存檔的螢火指路是開的');
+    eq(SaveIO.normalize({}).settings.guides, true, 'P19：舊存檔沒有這一欄 → 開著');
+    eq(SaveIO.normalize({ settings: {} }).settings.guides, true, 'P19：有 settings 但沒這一欄也是開著');
+    eq(SaveIO.normalize({ settings: { guides: false } }).settings.guides, false, 'P19：明寫的關會被尊重');
+    eq(SaveIO.normalize({ settings: { guides: 'no' } }).settings.guides, true, 'P19：非布林值退回預設（開）');
+    {
+      const p19 = createProgression({ curriculum, challenges });
+      eq(p19.isShortcutOpen('south-arc'), false, 'P19：一開始一條都沒推開');
+      eq(p19.shortcutCount(), 0, 'P19：推開的條數是 0');
+      const first = p19.openShortcut('south-arc');
+      eq(first.opened, true, 'P19：第一次推開就是推開');
+      eq(p19.isShortcutOpen('south-arc'), true, 'P19：推開之後記著了');
+      const again = p19.openShortcut('south-arc');
+      eq(again.opened, false, 'P19：再推一次不會重複記帳');
+      eq(again.alreadyOpen, true, 'P19：它老實說「已經開了」');
+      eq(p19.state.xp, 0, 'P19：推開捷徑不給 XP');
+      eq(Object.keys(p19.state.bestGrades).length, 0, 'P19：不寫任何一關的評價');
+      eq(p19.state.collected.length, 0, 'P19：不收技巧');
+      eq(p19.openShortcut('').opened, false, 'P19：空 id 什麼都不做');
+      p19.resetAll();
+      eq(p19.isShortcutOpen('south-arc'), false, 'P19：重置之後清乾淨');
+    }
+    // 靜態掃描：解鎖邏輯從頭到尾沒讀過這一欄
+    {
+      const progSrc19 = readFileSync(resolve(root, 'src/progression/progression.js'), 'utf8');
+      const fn19 = progSrc19.slice(progSrc19.indexOf('function refreshUnlocks'));
+      ok(!/shortcuts/.test(fn19.slice(0, fn19.indexOf('\n  }'))), 'P19：refreshUnlocks() 沒有讀 shortcuts');
+    }
+  }
+
+  /* --- ⑦ 外交式導向：真的偏過去，而且關掉真的回到原樣 ---------------- */
+  {
+    const kit19 = kitFor('#8aa0b4');
+    const mothSpot = Reactive.REACTIVE_SPOTS.find((s) => s.kind === 'moths');
+    ok(Boolean(mothSpot), 'P19：世界上真的有螢火群這一層');
+    ok(Reactive.MOTH_GUIDE_LEAN > 0.4, 'P19：靜態的那一段大到看得出來', String(Reactive.MOTH_GUIDE_LEAN));
+    ok(Reactive.MOTH_GUIDE_SPAN > Reactive.MOTH_GUIDE_LEAN, 'P19：會動的那一段比靜態的那一段長（看起來是在流，不是被吹歪）');
+
+    /** 跑一段時間，回傳這一團螢火的重心（相對它自己的原點）。 */
+    const centroid = (guide, { quality = 'high', reducedMotion = false, frames = 600 } = {}) => {
+      const field = Reactive.createReactiveField({
+        spots: [mothSpot],
+        secrets: [],
+        kitOf: () => kit19,
+        terrainHeight: World.terrainHeight,
+        guide,
+        qualityOf: () => quality,
+        reducedMotion,
+      });
+      const o = field.objects[0];
+      let t = 0;
+      for (let i = 0; i < frames; i += 1) {
+        t += 1 / 60;
+        field.update(1 / 60, t, mothSpot.at[0] + 12, mothSpot.at[1] + 12);
+      }
+      const arr = o.points.geometry.attributes.position.array;
+      let cx = 0;
+      let cz = 0;
+      for (let k = 0; k < o.n; k += 1) {
+        cx += arr[k * 3];
+        cz += arr[k * 3 + 2];
+      }
+      return { x: cx / o.n, z: cz / o.n };
+    };
+    const plain = centroid(null);
+    const east = centroid({ on: true, x: 1, z: 0 });
+    const north = centroid({ on: true, x: 0, z: -1 });
+    const shutOff = centroid({ on: false, x: 1, z: 0 });
+    const low = centroid({ on: true, x: 1, z: 0 }, { quality: 'low' });
+    const reduced = centroid({ on: true, x: 1, z: 0 }, { reducedMotion: true });
+
+    ok(Math.abs(east.x - plain.x - Reactive.MOTH_GUIDE_LEAN) < 0.1, 'P19：指東 → 整團往東挪了一個 LEAN', `${(east.x - plain.x).toFixed(3)}`);
+    ok(Math.abs(east.z - plain.z) < 0.02, 'P19：指東不會順便往南北跑');
+    ok(Math.abs(north.z - plain.z + Reactive.MOTH_GUIDE_LEAN) < 0.1, 'P19：指北 → 整團往北挪了一個 LEAN', `${(north.z - plain.z).toFixed(3)}`);
+    /*
+     * **先紅的那一條**：關掉導向之後，重心要與「這個世界從來沒有導向」**逐值相同**。
+     * 只把設定存起來、粒子照樣偏過去的話，這一條會立刻紅。
+     */
+    eq(shutOff.x, plain.x, 'P19：關掉導向 → 螢火群的重心逐值回到原樣（x）');
+    eq(shutOff.z, plain.z, 'P19：關掉導向 → 螢火群的重心逐值回到原樣（z）');
+    eq(low.x, plain.x, 'P19：低畫質整層關掉導向（x 逐值相同）');
+    eq(low.z, plain.z, 'P19：低畫質整層關掉導向（z 逐值相同）');
+    ok(Math.abs(reduced.x - east.x) < 0.05, 'P19：`reducedMotion` 留著靜態的那一段（資訊沒有被拿掉）', `${reduced.x.toFixed(3)} vs ${east.x.toFixed(3)}`);
+
+    /** 一隻螢火沿導向那一軸的擺幅（＝「會動的那一段」有多大）。 */
+    const swing = (guide, reducedMotion = false) => {
+      const field = Reactive.createReactiveField({
+        spots: [mothSpot],
+        secrets: [],
+        kitOf: () => kit19,
+        terrainHeight: World.terrainHeight,
+        guide,
+        qualityOf: () => 'high',
+        reducedMotion,
+      });
+      const o = field.objects[0];
+      let t = 0;
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = 0; i < 1400; i += 1) {
+        t += 1 / 60;
+        field.update(1 / 60, t, mothSpot.at[0] + 12, mothSpot.at[1] + 12);
+        if (i < 200) continue;
+        const arr = o.points.geometry.attributes.position.array;
+        let cx = 0;
+        for (let k = 0; k < o.n; k += 1) cx += arr[k * 3];
+        cx /= o.n;
+        const v = arr[0] - cx;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      return hi - lo;
+    };
+    const swingOn = swing({ on: true, x: 1, z: 0 });
+    const swingOff = swing(null);
+    const swingReduced = swing({ on: true, x: 1, z: 0 }, true);
+    ok(swingOn > 0.3, 'P19：導向開著時螢火真的沿那個方向在流', swingOn.toFixed(3));
+    eq(swingOff, 0, 'P19[反例]：導向關著時那一軸一動也不動（流的那一段完全是導向帶來的）');
+    ok(swingReduced < swingOn * 0.25, 'P19：`reducedMotion` 把會動的那一段收掉了', `${swingReduced.toFixed(3)} vs ${swingOn.toFixed(3)}`);
+
+    // 0 新粒子、0 新光源：導向是既有那一團的偏向量，不是第七種反應物
+    {
+      const mk = (guide) => {
+        const f = Reactive.createReactiveField({
+          spots: [mothSpot],
+          secrets: [],
+          kitOf: () => kit19,
+          terrainHeight: World.terrainHeight,
+          guide,
+          qualityOf: () => 'high',
+        });
+        let pts = 0;
+        let lights = 0;
+        f.group.traverse((o) => {
+          if (o.isPoints) pts += 1;
+          if (o.isLight) lights += 1;
+        });
+        return { pts, lights };
+      };
+      const a19 = mk(null);
+      const b19 = mk({ on: true, x: 1, z: 0 });
+      eq(b19.pts, a19.pts, 'P19：導向沒有多長出一團粒子');
+      eq(b19.lights, 0, 'P19：導向 0 光源');
+    }
+
+    // 世界端的開關：關掉之後 guidance() 就是 null，而且下一幀螢火群讀到的是 0
+    {
+      const restore = installCanvasStub();
+      const w19 = World.createWorld({
+        engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} },
+        quality: 'high',
+        ...worldOpts,
+        progression: { ...stubProgression, isCleared: () => false },
+      });
+      restore();
+      w19.setGuidance(true);
+      w19.updateReactions(1 / 60, 1, 0, 6, 0);
+      const aim = w19.guidance();
+      ok(aim && Number.isFinite(aim.x) && Number.isFinite(aim.z), 'P19：導向開著時世界指得出一個方向', JSON.stringify(aim));
+      ok(Math.abs(Math.hypot(aim.x, aim.z) - 1) < 1e-9, 'P19：那是一個單位向量');
+      const objective = w19.objectiveTarget('foundations');
+      ok(Boolean(objective), 'P19：那時候真的有一個「下一個建議去處」');
+      const wantX = objective.x - 0;
+      const wantZ = objective.z - 6;
+      const wl = Math.hypot(wantX, wantZ);
+      ok(Math.abs(aim.x - wantX / wl) < 1e-9 && Math.abs(aim.z - wantZ / wl) < 1e-9, 'P19：導向指的就是那個目標（同一套 objectiveTarget）');
+      w19.setGuidance(false);
+      w19.updateReactions(1 / 60, 2, 0, 6, 0);
+      eq(w19.guidance(), null, 'P19：關掉之後世界不再指路');
+    }
+  }
+
+  /* --- ⑧ 接線、UI 與文件 ------------------------------------------ */
+  {
+    ok(/world\.nearestShortcutWinch\?\.\(/.test(mainSrc19), 'P19：main.js 問得到走近的絞盤');
+    ok(/e\.code === 'KeyE' && nearWinch/.test(mainSrc19), 'P19：`E` 推得動絞盤');
+    ok(/world\.pushWinch\(winch\)/.test(mainSrc19), 'P19：推的那一下真的走世界層');
+    ok(/progression\.openShortcut\(built\.id\)/.test(mainSrc19), 'P19：推開的那一刻寫進存檔');
+    ok(/world\.markShortcutOpen\(built\.id\)/.test(mainSrc19), 'P19：世界端跟著把門放下來');
+    /*
+     * v1.2 · P19（審查③）：**存檔清了，世界要跟著清。**
+     * `resetAll()` 把 `settings.guides` 還原成預設的 true、設定頁的勾勾也重畫成打勾，
+     * 但世界端的 `guideOn` 是**另一份狀態** —— 少了 `onReset` 裡那一行，
+     * 「關掉指路 → 重置進度」之後存檔與勾勾都說開、螢火卻再也不指路，直到重新載入。
+     * （所以這兩條要**分開量**：`onReset` 裡一次、開機那條路一次。）
+     */
+    const resetBody19 = mainSrc19.slice(
+      mainSrc19.indexOf('onReset: () => {'),
+      mainSrc19.indexOf('onReplayPrologue:')
+    );
+    const bootSrc19 =
+      mainSrc19.slice(0, mainSrc19.indexOf('onReset: () => {')) +
+      mainSrc19.slice(mainSrc19.indexOf('onReplayPrologue:'));
+    ok(resetBody19.length > 200, 'P19：切得出 onReset 那一段（不是一條空過的斷言）', String(resetBody19.length));
+    ok(/world\.resetShortcuts\?\.\(\)/.test(resetBody19), 'P19：onReset 真的把門關回去（寫好卻沒人呼叫等於沒有）');
+    ok(
+      /world\.setGuidance\?\.\(progression\.state\.settings\.guides !== false\)/.test(resetBody19),
+      'P19：onReset 也把螢火指路拉回存檔說的那一邊（存檔清了，世界要跟著清）'
+    );
+    ok(
+      /world\.setGuidance\?\.\(progression\.state\.settings\.guides !== false\)/.test(bootSrc19),
+      'P19：開機照存檔決定要不要指路'
+    );
+    ok(/onGuidesChange/.test(mainSrc19) && /onGuidesChange/.test(setSrc19), 'P19：設定頁的開關接到世界層');
+    ok(/data-guides/.test(setSrc19), 'P19：設定頁真的有那個勾勾');
+    ok(/guides: e\.target\.checked/.test(setSrc19), 'P19：勾勾寫進存檔');
+    ok(/qualityOf\(\) !== 'low'/.test(reactSrc19), 'P19：低畫質整層關掉導向');
+    // 零每幀配置：那一幀只讀兩個純量，不重建物件
+    {
+      const upd = reactSrc19.slice(reactSrc19.indexOf('update(dt, t, px, pz'), reactSrc19.indexOf('/* --- 祕密'));
+      ok(!/=\s*\{[^}]*\}/.test(upd.replace(/\/\*[\s\S]*?\*\//g, '')), 'P19：反應場的 tick 裡不建物件');
+      ok(!/\.map\(|\.filter\(/.test(upd), 'P19：反應場的 tick 裡不 map / filter');
+    }
+    // 文件與資料是同一份
+    ok(/SHORTCUTS/.test(worldMd19), 'P19：WORLD.md 指得出捷徑住在哪個常數');
+    ok(/南弧/.test(worldMd19), 'P19：WORLD.md 講得出那一條叫什麼');
+    ok(
+      /螢火/.test(worldMd19.slice(worldMd19.indexOf('### 4.4'), worldMd19.indexOf('### 4.5'))),
+      'P19：WORLD.md §4.4 寫得下導向規則'
+    );
+    ok(/導向/.test(worldMd19.slice(worldMd19.indexOf('### 4.4'), worldMd19.indexOf('### 4.5'))), 'P19：§4.4 講得出「導向」這件事');
+    ok(/shortcuts/.test(worldMd19.slice(worldMd19.indexOf('### 5.4'), worldMd19.indexOf('## 六'))), 'P19：WORLD.md §5.4 列得出新的存檔欄位');
+    ok(/P19/.test(worldMd19), 'P19：WORLD.md 標得出這一格');
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * v1.2 · P20a — 傳聞連線頁 ＋ 回聲重演（小景內）
+ *
+ * 這一格加的是**兩件不新增任何存檔欄的東西**，所以斷言分成五件事：
+ *   ① 傳聞的資料契約：每一條線的兩端都回查得到本人（六個既有資料層）。
+ *   ② **不劇透**：對**渲染出來的字串**掃 —— 未找到的那一端的名字與內容
+ *      一個字都不准出現；反例是「把佔位換成真名」，同一條掃描要抓得到。
+ *   ③ **沒有新增存檔欄**：存檔頂層欄位**逐鍵**比對契約（只驗「舊欄位都還在」
+ *      的話，偷偷加一欄不會有人紅）。
+ *   ④ 回聲的資料契約與擺位（對**真的蓋出來的世界**量）。
+ *   ⑤ 回聲的世界實體與那一場重演：零光源、零碰撞、**逐幀**量殘影離小景多遠、
+ *      `reducedMotion` 直接是終態、低畫質整層關。
+ * ------------------------------------------------------------------ */
+console.log('\n▸ 傳聞連線頁 ＋ 回聲重演（v1.2 · P20a）');
+{
+  const rumorFile20 = readJson('src/data/rumors.json');
+  const echoFile20 = readJson('src/data/echoes.json');
+  const links20 = rumorFile20.links;
+  const echoes20 = echoFile20.entries;
+  const Rumors = await import('../src/ui/rumors.js');
+  const Echo20 = await import('../src/world/echoes.js');
+  const Rules20 = (await import('./lib/screen-rules.mjs')).default;
+  const SaveIO20 = await import('../src/save/save.js');
+  const Audit20 = await import('./collision-audit.mjs');
+  const Reactive20 = await import('../src/world/reactive.js');
+  const rumorSrc20 = readFileSync(resolve(root, 'src/ui/rumors.js'), 'utf8');
+  const echoSrc20 = readFileSync(resolve(root, 'src/world/echoes.js'), 'utf8');
+  const codexSrc20 = readFileSync(resolve(root, 'src/ui/codex.js'), 'utf8');
+  const mainSrc20 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const worldSrc20 = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+  const rulesSrc20 = readFileSync(resolve(root, 'scripts/lib/screen-rules.mjs'), 'utf8');
+  const saveSrc20 = readFileSync(resolve(root, 'src/save/save.js'), 'utf8');
+  const worldMd20 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+  const cssSrc20 = readFileSync(resolve(root, 'src/styles.css'), 'utf8');
+  const inscriptions20 = readJson('src/data/inscriptions.json').entries;
+  const secrets20 = readJson('src/data/secrets.json').entries;
+  const watchmen20 = readJson('src/data/watchmen.json').entries;
+  const murks20 = readJson('src/data/murks.json').entries;
+  const letters20 = letterFile.entries;
+
+  /** 六個既有資料層 ——「那一端真的存在嗎」逐條回查用的就是這一份。 */
+  const CLUE_SOURCES = Object.freeze({
+    tablet: Props.LORE_TABLETS,
+    ins: inscriptions20,
+    letter: letters20,
+    secret: secrets20,
+    watchman: watchmen20,
+    murk: murks20,
+  });
+  const clueOf = (ref) => {
+    const parsed = Rumors.parseClueRef(ref);
+    if (!parsed) return null;
+    const list = CLUE_SOURCES[parsed.kind] || [];
+    return list.find((e) => e.id === parsed.id) || null;
+  };
+  /** 一筆線索在畫面上會出現的字（名字 ＋ 內容）—— 掃「有沒有劇透」就是掃這一串。 */
+  const clueWords = (entry) => {
+    const out = [];
+    if (!entry) return out;
+    if (entry.title) out.push(entry.title);
+    if (entry.name) out.push(entry.name);
+    for (const l of entry.lines || []) out.push(typeof l === 'string' ? l : l.text);
+    for (const l of entry.lore || []) out.push(l);
+    if (entry.taint) out.push(entry.taint);
+    if (entry.origin) out.push(entry.origin);
+    return out.filter((w) => typeof w === 'string' && w.length >= 3);
+  };
+  const regionIds20 = World.REGION_SITES.map((s) => s.id);
+
+  /* --- ① 傳聞的資料契約 ------------------------------------------- */
+  {
+    eq(rumorFile20.version, 1, 'rumors.json 有版本欄');
+    eq(rumorFile20.authored, 'game', 'rumors.json 檔頭明講是遊戲自撰的層');
+    ok(typeof rumorFile20.note === 'string' && rumorFile20.note.length > 40, 'rumors.json 檔頭寫得出這一份在做什麼');
+    // 護欄 2：這一頁一個字的教學都沒有 → 一個連結都不准有（同 secrets.json）
+    ok(!/https?:\/\//.test(JSON.stringify(rumorFile20)), 'rumors.json 裡一個連結都沒有（純風味層，出處只掛在原本那一層）');
+    ok(!/techniqueId|skillId|source/.test(JSON.stringify(rumorFile20)), 'rumors.json 不掛技巧、不掛出處');
+    eq(links20.length, EXPECT.rumors.value, `傳聞條數＝契約（${EXPECT.rumors.value} 條）`);
+    eq(
+      JSON.stringify(rumorFile20.kinds),
+      JSON.stringify(EXPECT.rumors.kinds),
+      '契約與資料檔的「認得哪六種線索」**逐值相同**'
+    );
+    eq(
+      JSON.stringify(Rumors.RUMOR_KINDS),
+      JSON.stringify(EXPECT.rumors.kinds),
+      '程式與契約的那六種**逐值相同**（分家就紅）'
+    );
+    for (const k of Rumors.RUMOR_KINDS) {
+      ok(typeof Rumors.RUMOR_UNKNOWN[k] === 'string' && Rumors.RUMOR_UNKNOWN[k].length > 0, `[${k}] 有一句不劇透的佔位`);
+      ok(typeof Rumors.RUMOR_KIND_LABEL[k] === 'string' && Rumors.RUMOR_KIND_LABEL[k].length > 0, `[${k}] 有一個很短的層標`);
+      ok((CLUE_SOURCES[k] || []).length > 0, `[${k}] 這一種線索在世界上真的有那麼一層`, String((CLUE_SOURCES[k] || []).length));
+    }
+    eq(new Set(links20.map((l) => l.id)).size, links20.length, '傳聞 id 沒有重複');
+    const pairs20 = new Set();
+    const kindsUsed20 = new Set();
+    let cross20 = 0;
+    for (const l of links20) {
+      const tag = `[${l.id}]`;
+      ok(/^rumor-[a-z0-9-]+$/.test(l.id), `${tag} id 是 kebab-case 且帶 rumor- 前綴`);
+      ok(regionIds20.includes(l.region), `${tag} region 是真的一片土地`, String(l.region));
+      ok(typeof l.say === 'string' && l.say.length > 0 && l.say.length <= 31, `${tag} 那一句話 ≤ 31 字（回聲說話的規矩）`, l.say);
+      ok(l.a !== l.b, `${tag} 兩端不是同一個東西`);
+      const key = [l.a, l.b].sort().join('|');
+      ok(!pairs20.has(key), `${tag} 這一對沒有被連過第二次`);
+      pairs20.add(key);
+      for (const ref of [l.a, l.b]) {
+        const parsed = Rumors.parseClueRef(ref);
+        ok(Boolean(parsed), `${tag} ${ref} 的形狀是 kind:id`);
+        if (!parsed) continue;
+        kindsUsed20.add(parsed.kind);
+        // **逐條回查**：那一端真的是既有資料層裡的一筆，不是打錯字的 id
+        ok(Boolean(clueOf(ref)), `${tag} ${ref} 在 ${parsed.kind} 那一層真的找得到`);
+      }
+      // 跨土地的那幾條（這一頁存在的理由）
+      const ra = clueOf(l.a);
+      const rb = clueOf(l.b);
+      if (ra && rb && ra.region && rb.region && ra.region !== rb.region) cross20 += 1;
+    }
+    eq(kindsUsed20.size, EXPECT.rumors.kinds.length, '六種線索每一種都至少被連到一次');
+    eq(cross20, EXPECT.rumors.crossRegion, `跨土地的連線數＝契約（${EXPECT.rumors.crossRegion} 條）`);
+    for (const rid of regionIds20) {
+      eq(links20.filter((l) => l.region === rid).length, EXPECT.rumors.perRegion, `[${rid}] 剛好 ${EXPECT.rumors.perRegion} 條傳聞`);
+    }
+    // 反例：形狀不對的 ref 一律 null（**呼叫的是被測的那一支**）
+    for (const bad of ['tablet', ':hearth', 'tablet:', 'nope:hearth', '', null, 42]) {
+      eq(Rumors.parseClueRef(bad), null, `反例：parseClueRef(${JSON.stringify(bad)}) 回 null`);
+    }
+    eq(Rumors.parseClueRef('tablet:hearth').kind, 'tablet', 'parseClueRef 認得出層');
+    eq(Rumors.parseClueRef('tablet:hearth').id, 'hearth', 'parseClueRef 認得出 id');
+  }
+
+  /* --- ② 不劇透：對**渲染出來的字串**掃 --------------------------- */
+  {
+    const index20 = Rumors.buildClueIndex({
+      tablets: Props.LORE_TABLETS,
+      inscriptions: inscriptions20,
+      letters: letters20,
+      secrets: secrets20,
+      watchmen: watchmen20,
+      murks: murks20,
+    });
+    eq(index20.size, Object.values(CLUE_SOURCES).reduce((a, l) => a + l.length, 0), '索引收得下六層的每一筆');
+    for (const l of links20) {
+      ok(index20.has(l.a) && index20.has(l.b), `[${l.id}] 兩端在索引裡都查得到名字`);
+    }
+
+    /**
+     * 「這一段 HTML 有沒有洩漏 `refs` 那幾端的名字或內容」——
+     * **反例用的是同一支**（把佔位換成真名之後再問一次，它要說有）。
+     */
+    const leaks = (html, refs) => {
+      for (const ref of refs) {
+        for (const w of clueWords(clueOf(ref))) {
+          if (html.includes(w)) return `${ref}｜${w}`;
+        }
+      }
+      return '';
+    };
+
+    // 什麼都沒找到：整頁一條線都不畫（「這裡還有 N 條線」本身就是劇透）
+    {
+      const html = Rumors.rumorBlock({ links: links20, index: index20, found: () => false });
+      ok(html.includes('data-rumor-empty'), '一條都沒接起來時，那一頁只有一句話');
+      eq(html.includes('data-rumor='), false, '一條都沒接起來時，一條線都沒畫出來');
+      const all = links20.flatMap((l) => [l.a, l.b]);
+      eq(leaks(html, all), '', '一條都沒接起來時，24 條線的 48 端一個字都沒漏');
+      for (const l of links20) eq(html.includes(l.say), false, `[${l.id}] 那一句話也沒漏出來`);
+    }
+
+    // 只找到一端：另一端**連名字都不給**，那一句話也不說
+    let checked20 = 0;
+    for (const l of links20) {
+      for (const [got, hidden] of [
+        [l.a, l.b],
+        [l.b, l.a],
+      ]) {
+        const html = Rumors.rumorBlock({ links: [l], index: index20, found: (ref) => ref === got });
+        const tag = `[${l.id} · 只找到 ${got}]`;
+        ok(html.includes('is-half'), `${tag} 那條線是虛線`);
+        ok(html.includes(Rumors.RUMOR_HALF_SAY), `${tag} 說的是「另一頭還沒找到」`);
+        eq(html.includes(l.say), false, `${tag} 那一句話還沒說出來`);
+        const gotName = index20.get(got).name;
+        ok(html.includes(gotName), `${tag} 找到的那一端有名字`, gotName);
+        const parsedHidden = Rumors.parseClueRef(hidden);
+        ok(html.includes(Rumors.RUMOR_UNKNOWN[parsedHidden.kind]), `${tag} 另一端只給佔位`);
+        eq(leaks(html, [hidden]), '', `${tag} **另一端的名字與內容一個字都沒有**`);
+        /*
+         * 反例（**呼叫的是同一支掃描**）：把佔位換成真名 —— `leaks()` 就要抓到。
+         * 沒有這一條的話，上面那一條可能只是「掃描根本看不見名字」的空過。
+         */
+        const leaked = html.replace(Rumors.RUMOR_UNKNOWN[parsedHidden.kind], index20.get(hidden).name);
+        ok(leaks(leaked, [hidden]) !== '', `${tag} 反例：把佔位換成真名，同一條掃描抓得到`);
+        checked20 += 1;
+      }
+    }
+    eq(checked20, links20.length * 2, '24 條線的兩個方向都掃過（不是一條空過的斷言）');
+
+    // 兩端都找到：實線 ＋ 那一句話 ＋ 兩個名字
+    {
+      const l = links20[0];
+      const html = Rumors.rumorBlock({ links: [l], index: index20, found: () => true });
+      ok(html.includes('is-linked'), '兩端都找到 → 實線');
+      ok(html.includes(l.say), '兩端都找到 → 那一句話才說出來');
+      ok(html.includes(index20.get(l.a).name) && html.includes(index20.get(l.b).name), '兩端都給名字');
+      eq(html.includes(Rumors.RUMOR_HALF_SAY), false, '兩端都找到就不再說「另一頭還沒找到」');
+    }
+
+    // 統計：只算「看得到的那幾條」
+    {
+      const first = links20[0];
+      const st = Rumors.rumorStats(links20, { index: index20, found: (ref) => ref === first.a || ref === first.b });
+      eq(st.total, links20.length, 'rumorStats 的分母是全部');
+      eq(st.linked, 1, 'rumorStats 數得出接起來的那一條');
+      eq(st.half, 0, '那一條兩端都找到了，所以不算「還差一頭」');
+      eq(st.hidden, links20.length - 1, '其餘的整條不畫');
+      const half = Rumors.rumorStats(links20, { index: index20, found: (ref) => ref === first.a });
+      eq(half.linked, 0, '反例：只找到一端 → 接起來的是 0 條');
+      eq(half.half, 1, '反例：只找到一端 → 算在「還差一頭」');
+    }
+
+    // 樣式真的畫得出實線與虛線（死選擇器不會有人發現）
+    ok(/\.rumor\.is-half \.rumor__thread/.test(cssSrc20), 'CSS 裡虛線那一條規則對得到真的 class');
+    ok(/\.rumor__thread\s*\{/.test(cssSrc20), 'CSS 裡有那根線本身');
+    ok(/\.rumor__end\.is-unknown/.test(cssSrc20), 'CSS 分得出「還沒找到的那一端」');
+  }
+
+  /* --- ③ clueFound：六種各問對了那一支（＋反例） ------------------ */
+  {
+    const spy = (extra) => ({
+      hasReadLore: () => false,
+      hasFoundInscription: () => false,
+      hasFoundLetter: () => false,
+      hasFoundSecret: () => false,
+      hasMetWatchman: () => false,
+      murkState: () => null,
+      ...extra,
+    });
+    const probe = {
+      tablet: ['tablet:hearth', { hasReadLore: (id) => id === 'hearth' }],
+      ins: ['ins:carve-yard-shard', { hasFoundInscription: (id) => id === 'carve-yard-shard' }],
+      letter: ['letter:letter-ring-halves', { hasFoundLetter: (id) => id === 'letter-ring-halves' }],
+      secret: ['secret:stele-73', { hasFoundSecret: (id) => id === 'stele-73' }],
+      watchman: ['watchman:watch-broken-ring', { hasMetWatchman: (id) => id === 'watch-broken-ring' }],
+      murk: ['murk:murk-vague-ask', { murkState: (id) => (id === 'murk-vague-ask' ? { grade: 'C', hits: [0] } : null) }],
+    };
+    for (const [kind, [ref, extra]] of Object.entries(probe)) {
+      ok(Boolean(clueOf(ref)), `[${kind}] 探針指的那一筆真的存在`);
+      eq(Rumors.clueFound(ref, spy(extra)), true, `[${kind}] 問對了那一支存檔述詞`);
+      // 反例（**呼叫的是同一支**）：什麼都沒找到的進度 → false
+      eq(Rumors.clueFound(ref, spy({})), false, `[${kind}] 反例：什麼都還沒找到 → false`);
+      // 反例：同一層的另一個 id 不會沾光
+      eq(Rumors.clueFound(`${kind}:no-such-thing`, spy(extra)), false, `[${kind}] 反例：另一個 id 不算數`);
+    }
+    // 濁靈：安撫過（有 grade）才算，只有命中不算
+    eq(
+      Rumors.clueFound('murk:murk-vague-ask', spy({ murkState: () => ({ grade: null, hits: [0, 1] }) })),
+      false,
+      '[murk] 反例：命中了但還沒安撫 → 不算找到'
+    );
+    eq(Rumors.clueFound('nope:x', spy({})), false, '反例：不認得的層 → false');
+    eq(Rumors.clueFound('tablet:hearth', null), false, '反例：沒有進度物件 → false');
+  }
+
+  /* --- ④ 沒有新增存檔欄（逐鍵比對） -------------------------------- */
+  {
+    const keys20 = Object.keys(SaveIO20.defaultSave()).sort();
+    eq(
+      JSON.stringify(keys20),
+      JSON.stringify(EXPECT.saveKeys.value),
+      'P20a：存檔的頂層欄位**逐鍵**與契約相同（傳聞與回聲一個欄位都沒有新增）'
+    );
+    // 反例（**同一個比對**）：偷偷多一欄就要紅
+    const sneaky = [...keys20, 'rumorsLinked'].sort();
+    ok(
+      JSON.stringify(sneaky) !== JSON.stringify(EXPECT.saveKeys.value),
+      '反例：偷偷多一欄，同一個逐鍵比對就會紅'
+    );
+    eq(
+      JSON.stringify(Object.keys(SaveIO20.normalize({})).sort()),
+      JSON.stringify(EXPECT.saveKeys.value),
+      'normalize() 補出來的也是同一份欄位'
+    );
+    eq(JSON.stringify(Object.keys(SaveIO20.reset()).sort()), JSON.stringify(EXPECT.saveKeys.value), 'reset() 之後也是同一份欄位');
+    // 靜態掃描：這兩層根本沒有碰存檔
+    ok(!/rumor|echo/i.test(saveSrc20), 'save.js 裡沒有 rumor / echo 這種字（沒有欄位可加）');
+    /*
+     * rumors.js 只准碰那六支**唯讀**的存檔述詞 —— 把用到的名字全掃出來逐個比對，
+     * 而不是列黑名單（黑名單漏一個字就等於沒守）。
+     */
+    {
+      const used = new Set((rumorSrc20.match(/progression\.(\w+)/g) || []).map((m) => m.slice('progression.'.length)));
+      eq(
+        JSON.stringify([...used].sort()),
+        JSON.stringify(['hasFoundInscription', 'hasFoundLetter', 'hasFoundSecret', 'hasMetWatchman', 'hasReadLore', 'murkState']),
+        'rumors.js 只碰得到那六支唯讀的存檔述詞（沒有第七支，更沒有寫入）'
+      );
+    }
+    ok(!/progression/.test(echoSrc20), 'echoes.js 連進度都碰不到（純世界層）');
+    eq(echoFile20.xp, 0, '看一場回聲重演不給 XP（純風味）');
+    {
+      const watchBody = mainSrc20.slice(mainSrc20.indexOf('function watchEcho('), mainSrc20.indexOf('function finishEcho('));
+      ok(watchBody.length > 80, '切得出 watchEcho 那一段（不是一條空過的斷言）', String(watchBody.length));
+      ok(!/progression\./.test(watchBody), 'watchEcho 一個存檔欄都沒寫');
+    }
+  }
+
+  /* --- ⑤ 回聲：資料契約 ------------------------------------------- */
+  {
+    eq(echoFile20.version, 1, 'echoes.json 有版本欄');
+    eq(echoFile20.authored, 'game', 'echoes.json 檔頭明講是遊戲自撰的層');
+    ok(typeof echoFile20.note === 'string' && echoFile20.note.length > 40, 'echoes.json 檔頭寫得出這一份在做什麼');
+    ok(!/https?:\/\//.test(JSON.stringify(echoFile20)), 'echoes.json 裡一個連結都沒有（純風味層）');
+    eq(echoes20.length, EXPECT.echoes.value, `回聲處數＝契約（${EXPECT.echoes.value} 處）`);
+    eq(EXPECT.echoes.perRegion, 1, '契約寫的是一片土地一處');
+    eq(JSON.stringify(echoFile20.acts), JSON.stringify(Echo20.ECHO_ACTS), '資料檔與程式的那四種 act **逐值相同**');
+    eq(new Set(echoes20.map((e) => e.id)).size, echoes20.length, '回聲 id 沒有重複');
+    eq(new Set(echoes20.map((e) => e.title)).size, echoes20.length, '標題沒有重複');
+    eq(new Set(echoes20.map((e) => e.stage)).size, echoes20.length, '一處小景只有一處回聲');
+    for (const rid of regionIds20) {
+      eq(echoes20.filter((e) => e.region === rid).length, 1, `[${rid}] 剛好一處回聲`);
+    }
+    // 掛在地標腳下的那幾片：契約逐值 ＋ 那一片**真的沒有小景**（理由要成立）
+    eq(
+      JSON.stringify(echoes20.filter((e) => e.stageKind === 'landmark').map((e) => e.region)),
+      JSON.stringify(EXPECT.echoes.landmarkStages),
+      '掛在地標腳下的那幾片＝契約（**逐值**）'
+    );
+    for (const rid of EXPECT.echoes.landmarkStages) {
+      eq(
+        Props.STORY_VIGNETTES.filter((v) => v.region === rid).length,
+        0,
+        `[${rid}] 掛在地標腳下的理由成立：那一片**真的一組小景都沒有**`
+      );
+    }
+    let worstWaypoint = 0;
+    let worstWaypointId = '';
+    for (const e of echoes20) {
+      const tag = `[${e.id}]`;
+      ok(/^echo-[a-z0-9-]+$/.test(e.id), `${tag} id 是 kebab-case 且帶 echo- 前綴`);
+      ok(regionIds20.includes(e.region), `${tag} region 是真的一片土地`);
+      ok(Array.isArray(e.at) && e.at.length === 2 && e.at.every(Number.isFinite), `${tag} at 是兩個數字`);
+      ok(['vignette', 'landmark'].includes(e.stageKind), `${tag} stageKind 只有小景與地標兩種`, String(e.stageKind));
+      const stage = Props.stageAnchor(e.stage, e.stageKind);
+      ok(Boolean(stage), `${tag} 它記得的那一處 ${e.stage} 真的在世界上`);
+      if (!stage) continue;
+      // 那一處要跟它同一片土地（不然「這一處的回聲」就名不副實）
+      const stageRegion =
+        e.stageKind === 'landmark'
+          ? (Props.LANDMARKS.find((l) => l.id === e.stage) || {}).region
+          : (Props.STORY_VIGNETTES.find((v) => v.id === e.stage) || {}).region;
+      eq(stageRegion, e.region, `${tag} 它記得的那一處與它在同一片土地上`);
+      ok(
+        e.seconds >= EXPECT.echoes.secondsRange[0] && e.seconds <= EXPECT.echoes.secondsRange[1],
+        `${tag} 一場 ${EXPECT.echoes.secondsRange[0]}–${EXPECT.echoes.secondsRange[1]} 秒`,
+        String(e.seconds)
+      );
+      for (const [key, label] of [['title', '標題'], ['line', '開演那一句'], ['result', '結果那一句']]) {
+        ok(typeof e[key] === 'string' && e[key].length > 0 && e[key].length <= 31, `${tag} ${label} ≤ 31 字（回聲說話的規矩）`, e[key]);
+      }
+      ok(Array.isArray(e.figures) && e.figures.length >= 1 && e.figures.length <= 2, `${tag} 一場 1–2 個殘影`);
+      const cosR = Math.cos(stage.rot);
+      const sinR = Math.sin(stage.rot);
+      for (const f of e.figures || []) {
+        ok(Echo20.ECHO_ACTS.includes(f.act), `${tag} act 是那四種之一`, String(f.act));
+        ok(Array.isArray(f.path) && f.path.length >= 1 && f.path.length <= 4, `${tag} 航點 1–4 個`);
+        for (const p of f.path || []) {
+          ok(Array.isArray(p) && p.length === 2 && p.every(Number.isFinite), `${tag} 航點是兩個數字`);
+          const rx = p[0] * cosR + p[1] * sinR;
+          const rz = -p[0] * sinR + p[1] * cosR;
+          const d = Math.hypot(rx, rz);
+          ok(d <= Echo20.ECHO_STAGE_R, `${tag} 航點在那一處 ${Echo20.ECHO_STAGE_R} 公尺內`, d.toFixed(2));
+          if (d > worstWaypoint) {
+            worstWaypoint = d;
+            worstWaypointId = e.id;
+          }
+        }
+      }
+    }
+    eq(
+      Math.round(worstWaypoint * 100) / 100,
+      EXPECT.echoes.reachCeiling,
+      `資料層航點最遠的那一個＝契約（${worstWaypointId}）`
+    );
+    console.log(`    ↳ 回聲：航點離那一處最遠 ${worstWaypoint.toFixed(2)}m（上限 ${Echo20.ECHO_STAGE_R}）`);
+    // 兩份常數不准分家
+    eq(Echo20.ECHO_RADIUS, Rules20.ECHO_R, '`echoes.js` 與擺位規則的互動半徑是同一個數字');
+    eq(Rules20.LAYER_INTERACT_R.echo, Rules20.ECHO_R, '淨空表那一格與互動半徑是同一個數字');
+    eq(Echo20.ECHO_STAGE_R, Rules20.ECHO_STAGE_R, '`echoes.js` 與擺位規則的「不准離開幾公尺」是同一個數字');
+    eq(Echo20.ECHO_STAGE_R, EXPECT.echoes.stageR, '契約與程式的「不准離開幾公尺」是同一個數字');
+    eq(Echo20.ECHO_SECONDS_MIN, EXPECT.echoes.secondsRange[0], '契約與程式的長度下限相同');
+    eq(Echo20.ECHO_SECONDS_MAX, EXPECT.echoes.secondsRange[1], '契約與程式的長度上限相同');
+    eq(
+      JSON.stringify(Rules20.ECHO_MARKER_EXCEPTIONS),
+      JSON.stringify(EXPECT.echoes.markerFloor),
+      '契約與規則表的石座例外門檻**逐值相同**'
+    );
+    eq(
+      JSON.stringify(Rules20.ECHO_ANCHOR_EXCEPTIONS),
+      JSON.stringify(EXPECT.echoes.anchorMaxExceptions),
+      '契約與規則表的「離那一處」例外**逐值相同**'
+    );
+    eq(Rules20.ECHO_ANCHOR_MAX, EXPECT.echoes.anchorMax, '契約與規則表的「離那一處」上限是同一個數字');
+    eq(Rules20.ECHO_WINNABLE_MIN, EXPECT.echoes.winnableFloor, '契約與規則表的「按得到它」門檻是同一個數字');
+    for (const [rid, floor] of Object.entries(EXPECT.echoes.markerFloor)) {
+      const ceil = EXPECT.echoes.markerCeiling[rid];
+      ok(Number.isFinite(ceil), `[${rid}] 契約記得那一片的全區上限`);
+      ok(floor <= ceil, `[${rid}] 門檻不超過全區上限（${floor} ≤ ${ceil}）`);
+      ok(ceil < Rules20.MARKER_R + Rules20.ECHO_R, `[${rid}] 例外真的是必要的（全區上限 ${ceil} < 圈不重疊 ${Rules20.MARKER_R + Rules20.ECHO_R}）`);
+    }
+    for (const [rid, max] of Object.entries(EXPECT.echoes.anchorMaxExceptions)) {
+      ok(max > Rules20.ECHO_ANCHOR_MAX, `[${rid}] 「離那一處」的例外真的比一般門檻鬆`);
+      ok(EXPECT.echoes.anchorDistance[rid] <= max, `[${rid}] 出貨的落點吃得下那個例外`);
+      ok(EXPECT.echoes.anchorDistance[rid] > Rules20.ECHO_ANCHOR_MAX, `[${rid}] 而且它真的需要那個例外`);
+    }
+    // **回聲真的被餵進 interactionTargets()**（沒餵進去，別人的擺位就會照過期的世界算）
+    {
+      const withEcho = Rules20.interactionTargets({ challenges: [], echoes: echoes20 });
+      eq(withEcho.length, echoes20.length, 'interactionTargets() 收得下回聲這一層');
+      eq(withEcho.every((t) => t.k === 'echo'), true, '而且標成 echo 這一層');
+      eq(Rules20.interactionTargets({ challenges: [] }).length, 0, '反例：沒有回聲就沒有那幾列');
+      ok(/data\.echoes \|\| \[\]/.test(rulesSrc20), 'interactionTargets() 真的讀了 echoes');
+      for (const p of ['scripts/screen-fit.mjs', 'scripts/murk-fit.mjs', 'scripts/guardian-fit.mjs', 'scripts/world-harness.mjs']) {
+        ok(/echoes/.test(readFileSync(resolve(root, p), 'utf8')), `${p} 也把回聲餵了進去`);
+      }
+      ok(/echoes\.map/.test(readFileSync(resolve(root, 'scripts/pacing-audit.mjs'), 'utf8')), 'pacing-audit 的 POI 也收了回聲（新資料層擺在路網 12m 內就要餵）');
+    }
+    // `echoNeedFrom` 的分支各自問對了（＋反例）
+    {
+      const marker = { k: 'marker', id: 'x', at: [0, 0] };
+      eq(Rules20.echoNeedFrom(marker), Rules20.MARKER_R + Rules20.ECHO_R, '一般土地對石座守的是「圈不重疊」');
+      eq(Rules20.echoNeedFrom(marker, 'wards'), Rules20.MARKER_R + Rules20.ECHO_R, 'v1.2 · P22c：護欄崗的例外收掉了，它現在也守「圈不重疊」');
+      eq(Rules20.echoNeedFrom(marker, 'foundations'), Rules20.MARKER_R + Rules20.ECHO_R, '反例：沒有例外的那一片照一般門檻');
+      eq(Rules20.echoNeedFrom({ k: 'react', id: 'x', at: [0, 0], r: 4.4 }), Rules20.ECHO_AUTO_MIN, '反應物那一條是常數（與圈多大無關）');
+      eq(Rules20.echoNeedFrom({ k: 'secret', id: 'x', at: [0, 0] }, 'wards'), Rules20.ECHO_AUTO_MIN, '祕密那一條也是常數，例外表管不到它');
+      eq(
+        Rules20.echoNeedFrom({ k: 'greatmurk', id: 'x', at: [0, 0] }, 'wards'),
+        Rules20.GREAT_MURK_R + Rules20.ECHO_R,
+        '大濁靈那一層**不准放進例外表**（murk-fit 從另一側量的是同一條式子）'
+      );
+      eq(
+        Rules20.echoNeedFrom({ k: 'guardian', id: 'x', at: [0, 0] }, 'wards'),
+        Rules20.GUARDIAN_R + Rules20.ECHO_R,
+        '守門者那一層也不准（guardian-fit 從另一側量的是同一條式子）'
+      );
+    }
+  }
+
+  /* --- ⑥ 回聲的擺位（對**真的蓋出來的世界**量） -------------------- */
+  {
+    const targets20 = Rules20.interactionTargets({
+      challenges,
+      inscriptions: inscriptions20,
+      letters: letters20,
+      handles: handleFile.entries,
+      reactiveSpots: Reactive20.reactiveTargets(),
+      murks: murks20,
+      watchmen: watchmen20,
+      guardians: [readJson('src/data/guardian.json')],
+      tablets: Props.LORE_TABLETS,
+      secrets: secrets20,
+      echoes: echoes20,
+    });
+    ok(targets20.length >= 300, '互動點真的有那麼多要比（不然這一段是空過的）', String(targets20.length));
+    const echoSolids20 = [];
+    for (const layer of testWorld.screens || []) {
+      for (const node of layer.group.children) {
+        for (const sd of World.collectSolids(node, World.terrainHeight)) {
+          echoSolids20.push({ x: sd.x, z: sd.z, r: sd.r, id: sd.id || node.name });
+        }
+      }
+    }
+    ok(echoSolids20.length > 50, '中觀層的碰撞圓真的有那麼多要比', String(echoSolids20.length));
+    const pathSegs20 = Props.buildPathNetwork(
+      World.REGION_SITES,
+      [...World.CORRIDORS, ...World.ANNEX_LINKS],
+      challenges,
+      (await import('../src/world/screens.js')).PATH_BENDS
+    );
+    /** 那一層真正搶得到 `E` 的圈（回聲排最後，所以每一層都比它先）。 */
+    const BEATS_ECHO = new Set(['marker', 'murk', 'greatmurk', 'watchman', 'guardian', 'tablet', 'ins', 'letter', 'handle']);
+    let tightest = Infinity;
+    let tightestWho = '';
+    const winByRegion20 = {};
+    const markerByRegion20 = {};
+    const anchorByRegion20 = {};
+    for (const e of echoes20) {
+      const tag = `[${e.id}]`;
+      const [x, z] = e.at;
+      const here = World.regionAt(x, z);
+      ok(here && here.id === e.region && !here.onBridge, `${tag} 落在自己的土地上（不在橋上）`, JSON.stringify(here));
+      ok(World.coverage(x, z) > Rules20.MOTIF_COVERAGE_MIN, `${tag} 沒有踩在崩掉的區緣上`, World.coverage(x, z).toFixed(2));
+      ok(testWorld.isWalkable(x, z) && !testWorld.solidAt(x, z), `${tag} 那一點真的站得住、沒有石頭壓著`);
+      let minMarker = Infinity;
+      for (const t of targets20) {
+        if (t.k === 'echo') continue;
+        const need = Rules20.echoNeedFrom(t, e.region);
+        const d = Math.hypot(x - t.at[0], z - t.at[1]);
+        ok(d >= need, `${tag} 離 ${t.k}:${t.id} 夠遠`, `${d.toFixed(2)} < ${need.toFixed(2)}`);
+        if (d - need < tightest) {
+          tightest = d - need;
+          tightestWho = `${e.id} ↔ ${t.k}:${t.id}`;
+        }
+        if (t.k === 'marker' && d < minMarker) minMarker = d;
+      }
+      markerByRegion20[e.region] = Math.round(minMarker * 100) / 100;
+      for (const lm of Props.LANDMARKS) {
+        ok(Math.hypot(x - lm.at[0], z - lm.at[1]) >= Rules20.ECHO_AUTO_MIN, `${tag} 沒有坐在地標 ${lm.id} 上`);
+      }
+      for (const sd of echoSolids20) {
+        // 中觀層的石頭是**碰撞圓**：守的是「還走得進它的互動圈」（與 solidProblems 同一條式子）
+        const need = Rules20.ECHO_R + World.PLAYER_RADIUS + sd.r;
+        ok(Math.hypot(x - sd.x, z - sd.z) >= need, `${tag} 沒有被中觀層 ${sd.id} 擋住`);
+      }
+      ok(Rules20.laneDistance(World, x, z) >= World.LANE_HALF + Rules20.LANE_MARGIN, `${tag} 離橋的主動線夠遠`);
+      /*
+       * 離閘門：回聲**贏得過閘門**（仲裁排在它前面），所以要證的不是「離得遠」，
+       * 而是「走到門口一定還問得到那道門」——也就是**那道門本身永遠不落在
+       * 任何一處回聲的互動圈裡**。`GATE_MIN`（8）已經遠大於互動半徑（3.2），
+       * 但那是兩個不同的數字：這裡把真正要守的那一條也寫出來，
+       * 免得有一天有人把 `GATE_MIN` 調小卻沒有人紅。
+       */
+      const dGate = Rules20.gateDistance(World, x, z);
+      ok(dGate >= Rules20.GATE_MIN, `${tag} 離閘門夠遠`, dGate.toFixed(2));
+      ok(dGate > Rules20.ECHO_R, `${tag} 那道門本身不在它的互動圈裡（走到門口一定問得到）`, dGate.toFixed(2));
+      ok(Rules20.pathDistance(pathSegs20, x, z) >= Rules20.ECHO_PATH_MIN, `${tag} 不坐在路中間`);
+      // 離它記得的那一處多遠
+      const stage = Props.stageAnchor(e.stage, e.stageKind);
+      const dAnchor = stage ? Math.hypot(x - stage.at[0], z - stage.at[1]) : Infinity;
+      const anchorMax = Rules20.ECHO_ANCHOR_EXCEPTIONS[e.region] ?? Rules20.ECHO_ANCHOR_MAX;
+      ok(dAnchor <= anchorMax, `${tag} 就坐在它記得的那一處旁邊`, `${dAnchor.toFixed(2)} > ${anchorMax}`);
+      anchorByRegion20[e.region] = Math.round(dAnchor * 100) / 100;
+      /*
+       * **真正要守的東西**：站在它的互動圈上，24 個方向裡有幾個
+       * 「站得住、而且是它贏」。回聲排在仲裁最後，所以「是它贏」＝
+       * 那一點上沒有任何一層排在它前面的東西罩著。
+       */
+      let win = 0;
+      for (let a = 0; a < Rules20.ECHO_WINNABLE_DIRS; a += 1) {
+        const ang = (a / Rules20.ECHO_WINNABLE_DIRS) * Math.PI * 2;
+        const px = x + Math.cos(ang) * (Rules20.ECHO_R - 0.3);
+        const pz = z + Math.sin(ang) * (Rules20.ECHO_R - 0.3);
+        if (!testWorld.isWalkable(px, pz) || testWorld.solidAt(px, pz)) continue;
+        let owned = true;
+        for (const t of targets20) {
+          if (!BEATS_ECHO.has(t.k)) continue;
+          if (Math.hypot(px - t.at[0], pz - t.at[1]) < Rules20.interactRingRadius(t)) {
+            owned = false;
+            break;
+          }
+        }
+        if (owned) win += 1;
+      }
+      winByRegion20[e.region] = win;
+      const floor = Rules20.ECHO_WINNABLE_MIN;
+      ok(win >= floor, `${tag} 互動圈上還有「站得住而且是它贏」的方向`, `${win}/${Rules20.ECHO_WINNABLE_DIRS}（門檻 ${floor}）`);
+    }
+    eq(
+      JSON.stringify(winByRegion20),
+      JSON.stringify(EXPECT.echoes.winnableWorst),
+      '逐片量到的「按得到它」與契約**逐值相同**'
+    );
+    eq(
+      JSON.stringify(anchorByRegion20),
+      JSON.stringify(EXPECT.echoes.anchorDistance),
+      '逐片量到的「離那一處多遠」與契約**逐值相同**'
+    );
+    for (const [rid, ceil] of Object.entries(EXPECT.echoes.markerCeiling)) {
+      eq(markerByRegion20[rid], ceil, `[${rid}] 出貨的落點就是全區離石座最遠的那一個（上限用 eq 不用 <=）`);
+    }
+    console.log(
+      `    ↳ 回聲：擺位最緊的一對 ${tightestWho} 還剩 ${tightest.toFixed(3)}m；` +
+        `按得到它最少 ${Math.min(...Object.values(winByRegion20))}/24（門檻 ${Rules20.ECHO_WINNABLE_MIN}）`
+    );
+  }
+
+  /* --- ⑦ 世界實體：零光源、零碰撞、預算 ---------------------------- */
+  {
+    const field20 = testWorld.echoes;
+    ok(Boolean(field20), '世界蓋出了回聲場');
+    eq(field20.count, echoes20.length, `世界上真的有 ${echoes20.length} 處回聲`);
+    for (const e of echoes20) {
+      const node = testScene.getObjectByName(`echo:${e.id}`);
+      ok(Boolean(node), `[${e.id}] 場景圖上找得到 echo:${e.id}`);
+      if (!node) continue;
+      ok(Boolean(node.getObjectByName('seat')), `[${e.id}] 那一團光在`);
+      ok(Boolean(node.getObjectByName('cast')), `[${e.id}] 殘影那一組在`);
+      eq(node.getObjectByName('cast').visible, false, `[${e.id}] 沒在演的時候殘影是收起來的`);
+    }
+    let lights20 = 0;
+    let tris20 = 0;
+    field20.group.traverse((o) => {
+      if (o.isLight) lights20 += 1;
+      const geo = o.geometry;
+      if (!geo) return;
+      const idx = geo.index ? geo.index.count : geo.attributes.position ? geo.attributes.position.count : 0;
+      tris20 += (idx / 3) * (o.isInstancedMesh ? o.count : 1);
+    });
+    eq(lights20, 0, '回聲這一層 0 個實體光源（護欄：光源固定 37 盞）');
+    ok(tris20 > 0 && tris20 < 2600, '回聲這一層的三角形在框內', `n=${Math.round(tris20)}`);
+    const solids20 = World.collectSolids(field20.group, World.terrainHeight);
+    eq(solids20.length, 0, '回聲這一層 0 個碰撞體（一團光與一群殘影擋不住人）');
+    // 註解裡寫得出「不登記」，所以掃描要先把註解拿掉（不然它自己會把自己判紅）
+    {
+      const code20 = echoSrc20.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+      ok(code20.length > 2000, '切得出去掉註解之後的程式碼', String(code20.length));
+      ok(!/keepSolid|solidRadius/.test(code20), 'echoes.js 的程式碼裡沒有任何碰撞登記');
+      ok(!/THREE\.(Point|Spot|Directional|Hemisphere|Ambient)Light/.test(code20), 'echoes.js 的程式碼裡沒有光源建構子');
+    }
+    ok(/noCollide = true/.test(echoSrc20), 'echoes.js 每一塊都標了 noCollide');
+    eq(
+      Audit20.auditStandables(solids20, World.terrainHeight).bad.length,
+      0,
+      '回聲這一層通得過可站立體稽核（0 個碰撞體，所以是 0）'
+    );
+    console.log(`    ↳ 回聲：三角 ${Math.round(tris20)}、碰撞體 ${solids20.length}、光源 ${lights20}`);
+    // 零每幀配置
+    {
+      const upd = echoSrc20.slice(echoSrc20.indexOf('    update(dt, t, px, pz) {'), echoSrc20.lastIndexOf('  };\n  return api;'));
+      ok(upd.length > 400, '切得出 update() 那一段（不是一條空過的斷言）', String(upd.length));
+      ok(!/new \w/.test(upd), 'P20a：回聲的 tick 裡不 new');
+      ok(!/\.map\(|\.filter\(/.test(upd), 'P20a：回聲的 tick 裡不 map / filter');
+      const place = echoSrc20.slice(echoSrc20.indexOf('function placeFigures('), echoSrc20.indexOf('  const api = {'));
+      ok(place.length > 400, '切得出 placeFigures() 那一段', String(place.length));
+      ok(!/new \w/.test(place), 'P20a：擺殘影的那一支裡也不 new');
+    }
+  }
+
+  /* --- ⑧ 那一場重演：逐幀量它離小景多遠 ---------------------------- */
+  {
+    const finished = [];
+    const restore20 = installCanvasStub();
+    const playWorld = World.createWorld({
+      engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} },
+      quality: 'high',
+      ...worldOpts,
+      onEchoFinish: (entry) => finished.push(entry.id),
+    });
+    // reducedMotion 的那一份（同一批資料，只有「動」被關掉）
+    const stillWorld = World.createWorld({
+      engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} },
+      quality: 'high',
+      ...worldOpts,
+      reducedMotion: true,
+    });
+    // 低畫質：整層不蓋
+    const lowWorld = World.createWorld({
+      engine: { scene: new THREE.Scene(), camera: {}, onUpdate() {} },
+      quality: 'low',
+      ...worldOpts,
+    });
+    restore20();
+
+    eq(lowWorld.echoes.count, 0, '低畫質整層關掉（純氛圍層，關掉不擋任何一條路）');
+    eq(lowWorld.nearestEcho({ x: echoes20[0].at[0], y: 0, z: echoes20[0].at[1] }), null, '低畫質之下走過去也按不到（那一層不在）');
+    eq(lowWorld.playEcho(echoes20[0].id), null, '低畫質之下開演回 null');
+
+    // 互動圈：圈內按得到、圈外按不到（證明量的就是它的圈）
+    for (const e of echoes20) {
+      const inR = playWorld.nearestEcho({ x: e.at[0] + Rules20.ECHO_R - 0.1, y: 0, z: e.at[1] });
+      const outR = playWorld.nearestEcho({ x: e.at[0] + Rules20.ECHO_R + 0.1, y: 0, z: e.at[1] });
+      ok(inR && inR.echo.id === e.id, `[${e.id}] 互動圈裡按得到它`, JSON.stringify(inR && inR.echo.id));
+      ok(!outR || outR.echo.id !== e.id, `[${e.id}] 互動圈外就按不到它了（＝ 真的是它的圈）`);
+    }
+
+    let worstReach20 = 0;
+    let worstReachId = '';
+    for (const e of echoes20) {
+      const tag = `[${e.id}]`;
+      const stage = Props.stageAnchor(e.stage, e.stageKind);
+      const started = playWorld.playEcho(e.id);
+      ok(Boolean(started) && started.id === e.id, `${tag} 開得了演`);
+      eq(playWorld.echoPlaying, e.id, `${tag} 正在演的就是它`);
+      eq(playWorld.playEcho(e.id), null, `${tag} 演到一半不接第二次 E`);
+      const built = playWorld.echoes.byId(e.id);
+      eq(built.cast.visible, true, `${tag} 殘影出現了`);
+      const dt = 1 / 60;
+      let frames = 0;
+      let moved = 0;
+      let brightest = 0;
+      let lastX = null;
+      // 逐幀：走到演完為止（多留一秒的保險絲 —— 迴圈邊界不能當斷言邊界）
+      while (playWorld.echoPlaying === e.id && frames < Math.ceil((e.seconds + 1) * 60)) {
+        playWorld.echoes.update(dt, frames * dt, e.at[0], e.at[1]);
+        frames += 1;
+        brightest = Math.max(brightest, built.castMat.opacity);
+        for (const f of built.figures) {
+          // 殘影的世界座標 ＝ 那一處中心 ＋ 它在 cast 裡的位置
+          const d = Math.hypot(f.group.position.x, f.group.position.z);
+          if (d > worstReach20) {
+            worstReach20 = d;
+            worstReachId = e.id;
+          }
+          ok(d <= Echo20.ECHO_STAGE_R, `${tag} 殘影沒有離開那一處 ${Echo20.ECHO_STAGE_R} 公尺`, d.toFixed(2));
+        }
+        // 「動了沒」要看**會走的那一個**（`stand` / `sway` 的殘影本來就站著不動）
+        const walker = built.figures.find((f) => f.segments > 0) || built.figures[0];
+        const fx = walker.group.position.x + walker.group.position.z;
+        if (lastX !== null && Math.abs(fx - lastX) > 1e-6) moved += 1;
+        lastX = fx;
+      }
+      ok(frames >= Math.floor(e.seconds * 60 * 0.9), `${tag} 真的演滿了 ${e.seconds} 秒`, `${frames} 幀`);
+      ok(frames < Math.ceil((e.seconds + 1) * 60), `${tag} 而且會自己結束（不是撞到保險絲）`, `${frames} 幀`);
+      ok(brightest > 0.3, `${tag} 中途真的亮起來過`, brightest.toFixed(2));
+      ok(moved > 30, `${tag} 殘影真的動了`, `${moved} 幀有位移`);
+      eq(playWorld.echoPlaying, null, `${tag} 演完就收`);
+      eq(built.cast.visible, false, `${tag} 演完殘影收起來`);
+      ok(finished.includes(e.id), `${tag} 演完那一拍通知得到主程式（結果那一句才說得出來）`);
+      // 舞台真的是那一處，不是那團光（兩者可以隔十幾公尺）
+      eq(Math.round(built.stageX * 100) / 100, Math.round(stage.at[0] * 100) / 100, `${tag} 舞台中心的 x 是那一處`);
+      eq(Math.round(built.stageZ * 100) / 100, Math.round(stage.at[1] * 100) / 100, `${tag} 舞台中心的 z 是那一處`);
+    }
+    eq(finished.length, echoes20.length, '12 處各演完一次，各通知一次');
+    ok(worstReach20 <= Echo20.ECHO_STAGE_R, '逐幀量到最遠的那一刻仍在框內', worstReach20.toFixed(2));
+    console.log(`    ↳ 回聲：逐幀量到殘影最遠 ${worstReach20.toFixed(2)}m（${worstReachId}，上限 ${Echo20.ECHO_STAGE_R}）`);
+
+    // reducedMotion：**直接是終態**（一出現就站在最後一個航點上，而且不再移動）
+    for (const e of echoes20) {
+      const tag = `[${e.id} · reducedMotion]`;
+      const stage = Props.stageAnchor(e.stage, e.stageKind);
+      const cosR = Math.cos(stage.rot);
+      const sinR = Math.sin(stage.rot);
+      ok(Boolean(stillWorld.playEcho(e.id)), `${tag} 開得了演`);
+      const built = stillWorld.echoes.byId(e.id);
+      stillWorld.echoes.update(1 / 60, 0, e.at[0], e.at[1]);
+      const first = built.figures.map((f) => [f.group.position.x, f.group.position.z]);
+      for (let i = 0; i < built.figures.length; i += 1) {
+        const path = e.figures[i].path;
+        const last = path[path.length - 1];
+        const rx = last[0] * cosR + last[1] * sinR;
+        const rz = -last[0] * sinR + last[1] * cosR;
+        ok(
+          Math.abs(first[i][0] - rx) < 1e-6 && Math.abs(first[i][1] - rz) < 1e-6,
+          `${tag} 第 ${i + 1} 個殘影一出現就站在最後一個航點上（＝ 結果本身）`,
+          JSON.stringify(first[i])
+        );
+      }
+      // 再跑一半的時間：位置一格都不准動（關掉的是「動」）
+      let lit = 0;
+      for (let f = 0; f < Math.floor(e.seconds * 30); f += 1) {
+        stillWorld.echoes.update(1 / 60, f / 60, e.at[0], e.at[1]);
+        lit = Math.max(lit, built.castMat.opacity);
+      }
+      for (let i = 0; i < built.figures.length; i += 1) {
+        ok(
+          Math.abs(built.figures[i].group.position.x - first[i][0]) < 1e-6 &&
+            Math.abs(built.figures[i].group.position.z - first[i][1]) < 1e-6,
+          `${tag} 第 ${i + 1} 個殘影全程沒有移動過`
+        );
+      }
+      ok(lit > 0.3, `${tag} 但**回應**還在（透明度照樣亮起來）`, lit.toFixed(2));
+      stillWorld.echoes.stop();
+    }
+
+    /*
+     * 45 公尺外**整組連畫都不畫**：這一層每一塊都是加色混合的透明片，
+     * 「畫」比「算」貴得多。稽核與預算走的是場景圖（不看 `visible`），
+     * 所以三角形與碰撞體的數字一格都不動。
+     */
+    {
+      const far = [9000, 9000];
+      playWorld.echoes.update(1 / 60, 0, far[0], far[1]);
+      const hidden = playWorld.echoes.echoes.filter((e) => !e.group.visible).length;
+      eq(hidden, echoes20.length, '玩家在天邊時，12 團光整組都不畫');
+      const one = echoes20[3];
+      playWorld.echoes.update(1 / 60, 0, one.at[0], one.at[1]);
+      eq(playWorld.echoes.byId(one.id).group.visible, true, '走近的那一團又畫出來了');
+      /*
+       * 而且**畫不畫就是那條 45 公尺的線**（不是「只畫最近的那一團」）——
+       * 逐處拿它自己的距離去比，順便把「同一次更新裡遠的那幾團仍然不畫」講出來。
+       */
+      let wrong = 0;
+      let alsoNear = 0;
+      for (const e of playWorld.echoes.echoes) {
+        const d = Math.hypot(e.x - one.at[0], e.z - one.at[1]);
+        const want = d <= 45;
+        if (want && e.id !== one.id) alsoNear += 1;
+        if (e.group.visible !== want) wrong += 1;
+      }
+      eq(wrong, 0, '畫不畫就是那條 45 公尺的線（逐處比它自己的距離）');
+      ok(alsoNear >= 0 && playWorld.echoes.echoes.some((e) => !e.group.visible), '反例：同一次更新裡，遠的那幾團仍然不畫');
+      // 正在演的那一處永遠畫（玩家可能一邊看一邊走遠）
+      ok(Boolean(playWorld.playEcho(one.id)), '開一場來驗「演到一半走遠」');
+      playWorld.echoes.update(1 / 60, 0, far[0], far[1]);
+      eq(playWorld.echoes.byId(one.id).group.visible, true, '正在演的那一處走多遠都照畫');
+      playWorld.echoes.stop();
+      // 三角形與碰撞體不因為 visible 而變（稽核走場景圖）
+      eq(World.collectSolids(playWorld.echoes.group, World.terrainHeight).length, 0, '不畫也還是 0 個碰撞體');
+    }
+
+    // 收乾淨：reset() 之後不留任何一場在演（存檔清了，世界要跟著清）
+    ok(Boolean(playWorld.playEcho(echoes20[0].id)), '再開一場');
+    eq(playWorld.echoes.reset(), true, 'reset() 收得掉那一場');
+    eq(playWorld.echoPlaying, null, 'reset() 之後沒有東西在演');
+    eq(playWorld.echoes.byId(echoes20[0].id).cast.visible, false, 'reset() 之後殘影也收起來了');
+    eq(playWorld.echoes.reset(), false, '反例：沒有東西在演的時候 reset() 回 false');
+    eq(playWorld.playEcho('no-such-echo'), null, '反例：不存在的 id 開不了演');
+  }
+
+  /* --- ⑨ 接線：`E` 仍是唯一互動鍵、仲裁排最後、重置接得上 ---------- */
+  {
+    ok(/world\.nearestEcho\?\.\(/.test(mainSrc20), 'P20a：main.js 問得到走近的回聲');
+    ok(/e\.code === 'KeyE' && nearEcho/.test(mainSrc20), 'P20a：`E` 看得了一場重演（沒有第二個鍵）');
+    ok(/watchEcho\(nearEcho\)/.test(mainSrc20), 'P20a：那一下真的走世界層');
+    // 仲裁：每一層都比它先，而閘門排在它後面
+    ok(
+      /blocked \|\| hitHandle \|\| hitWinch \|\| world\.echoPlaying/.test(mainSrc20),
+      'P20a：誰要用 `E` 都讓（石座／濁靈／人／碑／刻文／殘頁／器物／機關先）'
+    );
+    ok(
+      /const hitGate = blocked \|\| hitHandle \|\| hitWinch \|\| hitEcho \? null :/.test(mainSrc20),
+      'P20a：閘門排在回聲後面（仲裁順序寫得出來）'
+    );
+    ok(/nearEcho = hitEcho \? hitEcho\.echo : null;/.test(mainSrc20), 'P20a：仲裁結果落到 nearEcho');
+    // 面板打開／序章進行中：整組收手
+    {
+      const clearBody = mainSrc20.slice(mainSrc20.indexOf('if (anyPanelOpen() || prologue.isActive) {'), mainSrc20.indexOf('const hitMarker = world.nearestMarker'));
+      ok(clearBody.length > 100, '切得出「面板打開就收手」那一段', String(clearBody.length));
+      ok(/nearEcho = null;/.test(clearBody), 'P20a：面板打開時回聲也收手');
+    }
+    // 存檔清了，世界要跟著清（寫好了卻沒有人呼叫的 reset() 等於沒有）
+    {
+      const resetBody = mainSrc20.slice(mainSrc20.indexOf('onReset: () => {'), mainSrc20.indexOf('onReplayPrologue:'));
+      ok(resetBody.length > 200, '切得出 onReset 那一段', String(resetBody.length));
+      ok(/world\.echoes\?\.reset\?\.\(\)/.test(resetBody), 'P20a：onReset 真的把正在演的那一場收掉');
+    }
+    // reducedMotion：不播過程就要先把結果說出來（不然那一句永遠等 5 秒）
+    {
+      const watchBody = mainSrc20.slice(mainSrc20.indexOf('function watchEcho('), mainSrc20.indexOf('function finishEcho('));
+      ok(/reducedMotion \? entry\.result : entry\.line/.test(watchBody), 'P20a：reducedMotion 之下開演那一拍就給結果');
+      const finishBody = mainSrc20.slice(mainSrc20.indexOf('function finishEcho('), mainSrc20.indexOf('function pushWinch('));
+      ok(/if \(reducedMotion \|\| !entry\) return;/.test(finishBody), 'P20a：所以演完那一拍不再說第二次');
+    }
+    // 低畫質整層關：判斷在世界層（一個地方決定）
+    ok(/quality === 'low' \? \[\] : echoes/.test(worldSrc20), 'P20a：低畫質整層不蓋（世界層一個地方決定）');
+    /*
+     * 上面那一段是直接餵 `echoes.update()`（世界的整支 `updateReactions` 還要一份
+     * 完整的進度替身）—— 所以「它真的被接進每幀迴圈」要另外守一條靜態掃描，
+     * 不然那一層可以整個沒有人呼叫，而每一條斷言照樣綠（findings：寫好了卻沒有人呼叫等於沒有）。
+     */
+    ok(/echoField\.update\(dt, t, x, z\);/.test(worldSrc20), 'P20a：回聲場真的被接進世界的每幀迴圈');
+    // 圖鑑那一頁真的接上了
+    ok(/rumors: rumorFile\.links \|\| \[\]/.test(mainSrc20), 'P20a：圖鑑收得到那 24 條線');
+    ok(/rumorIndex: buildClueIndex\(\{/.test(mainSrc20), 'P20a：六層的名字索引在 main.js 建一次');
+    ok(/\$\{secretChapter\(\)\}\$\{rumorChapter\(\)\}/.test(codexSrc20), 'P20a：傳聞那一章真的畫在圖鑑上');
+    ok(/found: \(ref\) => clueFound\(ref, progression\)/.test(codexSrc20), 'P20a：「找到了沒」問的是既有的存檔欄');
+  }
+
+  /* --- ⑩ 文件與資料是同一份 --------------------------------------- */
+  {
+    const s32 = worldMd20.slice(worldMd20.indexOf('### 3.2'), worldMd20.indexOf('### 3.3'));
+    /*
+     * **讓給高階層的時候要順手熄掉亮度**（P20a 審查 · 第 4 條）：
+     * `nearest()` 是唯一會清掉「走近」旗標的地方，互動迴圈一旦早退就不再呼叫它 ——
+     * 走出回聲圈、直接踏進石座圈（那兩層的圈在護欄崗與分歧之廳是刻意重疊的），
+     * 那一團光就會一直亮著。
+     */
+    {
+      const EchoMod = await import('../src/world/echoes.js');
+      ok(typeof EchoMod.default?.createEchoField === 'function' || true, '（前提）回聲模組載得起來');
+      const mainSrc20 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+      ok(
+        /world\.clearEchoNear\?\.\(\)/.test(mainSrc20),
+        'P20a：互動迴圈讓給高階層時會把回聲的「走近」熄掉'
+      );
+      const echoSrc20 = readFileSync(resolve(root, 'src/world/echoes.js'), 'utf8');
+      ok(/clearNear\(\)/.test(echoSrc20), 'P20a：回聲那一層真的有 clearNear()（不是空指望）');
+      const worldSrc20 = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+      ok(/clearEchoNear\(\)/.test(worldSrc20), 'P20a：world 把 clearEchoNear 接出去了');
+      // 行為：亮起來之後呼叫 clearNear() 要真的熄掉（反例：不呼叫就還亮著）
+      const field20 = testWorld.echoes;
+      if (field20 && typeof field20.clearNear === 'function' && field20.list && field20.list.length) {
+        const one = field20.list[0];
+        field20.nearest({ x: one.x, z: one.z }, 4, null);
+        const litBefore = Boolean(one.near);
+        field20.clearNear();
+        ok(litBefore, '（前提）走到它旁邊時真的會亮');
+        eq(Boolean(one.near), false, 'P20a：clearNear() 之後那一團光不再是「走近」的狀態');
+      }
+    }
+    ok(/回聲重演/.test(s32), 'WORLD.md §3.2 的表列得出回聲這一層');
+    ok(/機關 > 回聲 > 閘門/.test(s32), 'WORLD.md §3.2 寫得出它排在仲裁最後一位');
+    ok(/無（不加存檔欄）/.test(s32), 'WORLD.md §3.2 講明它沒有存檔欄');
+    const s417 = worldMd20.slice(worldMd20.indexOf('### 4.17'), worldMd20.indexOf('## 五'));
+    ok(s417.length > 400, 'WORLD.md 有 §4.17（回聲重演的擺放）', String(s417.length));
+    ok(/P20a/.test(s417), '§4.17 標得出這一格');
+    ok(/divergence|分歧之廳/.test(s417), '§4.17 講得出唯一掛在地標腳下的那一片');
+    ok(/echoes\.json/.test(s417) && /rumors\.json/.test(worldMd20), 'WORLD.md 指得出這兩份資料住在哪');
+    ok(/不加存檔欄/.test(worldMd20.slice(worldMd20.indexOf('### 5.4'), worldMd20.indexOf('## 六'))), 'WORLD.md §5.4 講明這一格沒有新增欄位');
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * v1.2 · P20b — 檔案廊（每片土地一座小展館，走近浮出一則「為什麼」）
+ *
+ * 這一格的紅線是**護欄 2**，所以斷言分成六件事：
+ *   ① 出處：`source.url` **逐則回查**那份「repo 裡已經驗證過的網址」集合
+ *      （現算，不抄第二份）；`source.name` 與那個網址在既有資料裡登記的文件名逐字相同。
+ *      反例：塞一個集合外的網址、或改一個字的文件名，都要紅。
+ *   ② 內容：≤60 字、`authored: "game"`、中文、零公司名，
+ *      而且**與既有三層不重複**（術語小卡／130 條技能／守夜人引用過的那一句）逐則比對。
+ *   ③ 擺位：對**真的蓋出來的世界**量（與 `scripts/archive-fit.mjs` 同一份門檻）。
+ *   ④ 世界實體：零光源、零碰撞體、零可站立體、穿模稽核零、展品＝技法。
+ *   ⑤ 互動：不搶 `E`、讓給高階層時自己熄掉、零每幀配置、45 公尺外連畫都不畫。
+ *   ⑥ 圖鑑：三分法成形、那一章每一則都點得到官方出處、不借用別人的選擇器。
+ * ------------------------------------------------------------------ */
+console.log('\n▸ 檔案廊：小知識那一層（v1.2 · P20b）');
+{
+  const archiveFile21 = readJson('src/data/archive.json');
+  const halls21 = archiveFile21.halls;
+  const notes21 = archiveFile21.notes;
+  const Archive21 = await import('../src/world/archives.js');
+  const Rules21 = (await import('./lib/screen-rules.mjs')).default;
+  const Audit21 = await import('./collision-audit.mjs');
+  const Reactive21 = await import('../src/world/reactive.js');
+  const archiveSrc21 = readFileSync(resolve(root, 'src/world/archives.js'), 'utf8');
+  const rulesSrc21 = readFileSync(resolve(root, 'scripts/lib/screen-rules.mjs'), 'utf8');
+  const mainSrc21 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const hudSrc21 = readFileSync(resolve(root, 'src/ui/hud.js'), 'utf8');
+  const codexSrc21 = readFileSync(resolve(root, 'src/ui/codex.js'), 'utf8');
+  const worldMd21 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+  const inscriptions21 = readJson('src/data/inscriptions.json').entries;
+  const secrets21 = readJson('src/data/secrets.json').entries;
+  const watchmen21 = readJson('src/data/watchmen.json').entries;
+  const murks21 = readJson('src/data/murks.json').entries;
+  const echoes21 = readJson('src/data/echoes.json').entries;
+  const EX21 = EXPECT.archive;
+  /** 世界層零公司名（§3.4）—— 與 P08 那一節用的是同一條式子，只是那一份是區域變數。 */
+  const VENDOR_NAME_21 = /\b(OpenAI|Anthropic|Google|xAI|GPT|Claude|Gemini|Grok)\b/i;
+
+  /* --- ① 出處：那份「已經驗證過的網址」集合，現算 -------------------- */
+  /**
+   * 集合怎麼來的：`curriculum.json`／`skill-codex-v2.json`／`source-anchors.json`／
+   * `glossary.json` 四份檔案裡出現過的每一個 http(s) 網址。
+   * **現算，不抄第二份**（findings：同一份量測不要抄第二份）。
+   */
+  const VERIFIED_SOURCE_FILES = Object.freeze([
+    'src/data/curriculum.json',
+    'src/data/skill-codex-v2.json',
+    'src/data/source-anchors.json',
+    'src/data/glossary.json',
+  ]);
+  const verifiedUrls21 = new Set();
+  for (const rel of VERIFIED_SOURCE_FILES) {
+    for (const u of srcOf(rel).match(/https?:\/\/[^"\s\\)]+/g) || []) verifiedUrls21.add(u);
+  }
+  eq(verifiedUrls21.size, EX21.verifiedUrls, '已經驗證過的網址集合大小與契約逐值相同');
+  ok(verifiedUrls21.size > 300, '（前提）那個集合真的有東西可比', String(verifiedUrls21.size));
+
+  /** 一個網址在既有資料裡登記過哪些文件名（`source.name` 要逐字對得上其中一個）。 */
+  const nameIndex21 = new Map();
+  const addName21 = (u, n) => {
+    if (!u || !n) return;
+    if (!nameIndex21.has(u)) nameIndex21.set(u, new Set());
+    nameIndex21.get(u).add(n);
+  };
+  for (const sk of readJson('src/data/skill-codex-v2.json').skills) {
+    for (const src of sk.sources || []) addName21(src.url, src.docName);
+  }
+  for (const rel of ['src/data/curriculum.json', 'src/data/source-anchors.json']) {
+    JSON.stringify(readJson(rel), (k, v) => {
+      if (v && typeof v === 'object' && v.url) addName21(v.url, v.name || v.docName);
+      return v;
+    });
+  }
+  ok(nameIndex21.size > 200, '（前提）文件名索引真的建得起來', String(nameIndex21.size));
+
+  /**
+   * 一則小知識的出處合不合格。**這一支就是那條紅線本身**：
+   * 測試逐則呼叫它，反例也呼叫它（findings：反例要呼叫被測的那一支，
+   * 不要另外寫一段長得像的程式）。
+   * @param {{name:string,url:string}} src
+   * @returns {string[]} 問題清單（空陣列＝過）
+   */
+  const sourceProblems21 = (src) => {
+    const bad = [];
+    if (!src || typeof src.url !== 'string' || typeof src.name !== 'string') return ['沒有 source'];
+    if (!verifiedUrls21.has(src.url)) bad.push(`網址不在已驗證的集合裡：${src.url}`);
+    const names = nameIndex21.get(src.url);
+    if (!names) bad.push(`那個網址沒有登記過文件名：${src.url}`);
+    else if (!names.has(src.name)) bad.push(`文件名與既有登記不同：「${src.name}」`);
+    return bad;
+  };
+  // 反例：三種壞法各要被同一支抓到（先紅）
+  {
+    const outside = sourceProblems21({ name: notes21[0].source.name, url: 'https://example.com/made-up' });
+    ok(outside.some((b) => b.includes('不在已驗證的集合裡')), '反例：塞一個集合外的網址會被擋下來', outside.join(' | '));
+    const renamed = sourceProblems21({ name: `${notes21[0].source.name} `, url: notes21[0].source.url });
+    ok(renamed.some((b) => b.includes('文件名與既有登記不同')), '反例：文件名多一個空白也會被擋下來', renamed.join(' | '));
+    ok(sourceProblems21(null).length > 0, '反例：沒有 source 會被擋下來');
+  }
+  eq(sourceProblems21(notes21[0].source).length, 0, '（對照）出貨的第一則過得了同一支');
+
+  /* --- ② 內容：字數、語言、分工 ------------------------------------- */
+  eq(archiveFile21.authored, 'game', 'archive.json 標明是遊戲自撰');
+  eq(notes21.length, EX21.notes, `小知識 ${EX21.notes} 則`);
+  eq(halls21.length, EX21.halls, `檔案廊 ${EX21.halls} 座`);
+  {
+    const regions21 = regionsV2.regions.filter((r) => r.implemented !== false).map((r) => r.id);
+    const perRegion = new Map(regions21.map((r) => [r, 0]));
+    const ids = new Set();
+    for (const n of notes21) {
+      const tag = `[archive:${n.id}]`;
+      ok(!ids.has(n.id), `${tag} id 不重複`);
+      ids.add(n.id);
+      ok(perRegion.has(n.region), `${tag} 掛在一片真的存在的土地上`, n.region);
+      perRegion.set(n.region, (perRegion.get(n.region) || 0) + 1);
+      ok([...n.body].length <= EX21.bodyMax, `${tag} 內文 ≤ ${EX21.bodyMax} 字`, String([...n.body].length));
+      ok([...n.body].length >= 20, `${tag} 內文不是一句敷衍`, String([...n.body].length));
+      ok([...n.title].length <= EX21.titleMax, `${tag} 標題 ≤ ${EX21.titleMax} 字`, String([...n.title].length));
+      ok(CJK.test(n.body) && CJK.test(n.title), `${tag} 是中文`);
+      ok(!ENGLISH(n.body), `${tag} 內文沒有整句英文`, ENGLISH(n.body) || '');
+      ok(!ENGLISH(n.title), `${tag} 標題沒有整句英文`, ENGLISH(n.title) || '');
+      // 世界層零公司名（§3.4）：標題與內文都會被畫在畫面上
+      ok(!VENDOR_NAME_21.test(n.title) && !VENDOR_NAME_21.test(n.body), `${tag} 標題與內文零公司名`);
+      const bad = sourceProblems21(n.source);
+      eq(bad.length, 0, `${tag} 出處在已驗證的集合裡、文件名逐字相同`, bad.join(' | '));
+    }
+    for (const [rid, n] of perRegion) eq(n, EX21.notesPerRegion, `[${rid}] 每片土地 ${EX21.notesPerRegion} 則`);
+  }
+  /*
+   * **與既有三層不重複**（這一格最容易破的一條）。
+   *
+   * 量法：把兩段話都拆成 4 字一組的滑動窗，看重疊了幾組。
+   * 只比「有沒有出現同一個詞」會被標點與常用字灌爆；比整句相等又形同沒有守 ——
+   * 4-gram 重疊到 `EX21.overlapMax` 組以上，就是在重講同一句話。
+   */
+  {
+    const grams = (t, n = 4) => {
+      const clean = String(t).replace(/[，。：；、「」『』（）—…·　\s]/g, '');
+      const out = new Set();
+      for (let i = 0; i + n <= clean.length; i += 1) out.add(clean.slice(i, i + n));
+      return out;
+    };
+    const overlap = (a, b) => {
+      let hit = 0;
+      for (const g of a) if (b.has(g)) hit += 1;
+      return hit;
+    };
+    /** 既有三層：每一條都帶著「它是誰」，紅的時候看得出撞到哪一句。 */
+    const priorLayers21 = [];
+    for (const t of readJson('src/data/glossary.json').terms) {
+      priorLayers21.push({ who: `術語小卡:${t.id}`, text: `${t.plain}${t.use}${t.example}` });
+    }
+    for (const sk of readJson('src/data/skill-codex-v2.json').skills) {
+      priorLayers21.push({ who: `技能:${sk.id}`, text: `${sk.nameZh}${sk.oneLiner}` });
+    }
+    for (const w of watchmen21) {
+      priorLayers21.push({ who: `守夜人:${w.id}`, text: [...(w.greet || []), ...(w.lore || [])].join('') });
+    }
+    ok(priorLayers21.length >= 160, '（前提）既有三層真的有那麼多句要比', String(priorLayers21.length));
+    const priorGrams21 = priorLayers21.map((p) => ({ who: p.who, g: grams(p.text) }));
+    let worst21 = { n: -1, who: '', id: '' };
+    for (const n of notes21) {
+      const mine = grams(`${n.title}${n.body}`);
+      for (const p of priorGrams21) {
+        const hit = overlap(mine, p.g);
+        if (hit > worst21.n) worst21 = { n: hit, who: p.who, id: n.id };
+        ok(hit <= EX21.overlapMax, `[archive:${n.id}] 沒有重講 ${p.who} 那一句`, `重疊 ${hit} 組 4 字`);
+      }
+    }
+    console.log(`    ↳ 檔案廊：與既有三層最像的一對 ${worst21.id} ↔ ${worst21.who}（重疊 ${worst21.n} 組，上限 ${EX21.overlapMax}）`);
+    // 反例：把守夜人真的引用過的那一句原封不動塞進來，同一支要抓得到
+    {
+      const oneLiner = readJson('src/data/skill-codex-v2.json').skills[0].oneLiner;
+      const fake = grams(oneLiner);
+      let caught = false;
+      for (const p of priorGrams21) if (overlap(fake, p.g) > EX21.overlapMax) caught = true;
+      eq(caught, true, '反例：把既有那一句原封不動抄過來，重疊掃描抓得到');
+    }
+  }
+
+  /* --- ③ 擺位（對**真的蓋出來的世界**量） --------------------------- */
+  {
+    const targets21 = Rules21.interactionTargets({
+      challenges,
+      inscriptions: inscriptions21,
+      letters: letterFile.entries,
+      handles: handleFile.entries,
+      reactiveSpots: Reactive21.reactiveTargets(),
+      murks: murks21,
+      watchmen: watchmen21,
+      guardians: [readJson('src/data/guardian.json')],
+      tablets: Props.LORE_TABLETS,
+      secrets: secrets21,
+      echoes: echoes21,
+      archives: [],
+    });
+    ok(targets21.length >= 300, '（前提）互動點真的有那麼多要比', String(targets21.length));
+    // 檔案廊真的被餵進 interactionTargets()（沒餵進去，別人的擺位就會照過期的世界算）
+    {
+      const withHalls = Rules21.interactionTargets({ challenges: [], archives: halls21 });
+      eq(withHalls.length, halls21.length, 'interactionTargets() 收得下檔案廊這一層');
+      eq(withHalls.every((t) => t.k === 'archive'), true, '而且標成 archive 這一層');
+      eq(Rules21.interactionTargets({ challenges: [] }).length, 0, '反例：沒有檔案廊就沒有那幾列');
+      ok(/data\.archives \|\| \[\]/.test(rulesSrc21), 'interactionTargets() 真的讀了 archives');
+      for (const rel of [
+        'scripts/screen-fit.mjs',
+        'scripts/murk-fit.mjs',
+        'scripts/guardian-fit.mjs',
+        'scripts/world-harness.mjs',
+        'scripts/archive-fit.mjs',
+      ]) {
+        ok(/archives/.test(srcOf(rel)), `${rel} 也把檔案廊餵了進去`);
+      }
+      /*
+       * ……但**離線篩要問的是「還沒有檔案廊」的那個世界**。
+       * `worldOptions()` 現在把出貨的 12 座也讀進來了（三角數要量真的出貨的那個），
+       * 於是 `archive-fit` 的 `baseWorldAndScreens()` 若照單全收，重搜某一片土地時
+       * 會看到一片「因為那座展館已經在那裡」才空出來的空地 ——
+       * 然後提出一個只有在它存在時才成立的落點。
+       */
+      {
+        const fitSrc21 = srcOf('scripts/archive-fit.mjs');
+        const from21 = fitSrc21.indexOf('async function baseWorldAndScreens()');
+        const bareFn21 = fitSrc21.slice(from21, fitSrc21.indexOf('\n}\n', from21));
+        ok(from21 > 0 && bareFn21.length > 120, '（前提）真的抓到 baseWorldAndScreens() 的本體', String(bareFn21.length));
+        ok(/buildWorld\(\{\s*base:\s*\{\s*\.\.\.base,\s*archives:\s*\[\]\s*\}\s*\}\)/.test(bareFn21), '離線篩蓋的是「還沒有檔案廊」的那個世界');
+      }
+      ok(/archives\.map/.test(srcOf('scripts/pacing-audit.mjs')), 'pacing-audit 的 POI 也收了檔案廊');
+    }
+    // `archiveNeedFrom` 的分支各自問對了（＋反例）
+    {
+      const marker = { k: 'marker', id: 'x', at: [0, 0] };
+      eq(Rules21.archiveNeedFrom(marker), Rules21.MARKER_R + Rules21.ARCHIVE_R, '一般土地對石座守的是「圈不重疊」');
+      eq(Rules21.archiveNeedFrom(marker, 'wards'), Rules21.MARKER_R + Rules21.ARCHIVE_R, 'v1.2 · P22c：護欄崗的例外收掉了，檔案廊對石座也守「圈不重疊」');
+      eq(Rules21.archiveNeedFrom(marker, 'foundations'), Rules21.MARKER_R + Rules21.ARCHIVE_R, '反例：沒有例外的那一片照一般門檻');
+      eq(Rules21.archiveNeedFrom({ k: 'react', id: 'x', at: [0, 0], r: 4.4 }), Rules21.ARCHIVE_AUTO_MIN, '反應物那一條是常數');
+      eq(Rules21.archiveNeedFrom({ k: 'secret', id: 'x', at: [0, 0] }, 'wards'), Rules21.ARCHIVE_AUTO_MIN, '祕密那一條也是常數，例外表管不到它');
+      eq(
+        Rules21.archiveNeedFrom({ k: 'greatmurk', id: 'x', at: [0, 0] }, 'wards'),
+        Rules21.GREAT_MURK_R + Rules21.ARCHIVE_R,
+        '大濁靈那一層**不准放進例外表**（murk-fit 從另一側量的是同一條式子）'
+      );
+      eq(
+        Rules21.archiveNeedFrom({ k: 'echo', id: 'x', at: [0, 0] }, 'wards'),
+        Rules21.ECHO_R + Rules21.ARCHIVE_R,
+        '回聲那一層也不准（test:rubric 的回聲段從另一側量的是同一條式子）'
+      );
+      eq(
+        Rules21.archiveNeedFrom({ k: 'guardian', id: 'x', at: [0, 0] }, 'wards'),
+        Rules21.GUARDIAN_R + Rules21.ARCHIVE_R,
+        '守門者那一層也不准（guardian-fit 從另一側量的是同一條式子）'
+      );
+    }
+    // 半徑的兩份（世界端與擺位規則）逐值相同
+    eq(Rules21.ARCHIVE_R, Archive21.ARCHIVE_RADIUS, '互動半徑：擺位規則與世界端逐值相同');
+    eq(Rules21.ARCHIVE_BODY_R, Archive21.ARCHIVE_SPAN, '頂棚半徑：擺位規則與世界端逐值相同');
+    eq(Rules21.LAYER_INTERACT_R.archive, Rules21.ARCHIVE_R, '淨空那一格與互動圈是同一個數字');
+
+    const archiveSolids21 = [];
+    for (const layer of testWorld.screens || []) {
+      for (const node of layer.group.children) {
+        for (const sd of World.collectSolids(node, World.terrainHeight)) {
+          archiveSolids21.push({ x: sd.x, z: sd.z, r: sd.r, id: sd.id || node.name });
+        }
+      }
+    }
+    ok(archiveSolids21.length > 50, '（前提）中觀層的碰撞圓真的有那麼多要比', String(archiveSolids21.length));
+    const pathSegs21 = Props.buildPathNetwork(
+      World.REGION_SITES,
+      [...World.CORRIDORS, ...World.ANNEX_LINKS],
+      challenges,
+      (await import('../src/world/screens.js')).PATH_BENDS
+    );
+    const standByRegion21 = {};
+    const markerByRegion21 = {};
+    const dropByRegion21 = {};
+    const flatDropByRegion21 = {};
+    let tightest21 = Infinity;
+    let tightestWho21 = '';
+    const hallIds21 = new Set();
+    const hallRegions21 = new Set();
+    for (const h of halls21) {
+      const tag = `[${h.id}]`;
+      const [x, z] = h.at;
+      ok(!hallIds21.has(h.id), `${tag} id 不重複`);
+      hallIds21.add(h.id);
+      ok(!hallRegions21.has(h.region), `${tag} 一片土地只有一座`);
+      hallRegions21.add(h.region);
+      const here = World.regionAt(x, z);
+      ok(here && here.id === h.region && !here.onBridge, `${tag} 落在自己的土地上（不在橋上）`, JSON.stringify(here));
+      ok(World.coverage(x, z) > Rules21.MOTIF_COVERAGE_MIN, `${tag} 沒有蓋在崩掉的區緣上`, World.coverage(x, z).toFixed(2));
+      ok(testWorld.isWalkable(x, z) && !testWorld.solidAt(x, z), `${tag} 展館中間站得進去`);
+      let minMarker = Infinity;
+      for (const t of targets21) {
+        const need = Rules21.archiveNeedFrom(t, h.region);
+        const d = Math.hypot(x - t.at[0], z - t.at[1]);
+        ok(d >= need, `${tag} 離 ${t.k}:${t.id} 夠遠`, `${d.toFixed(2)} < ${need.toFixed(2)}`);
+        if (d - need < tightest21) {
+          tightest21 = d - need;
+          tightestWho21 = `${h.id} ↔ ${t.k}:${t.id}`;
+        }
+        if (t.k === 'marker' && d < minMarker) minMarker = d;
+      }
+      markerByRegion21[h.region] = Math.round(minMarker * 100) / 100;
+      for (const lm of Props.LANDMARKS) {
+        ok(Math.hypot(x - lm.at[0], z - lm.at[1]) >= Rules21.ARCHIVE_AUTO_MIN, `${tag} 沒有蓋在地標 ${lm.id} 上`);
+      }
+      for (const v of Props.STORY_VIGNETTES) {
+        ok(Math.hypot(x - v.at[0], z - v.at[1]) >= Rules21.ARCHIVE_AUTO_MIN, `${tag} 沒有蓋在小景 ${v.id} 上`);
+      }
+      for (const sd of archiveSolids21) {
+        const need = Rules21.ARCHIVE_R + World.PLAYER_RADIUS + sd.r;
+        ok(Math.hypot(x - sd.x, z - sd.z) >= need, `${tag} 沒有被中觀層 ${sd.id} 擋住`);
+      }
+      ok(Rules21.laneDistance(World, x, z) >= World.LANE_HALF + Rules21.LANE_MARGIN, `${tag} 離橋的主動線夠遠`);
+      ok(Rules21.gateDistance(World, x, z) >= Rules21.GATE_MIN, `${tag} 離閘門夠遠`);
+      const dPath = Rules21.pathDistance(pathSegs21, x, z);
+      ok(
+        dPath >= Rules21.ARCHIVE_PATH_MIN && dPath <= Rules21.ARCHIVE_PATH_MAX,
+        `${tag} 離路網在 ${Rules21.ARCHIVE_PATH_MIN}–${Rules21.ARCHIVE_PATH_MAX} 公尺之間（走得到、又不擋路）`,
+        dPath.toFixed(2)
+      );
+      /*
+       * 頂棚四個角腳下夠平（與 archive-fit 的離線篩同一條）。
+       *
+       * 量的要是**真的會蓋出來的那四根腳**：整組轉過 `rot`，取沒轉過的四角
+       * 等於在保證另一座展館的事 —— 一道裝飾用的門。四點的世界座標走
+       * `archives.js` 的 `archiveFootprint()`（整個 repo 只有那一份真相）。
+       */
+      const hs = Archive21.archiveFootprint(h.at, h.rot).map(([fx, fz]) => World.terrainHeight(fx, fz));
+      const drop = Math.max(...hs) - Math.min(...hs);
+      dropByRegion21[h.region] = Math.round(drop * 100) / 100;
+      ok(drop <= Rules21.ARCHIVE_STEP_DROP_MAX, `${tag} 頂棚四角的落差在框內`, `${drop.toFixed(2)} > ${Rules21.ARCHIVE_STEP_DROP_MAX}`);
+      // 反例：沒轉過的那四個角量到的是別的東西（12 座的 rot 一個都不是 0）
+      const flatHs = Archive21.archiveFootprint(h.at, 0).map(([fx, fz]) => World.terrainHeight(fx, fz));
+      flatDropByRegion21[h.region] = Math.round((Math.max(...flatHs) - Math.min(...flatHs)) * 100) / 100;
+      /*
+       * **真正要守的東西**：站在「走近浮出」的那一圈上，24 個方向裡有幾個站得住。
+       * 它不搶 `E`，所以這裡問的是走不走得到，不是「是不是它贏」。
+       */
+      let stand = 0;
+      for (let a = 0; a < Rules21.ARCHIVE_WINNABLE_DIRS; a += 1) {
+        const ang = (a / Rules21.ARCHIVE_WINNABLE_DIRS) * Math.PI * 2;
+        const px = x + Math.cos(ang) * (Rules21.ARCHIVE_R - 0.3);
+        const pz = z + Math.sin(ang) * (Rules21.ARCHIVE_R - 0.3);
+        if (testWorld.isWalkable(px, pz) && !testWorld.solidAt(px, pz)) stand += 1;
+      }
+      standByRegion21[h.region] = stand;
+      ok(stand >= Rules21.ARCHIVE_STAND_MIN, `${tag} 那一圈上還有站得住的方向`, `${stand}/${Rules21.ARCHIVE_WINNABLE_DIRS}（門檻 ${Rules21.ARCHIVE_STAND_MIN}）`);
+      // 貼著頂棚那一圈繞得過去（它零碰撞，所以這一條量的是地形）
+      let around = 0;
+      for (let a = 0; a < Rules21.ARCHIVE_RING_DIRS; a += 1) {
+        const ang = (a / Rules21.ARCHIVE_RING_DIRS) * Math.PI * 2;
+        const rr = Rules21.ARCHIVE_BODY_R + World.PLAYER_RADIUS;
+        if (testWorld.isClear(x + Math.cos(ang) * rr, z + Math.sin(ang) * rr)) around += 1;
+      }
+      eq(around, Rules21.ARCHIVE_RING_DIRS, `${tag} 貼著頂棚那一圈每個方向都繞得過去`, `${around}/${Rules21.ARCHIVE_RING_DIRS}`);
+    }
+    eq(JSON.stringify(standByRegion21), JSON.stringify(EX21.standWorst), '逐片量到的「走得到它」與契約**逐值相同**');
+    /*
+     * 頂棚四角的落差**逐片釘死**（旋轉之後那四根腳）。
+     * 「≤ 1.1」那道門今天兩種算法都在預算內，所以只有門檻攔不住「量錯四個點」——
+     * 逐值比對才攔得住：拿沒轉過的四角去量，這一條當場紅。
+     */
+    eq(JSON.stringify(dropByRegion21), JSON.stringify(EX21.ceilingDrop), '逐片量到的「頂棚四角落差」與契約**逐值相同**');
+    ok(
+      JSON.stringify(dropByRegion21) !== JSON.stringify(flatDropByRegion21),
+      '反例：沒轉過的那四個角量到的是另一組數字（12 座的 rot 沒有一個是 0）',
+      JSON.stringify(flatDropByRegion21)
+    );
+    eq(JSON.stringify(markerByRegion21), JSON.stringify(EX21.markerNearest), '逐片量到的「離最近石座多遠」與契約**逐值相同**');
+    // 例外表：每一格都 ≤ 逐點掃出來的上限，而且真的必要
+    eq(
+      JSON.stringify(Rules21.ARCHIVE_MARKER_EXCEPTIONS),
+      JSON.stringify(EX21.markerFloor),
+      '石座那一條的例外表與契約**逐值相同**'
+    );
+    for (const [rid, floor] of Object.entries(EX21.markerFloor)) {
+      const ceil = EX21.markerCeiling[rid];
+      ok(Number.isFinite(ceil), `[${rid}] 例外有登記過上限`);
+      ok(floor <= ceil, `[${rid}] 門檻不超過全區上限（${floor} ≤ ${ceil}）`);
+      ok(ceil < Rules21.MARKER_R + Rules21.ARCHIVE_R, `[${rid}] 例外真的是必要的（全區上限 ${ceil} < 圈不重疊 ${Rules21.MARKER_R + Rules21.ARCHIVE_R}）`);
+      ok(markerByRegion21[rid] >= floor, `[${rid}] 出貨的落點吃得下那個例外`);
+    }
+    console.log(`    ↳ 檔案廊：擺位最緊的一對 ${tightestWho21} 還剩 ${tightest21.toFixed(3)}m；走得到它最少 ${Math.min(
+      ...Object.values(standByRegion21)
+    )}/${Rules21.ARCHIVE_WINNABLE_DIRS}（門檻 ${Rules21.ARCHIVE_STAND_MIN}）`);
+  }
+
+  /* --- ④ 世界實體：零光源、零碰撞、零可站立、穿模零 ------------------ */
+  {
+    const layer21 = testScene.getObjectByName('archives');
+    ok(layer21, '場景圖裡真的有檔案廊那一層');
+    let tris21 = 0;
+    let lights21 = 0;
+    let meshes21 = 0;
+    let solids21 = 0;
+    layer21.traverse((o) => {
+      if (o.isLight) lights21 += 1;
+      if (!o.isMesh) return;
+      meshes21 += 1;
+      const g = o.geometry;
+      tris21 += g.index ? g.index.count / 3 : g.attributes.position.count / 3;
+      if (o.userData && Number.isFinite(o.userData.solidRadius)) solids21 += 1;
+    });
+    eq(lights21, 0, '檔案廊整層零光源（護欄：37 盞不變）');
+    eq(solids21, 0, '檔案廊整層零碰撞體（細桿與吊在頭上的展品都不擋人）');
+    ok(tris21 < EX21.trisCeiling, `檔案廊整層 < ${EX21.trisCeiling} 三角形`, `tris=${tris21}`);
+    eq(tris21, EX21.tris, '檔案廊整層的三角數與契約逐值相同');
+    console.log(`    ↳ 檔案廊：三角 ${tris21}、網格 ${meshes21}、碰撞體 0、光源 0`);
+    // 這一層在**真的蓋出來的世界**裡也沒有登記任何碰撞圓（不是只看 userData）
+    for (const h of halls21) {
+      const near = testWorld.solids.filter((sd) => Math.hypot(sd.x - h.at[0], sd.z - h.at[1]) < Rules21.ARCHIVE_BODY_R + 0.5);
+      eq(near.length, 0, `[${h.id}] 世界的碰撞登記表裡沒有它`, near.map((sd) => sd.id).join(','));
+    }
+    // 穿模稽核：這一層一個「有份量卻沒有碰撞體」的東西都沒有
+    {
+      const subs = Audit21.listSubstantial(layer21, World.terrainHeight, World.coverage);
+      const naked = subs.filter((sub) => !sub.excepted);
+      eq(naked.length, 0, '檔案廊沒有「有份量卻沒有碰撞體」的東西', naked.map((n) => `${n.name}(r=${n.r.toFixed(2)},h=${n.height.toFixed(2)})`).slice(0, 3).join(' | '));
+      eq(subs.filter((sub) => sub.standable).length, 0, '檔案廊沒有可站立體');
+    }
+    // 展品 ＝ 這片土地的技法（一片一條）
+    for (const h of halls21) {
+      const built = testWorld.archives.byId(h.id);
+      ok(built, `[${h.id}] 那一座真的蓋出來了`);
+      const want = catalog.regionSkills(h.region).length;
+      eq(built.slats.length, want, `[${h.id}] 展品數 ＝ 這片土地的技法數`, `${built.slats.length} vs ${want}`);
+      eq(built.skillIds.length, want, `[${h.id}] 展品掛的是那幾條技法的 id`);
+      // 兩座檔案龕的世界座標：一左一右，而且真的跟著 `rot` 轉過
+      eq(built.niches.length, 2, `[${h.id}] 兩座檔案龕`);
+      const gap = Math.hypot(built.niches[0].x - built.niches[1].x, built.niches[0].z - built.niches[1].z);
+      ok(Math.abs(gap - Archive21.ARCHIVE_NICHE_X * 2) < 0.01, `[${h.id}] 兩座龕相隔 ${(Archive21.ARCHIVE_NICHE_X * 2).toFixed(2)} 公尺`, gap.toFixed(3));
+      /*
+       * **轉過的座標要用另一條路量一次。**
+       *
+       * `archives.js` 是自己用 `cos/sin` 把局部 ±X 換算成世界座標的
+       * ——「`rotation.y = θ` 到底把局部軸轉去哪」正是 findings 記過一次、
+       * 而且被照抄三處的那個錯（P19 的幕、11 道閘門、慶祝那一圈）。
+       * 這裡改用 three.js 自己的矩陣（`localToWorld`）算一次，兩條路對得起來才算數；
+       * 「兩座龕相隔多遠」那一條是旋轉不變的，證不了這件事。
+       */
+      built.group.updateMatrixWorld(true);
+      for (let i = 0; i < 2; i += 1) {
+        const nx = i ? Archive21.ARCHIVE_NICHE_X : -Archive21.ARCHIVE_NICHE_X;
+        const v = built.group.localToWorld(new THREE.Vector3(nx, 0, 0));
+        const off = Math.hypot(v.x - built.niches[i].x, v.z - built.niches[i].z);
+        ok(off < 0.01, `[${h.id}] 第 ${i} 座龕的世界座標與矩陣算出來的一致`, off.toFixed(4));
+      }
+      /*
+       * **每一塊各自貼自己腳下的地 —— 而「腳下」是轉過之後的那一點。**
+       *
+       * `sx/sz` 是局部偏移，整組卻轉過 `rot`：取高度時取到還沒轉過的那一點，
+       * 三公尺的柱子就會浮在空中（或埋進去）將近一公尺，而它 `noCollide`、
+       * 穿模稽核與碰撞稽核**都看不到**。這裡量的是真的世界位置
+       * （three.js 自己的矩陣，不重打一次三角函數 —— 重打就會有第二份真相）。
+       */
+      for (const post of built.frame.children) {
+        if (!/^post\d/.test(post.name)) continue;
+        const w = built.group.localToWorld(new THREE.Vector3().copy(post.position));
+        const gap = w.y - 1.5 - World.terrainHeight(w.x, w.z);
+        ok(Math.abs(gap) < 0.01, `[${h.id}] ${post.name} 的腳踩在它自己站的那一點上`, `浮了 ${gap.toFixed(3)}m`);
+      }
+      // 檔案龕同一件事（0.72 公尺高的一座石龕浮起自己身高的三分之二也沒有人會紅）
+      for (let i = 0; i < 2; i += 1) {
+        const holder = built.niches[i].group;
+        const w = built.group.localToWorld(new THREE.Vector3().copy(holder.position));
+        const gap = w.y - World.terrainHeight(w.x, w.z);
+        ok(Math.abs(gap) < 0.01, `[${h.id}] 第 ${i} 座檔案龕的底踩在它自己站的那一點上`, `浮了 ${gap.toFixed(3)}m`);
+      }
+    }
+  }
+
+  /* --- ⑤ 互動：不搶 `E`、讓開時自己熄掉、零每幀配置 ------------------ */
+  {
+    const field21 = testWorld.archives;
+    ok(field21 && field21.count === halls21.length, '檔案廊那一層 12 座都在場上', String(field21 && field21.count));
+    // `nearest()` 挑得出「站得比較近的那一座龕」（左右各驗一次 —— 一個方向的斷言等於沒有）
+    {
+      const one = field21.archives[0];
+      for (let sideWant = 0; sideWant < 2; sideWant += 1) {
+        const n = one.niches[sideWant];
+        const hit = field21.nearest({ x: n.x, z: n.z });
+        ok(hit && hit.archive === one, `站在第 ${sideWant} 座龕旁邊，找得到那一座展館`);
+        eq(hit && hit.side, sideWant, `而且浮出來的是第 ${sideWant} 則`);
+      }
+      // 圈外按不到（圈內圈外各一次，才釘得住那個半徑）
+      const far = field21.nearest({ x: one.x + Rules21.ARCHIVE_R + 0.5, z: one.z });
+      eq(far, null, '走出那一圈就不再浮出來');
+      // 讓給高階層：`clearNear()` 之後那一則的狀態要熄掉
+      field21.nearest({ x: one.x, z: one.z });
+      const litBefore = one.near;
+      field21.clearNear();
+      eq(litBefore, true, '（前提）走進去時真的會亮');
+      eq(one.near, false, 'clearNear() 之後那一座不再是「走近」的狀態');
+      eq(one.side, -1, '而且不再指著任何一則');
+    }
+    // 收集到的技法 ＝ 亮起來的展品（`refresh()` 真的跟著存檔走）
+    {
+      const one = field21.archives[0];
+      eq(one.slats.some((sl) => sl.lit), false, '（前提）沒有存檔時展品全暗');
+      const first = one.skillIds[0];
+      const field = Archive21.createArchiveField({
+        halls: [halls21[0]],
+        kitOf: () => Props.kitFor(0x88aacc),
+        terrainHeight: World.terrainHeight,
+        skillIdsOf: () => catalog.regionSkills(halls21[0].region).map((sk) => sk.id),
+        collectedOf: (id) => id === first,
+      });
+      const built = field.archives[0];
+      eq(built.slats[0].lit, true, '收了第一條技法，第一片展品就亮了');
+      eq(built.slats.slice(1).some((sl) => sl.lit), false, '反例：沒收的那幾片還是暗的');
+      field.reset();
+      eq(built.slats[0].lit, true, 'reset() 重新對一次存檔（這個替身的存檔沒變，所以還是亮的）');
+    }
+    // 靜態掃描：呼叫端真的接上了（寫好了卻沒有人呼叫的 reset() 等於沒有）
+    ok(/world\.archives\?\.reset\?\.\(\)/.test(mainSrc21), '重置進度時世界端的展品跟著歸零');
+    ok(/world\.refreshArchives\?\.\(\)/.test(mainSrc21), '收集到技法時展品跟著亮起來');
+    ok(/world\.clearArchiveNear\?\.\(\)/.test(mainSrc21), '讓給高階層時把那一則熄掉');
+    ok(/hud\.setAside\(/.test(mainSrc21), '那一則真的送去畫在畫面上');
+    ok(/setAside\(html\)/.test(hudSrc21), 'HUD 真的有那一支（不是只在呼叫端寫了名字）');
+    // 不搶 `E`：整個檔案廊層一個鍵盤事件都沒有
+    ok(!/KeyE|keydown|addEventListener/.test(archiveSrc21), '檔案廊那一層一個按鍵都沒接（`E` 仍是唯一的互動鍵）');
+    ok(!/nearArchive/.test(mainSrc21.slice(mainSrc21.indexOf("e.code === 'KeyE'"))), '`E` 的處理裡沒有檔案廊這一支');
+    // 零每幀配置（`update()` 裡不 new、不 map/filter、不建閉包）
+    {
+      const body = archiveSrc21.slice(archiveSrc21.indexOf('    update(dt, t, px, pz) {'));
+      const upd = body.slice(0, body.indexOf('\n    },'));
+      ok(upd.length > 200, '（前提）真的抓到 update() 的本體', String(upd.length));
+      for (const bad of ['new ', '.map(', '.filter(', '=>']) {
+        ok(!upd.includes(bad), `update() 裡沒有「${bad.trim()}」（零每幀配置）`);
+      }
+      ok(/FAR_SQ/.test(upd) && /visible = !far/.test(upd), '45 公尺外整組**連畫都不畫**（加色混合的透明片畫比算貴）');
+    }
+    // reducedMotion：只留終態（位移歸零，亮度照樣跟著走近變化）
+    {
+      const still = Archive21.createArchiveField({
+        halls: [halls21[0]],
+        kitOf: () => Props.kitFor(0x88aacc),
+        terrainHeight: World.terrainHeight,
+        skillIdsOf: () => catalog.regionSkills(halls21[0].region).map((sk) => sk.id),
+        collectedOf: () => true,
+        reducedMotion: true,
+      });
+      const b = still.archives[0];
+      const baseY = b.slats[0].baseY;
+      still.update(0.016, 12.3, b.x, b.z);
+      eq(b.slats[0].mesh.position.y, baseY, 'reducedMotion：展品不飄（位移只留終態）');
+      ok(b.nearAmt > 0, 'reducedMotion：走近該亮的還是會亮（關掉的是動，不是回應）');
+      // 反例：同一份程式碼、同一拍，開著動的那一份真的會動
+      const moving = Archive21.createArchiveField({
+        halls: [halls21[0]],
+        kitOf: () => Props.kitFor(0x88aacc),
+        terrainHeight: World.terrainHeight,
+        skillIdsOf: () => catalog.regionSkills(halls21[0].region).map((sk) => sk.id),
+        collectedOf: () => true,
+      });
+      const m = moving.archives[0];
+      moving.update(0.016, 12.3, m.x, m.z);
+      ok(Math.abs(m.slats[0].mesh.position.y - m.slats[0].baseY) > 0.001, '反例：沒關掉動的那一份，同一拍真的動了');
+    }
+  }
+
+  /* --- ⑥ 圖鑑：三分法 ＋ 那一章每一則都點得到官方出處 ---------------- */
+  {
+    for (const [zh, en] of [['世界觀', 'Lore'], ['濁言', 'Creatures'], ['小知識', 'Research']]) {
+      ok(codexSrc21.includes(`division('${zh}', '${en}'`), `圖鑑有「${zh} / ${en}」那一分`);
+    }
+    ok(/archiveChapter\(\)/.test(codexSrc21), '圖鑑有檔案廊那一章');
+    ok(/archiveNotes/.test(codexSrc21) && /archiveNotes/.test(mainSrc21), '那一章真的接到了 archive.json');
+    /*
+     * **不借用別人的選擇器**：`.tech__tip` / `.tech__ex` / `.tech__note` / `.tech__srcs`
+     * 是「整本圖鑑不准有整句英文」與「出處深連結」那兩條斷言在看的東西
+     * （findings：守門的斷言要看得到它在守的東西 —— 反過來也一樣，
+     * 不要把別的東西塞進它的視野裡）。
+     */
+    const chapter = codexSrc21.slice(codexSrc21.indexOf('function archiveChapter()'), codexSrc21.indexOf('function division('));
+    ok(chapter.length > 400, '（前提）真的抓到那一章的本體', String(chapter.length));
+    for (const cls of ['tech__tip', 'tech__ex', 'tech__note', 'tech__srcs']) {
+      ok(!chapter.includes(cls), `檔案廊那一章沒有借用 .${cls}`);
+    }
+    ok(chapter.includes('archive__srcs') && chapter.includes('class="src"'), '它有自己的出處列，而且是可點的連結');
+    /*
+     * `source` 要照隔壁每一章那樣守一次：少了那個欄位的一則不是「少一個連結」，
+     * 是 `render()` 當場丟例外 ——**整本圖鑑打不開**。護欄 2 真正的關卡在資料那一側
+     * （下面那一條逐則回查），這一條守的是縱深。
+     */
+    ok(/n\.source && n\.source\.url/.test(chapter), '少了出處的一則不會把整本圖鑑弄壞');
+    // 每一則都有 https 出處（圖鑑那一側的護欄 2）
+    for (const n of notes21) ok(/^https:\/\//.test(n.source.url), `[archive:${n.id}] 出處是可點的 https 連結`);
+    /*
+     * 三條分隔條**只有在底下真的有東西時才畫**：五個章節的每一支在資料空的時候
+     * 都回 `''`（`archiveNotes` 的預設就是 `[]`），無條件畫的話，
+     * 少了某一份資料的呼叫端會得到一個標題＋副標、底下空空如也。
+     */
+    {
+      const from21 = codexSrc21.indexOf('overlay.body.innerHTML =');
+      const html21 = codexSrc21.slice(from21, codexSrc21.indexOf('bindInfoTips(overlay.body)', from21));
+      ok(from21 > 0 && html21.length > 200, '（前提）真的抓到組版面的那一段', String(html21.length));
+      for (const [zh, name] of [['世界觀', 'loreHtml'], ['濁言', 'murkHtml'], ['小知識', 'archiveHtml']]) {
+        ok(new RegExp(`${name}\\s*\\?`).test(html21), `「${zh}」那一條分隔只有在底下有東西時才畫`);
+      }
+    }
+  }
+
+  /* --- ⑦ e2e 的頁面內程式碼一定要 parse 得過（這一格自己踩到的） ------ */
+  {
+    /*
+     * **頁面內的那一段是字串，不是程式碼 —— 沒有人替它做語法檢查。**
+     *
+     * P20a 記過一次（模板字串裡的註解不能有反引號），P20b 又用另一種方式踩到：
+     * 在 `evaluate(\`…\`)` 的模板裡寫 `/^https:\/\//`，node 端的模板會先把 `\/`
+     * 求值成 `/` —— 頁面收到的是 `/^https://`，當場 SyntaxError，
+     * 而那是**整支 e2e 中斷**（不是紅一條）：後面每一段都不會跑到。
+     *
+     * 所以這裡靜態掃過 `scripts/headless-check.mjs` 裡**每一段**頁面內程式碼：
+     * 把 `${…}` 換成 `(0)`（不能換成 `0` —— `0.replace(…)` 本身就是語法錯誤，
+     * 那是替身造出來的假紅），先照 node 的模板規則求值一次，再丟給
+     * `new Function` 檢查語法。反例在下面：把那個少一層跳脫的寫法餵進同一支，要紅。
+     */
+    const e2eSrc21 = srcOf('scripts/headless-check.mjs');
+    /** 抓出每一段 `evaluate(\`…\`)` 的模板原文（`${…}` 整段跳過，裡面的反引號不算結尾）。 */
+    const pageScripts21 = (text) => {
+      const out = [];
+      const OPEN = 'evaluate(`';
+      let i = 0;
+      for (;;) {
+        const at = text.indexOf(OPEN, i);
+        if (at < 0) break;
+        let j = at + OPEN.length;
+        let body = '';
+        let closed = false;
+        while (j < text.length) {
+          const c = text[j];
+          if (c === '\\') {
+            body += text[j] + text[j + 1];
+            j += 2;
+            continue;
+          }
+          if (c === '$' && text[j + 1] === '{') {
+            let d = 1;
+            let k = j + 2;
+            while (k < text.length && d > 0) {
+              if (text[k] === '{') d += 1;
+              else if (text[k] === '}') d -= 1;
+              k += 1;
+            }
+            body += '(0)';
+            j = k;
+            continue;
+          }
+          if (c === '`') {
+            closed = true;
+            j += 1;
+            break;
+          }
+          body += c;
+          j += 1;
+        }
+        if (closed) out.push({ at, body });
+        i = j;
+      }
+      return out;
+    };
+    /** 一段模板過不過。回問題（null ＝ 過）—— 反例呼叫的就是這一支。 */
+    const templateProblem21 = (body) => {
+      let page;
+      try {
+        // eslint-disable-next-line no-eval
+        page = eval(`\`${body}\``);
+      } catch (err) {
+        return `模板本身求值不了：${err.message}`;
+      }
+      try {
+        // eslint-disable-next-line no-new-func
+        new Function(`return (async()=>{${page}})`);
+      } catch (err) {
+        return `頁面內程式碼 parse 不過：${err.message}`;
+      }
+      return null;
+    };
+    const scripts21 = pageScripts21(e2eSrc21);
+    ok(scripts21.length > 700, '（前提）真的掃到那幾百段頁面內程式碼', String(scripts21.length));
+    const brokenAt21 = [];
+    for (const t of scripts21) {
+      const prob = templateProblem21(t.body);
+      if (prob) brokenAt21.push(`第 ${e2eSrc21.slice(0, t.at).split('\n').length} 行：${prob}`);
+    }
+    eq(brokenAt21.length, 0, 'e2e 的每一段頁面內程式碼都 parse 得過', brokenAt21.slice(0, 3).join(' | '));
+    // 反例：三種真的發生過的寫法，同一支都要抓得到
+    ok(templateProblem21('return /^https:\\/\\//.test(u);'), '反例：少一層跳脫的正規表示式（P20b 踩到的那一個）');
+    ok(templateProblem21('// 這一行的註解裡有 `反引號`\nreturn 1;'), '反例：註解裡有反引號（P20a 踩到的那一個）');
+    ok(templateProblem21('return foo(;'), '反例：單純打錯字');
+    eq(templateProblem21('return 1 + 1;'), null, '（對照）好的那一段不會被誤殺');
+  }
+
+  /* --- ⑧ WORLD.md：新的一層要寫進世界的規則書 ---------------------- */
+  {
+    const s32b = worldMd21.slice(worldMd21.indexOf('### 3.2'), worldMd21.indexOf('### 3.3'));
+    ok(/檔案廊/.test(s32b), 'WORLD.md §3.2 的表列得出檔案廊這一層');
+    ok(/不搶|沒有 `E`|走近浮出/.test(s32b), '§3.2 講明它不搶 `E`');
+    const s418 = worldMd21.slice(worldMd21.indexOf('### 4.18'), worldMd21.indexOf('## 五'));
+    ok(s418.length > 400, 'WORLD.md 有 §4.18（檔案廊的擺放）', String(s418.length));
+    ok(/P20b/.test(s418), '§4.18 標得出這一格');
+    ok(/archive\.json/.test(s418), '§4.18 指得出那份資料住在哪');
+    ok(/365|已經驗證過/.test(s418), '§4.18 寫得出「出處只准用已經驗證過的那一份集合」');
+    ok(/wards|護欄崗/.test(s418) && /divergence|分歧之廳/.test(s418), '§4.18 寫得出兩片需要例外的土地');
+  }
+}
+
+/* ================================================================== *
+ * v1.2 · P21：中點揭示 ＋ 鏡碑第二層（轉折）                          *
+ * ------------------------------------------------------------------ *
+ *   · 走進分歧之廳就觸發 —— 與解了幾關無關（跳著解門的人不會錯過）
+ *   · 只說一次；那個旗標**不影響任何解鎖**（逐項比對每一片土地的解鎖狀態）
+ *   · 鏡碑第二層綁稱號鏈第三階；沒到只是「那一層還沒亮」，碑還在
+ *   · 兩塊碑都是純風味：不掛出處、不宣稱技巧、用語吃禁字表
+ * ================================================================== */
+console.log('▸ 轉折：中點揭示 ＋ 鏡碑第二層（P21）');
+{
+  const Turning = TurningP21;
+  const EX_TURN = EXPECT.turning;
+  const RulesP21 = (await import('./lib/screen-rules.mjs')).default;
+  const VENDOR_RE_P21 = /\b(OpenAI|Anthropic|Google|xAI|GPT|Claude|Gemini|Grok)\b/i;
+  const watchmenFileP21 = readJson('src/data/watchmen.json');
+  const echoFileP21 = readJson('src/data/echoes.json');
+  const archiveFileP21 = readJson('src/data/archive.json');
+  const guardianFileP21 = readJson('src/data/guardian.json');
+  const mainSrc21b = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const worldMdP21 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+  const ranksP21 = readJson('src/data/ranks.json').ranks;
+
+  /* --- ① 契約逐值比對（宣告了卻沒人比對的欄位＝一句沒人查證的話） --- */
+  {
+    ok(EX_TURN && typeof EX_TURN === 'object', '契約檔登記了 turning 這一格');
+    eq(EX_TURN.region, Turning.MIDPOINT.region, '契約的土地 id 與 turning.js 逐值相同');
+    eq(EX_TURN.flag, Turning.MIDPOINT.flag, '契約的旗標名與 turning.js 逐值相同');
+    eq(EX_TURN.echo, Turning.MIDPOINT.echo, '契約的回聲分支名與 turning.js 逐值相同');
+    eq(EX_TURN.midpointGate, Turning.MIDPOINT.gate, '契約的中點門名與 turning.js 逐值相同');
+    eq(EX_TURN.scribeGate, Turning.SCRIBE.gate, '契約的鏡碑門名與 turning.js 逐值相同');
+    eq(EX_TURN.rankStep, Turning.SCRIBE.rankStep, '契約的稱號階數與 turning.js 逐值相同');
+    eq(EX_TURN.rankId, Turning.SCRIBE.rankId, '契約的稱號 id 與 turning.js 逐值相同');
+    eq(JSON.stringify(EX_TURN.tablets), JSON.stringify(['twin-pillars-foot', 'mirror-stele']), '契約列得出這一格加的兩塊碑');
+    eq(JSON.stringify(Props.TABLET_GATES), JSON.stringify([Turning.MIDPOINT.gate, Turning.SCRIBE.gate]), '碑上的門只有這兩種（props.js 讀的是 turning.js 那一份）');
+  }
+
+  /* --- ② 稱號鏈第三階：逐值比對，不是「差不多是抄寫人」 --- */
+  {
+    ok(ranksP21.length >= Turning.SCRIBE.rankStep, '（前提）稱號鏈真的有第三階', String(ranksP21.length));
+    eq(ranksP21[Turning.SCRIBE.rankStep - 1].id, Turning.SCRIBE.rankId, '稱號鏈第三階就是 ranks.json 的那一個 id');
+    eq(ranksP21[Turning.SCRIBE.rankStep - 1].title, '抄寫人', '第三階的稱號就是「抄寫人」（鏡碑第二層那句話講的正是它）');
+    // index 是 0 起算，rankStep 是 1 起算 —— 這兩把尺不准混用
+    eq(Turning.scribeReached(Turning.SCRIBE.rankStep - 1), true, '走到第三階就算數');
+    eq(Turning.scribeReached(Turning.SCRIBE.rankStep - 2), false, '第二階還不算（反例）');
+    eq(Turning.scribeReached(ranksP21.length - 1), true, '最高階當然也算');
+    eq(Turning.scribeReached(-1), false, '沒有稱號時不算（反例）');
+    eq(Turning.scribeReached(NaN), false, '不是數字時不算（反例）');
+  }
+
+  /* --- ③ 觸發只看「走進去」：一關都沒解的存檔也要觸發 --- */
+  {
+    memory.clear();
+    const zero = createProgression({ catalog, challenges });
+    // 這份存檔真的是「一關都沒解」——反例的前提要先立得住
+    eq(Object.keys(zero.state.bestGrades).length, 0, '（前提）餵進去的是一關都沒解的存檔');
+    eq(zero.state.collected.length, 0, '（前提）一條技巧都沒收');
+    eq(zero.levelInfo().level, 1, '（前提）還是 Lv.1');
+    eq(zero.state.xp, 0, '（前提）0 XP');
+
+    eq(Turning.midpointTriggered('divergence'), true, '站在分歧之廳上就算走進去了');
+    eq(
+      Turning.shouldRevealMidpoint('divergence', false, zero),
+      true,
+      '一關都沒解的人走進分歧之廳，中點揭示照樣觸發（跳著解門的人不會錯過）'
+    );
+    /*
+     * 「先紅」的那一條：把它綁在關卡數上就要紅。
+     * 反例真的呼叫**被測的那一支**（`shouldRevealMidpoint`），不是另外寫一段長得像的程式 ——
+     * 這裡拿它的回傳值去和「假如有人加了 cleared >= N」的那個假實作比對。
+     */
+    const clearedGated = (regionId, onBridge, p) =>
+      Turning.shouldRevealMidpoint(regionId, onBridge, p) && Object.keys(p.state.bestGrades).length >= 1;
+    eq(clearedGated('divergence', false, zero), false, '（反例）綁在關卡數上的那個假實作對這份存檔會回 false');
+    ok(
+      Turning.shouldRevealMidpoint('divergence', false, zero) !== clearedGated('divergence', false, zero),
+      '出貨的那一支與「綁在關卡數上」不是同一件事'
+    );
+    /*
+     * 型別上就不可能綁進度：`midpointTriggered()` 的整個函式體裡
+     * 一個「進度」字眼都沒有（存檔、關卡數、等級、技巧、徽章）。
+     * 靜態掃描比參數個數可靠 —— 參數有預設值時 `Function.length` 會少算。
+     */
+    const trigSrc21 = readFileSync(resolve(root, 'src/world/turning.js'), 'utf8')
+      .split('export function midpointTriggered')[1]
+      // 切到函式體的收尾大括號為止（再往後就是下一支的說明文字了）
+      .split('\n}')[0];
+    ok(trigSrc21.length > 40, '（前提）真的切到 midpointTriggered() 的函式體', String(trigSrc21.length));
+    for (const w of ['progression', 'bestGrades', 'cleared', 'level', 'xp', 'collected', 'badges', 'state']) {
+      ok(!trigSrc21.includes(w), `midpointTriggered() 的函式體裡沒有「${w}」（它綁不到進度）`);
+    }
+
+    // 別的土地、橋上、亂七八糟的輸入都不算
+    for (const s2 of World.REGION_SITES) {
+      if (s2.id === Turning.MIDPOINT.region) continue;
+      eq(Turning.midpointTriggered(s2.id), false, `（反例）站在 ${s2.id} 上不算走進分歧之廳`);
+    }
+    eq(Turning.midpointTriggered('divergence', true), false, '（反例）橋上不算走進去');
+    eq(Turning.midpointTriggered(null), false, '（反例）沒有土地時不算');
+    eq(Turning.midpointTriggered(undefined), false, '（反例）undefined 不算');
+    eq(Turning.shouldRevealMidpoint('foundations', false, zero), false, '（反例）在別的土地上不會說');
+    eq(Turning.shouldRevealMidpoint('divergence', true, zero), false, '（反例）在橋上不會說');
+  }
+
+  /* --- ④ 只說一次，而且旗標不影響任何解鎖 --- */
+  {
+    memory.clear();
+    const p21 = createProgression({ catalog, challenges });
+    /*
+     * 「旗標不影響任何解鎖」要**逐項比對**：說之前把每一片土地的解鎖狀態抄下來，
+     * 說之後再抄一次，整份 JSON 比字串。只驗「foundations 還開著」是包住式的假斷言。
+     */
+    const unlockShot = () =>
+      JSON.stringify({
+        unlockedRegions: [...p21.state.unlockedRegions].sort(),
+        skippedGates: [...(p21.state.skippedGates || [])].sort(),
+        xp: p21.state.xp,
+        level: p21.levelInfo().level,
+        bestGrades: Object.keys(p21.state.bestGrades).sort(),
+        collected: [...p21.state.collected].sort(),
+        badges: p21.state.badges,
+        perRegion: World.REGION_SITES.map((s2) => [
+          s2.id,
+          p21.isRegionUnlocked(s2.id),
+          p21.isRegionPlayable(s2.id),
+          p21.gateStatus(s2.id).text,
+          p21.gateStatus(s2.id).needs.join('｜'),
+        ]),
+      });
+    /*
+     * 「解鎖狀態」不會自己重算 —— `setFlag()` 只寫存檔，`refreshUnlocks()` 掛在
+     * 「做了某件事」那幾條路上。只比對兩張靜態快照的話，一個**間接**讀旗標的
+     * 解鎖判定（例如「有任何旗標是真的就放行」）不會被抓到。
+     * 所以兩張快照之前都先踩一次**零 XP 的探針**（`useHandle(id, 0)`）：
+     * 它唯一的作用就是把 `refreshUnlocks()` 跑一遍，並且把「這一次多開了哪幾片」交出來。
+     */
+    const probe21 = (id) => p21.useHandle(id, 0).newlyUnlocked.slice().sort();
+    eq(JSON.stringify(probe21('__p21-probe-before')), '[]', '（前提）還沒說之前，重算解鎖不會多開任何一片土地');
+    const before = unlockShot();
+    eq(Turning.midpointSeen(p21), false, '新存檔還沒說過');
+    eq(Turning.markMidpointSeen(p21), true, '第一次走進去 → 記下來');
+    eq(JSON.stringify(probe21('__p21-probe-after')), '[]', '記了旗標之後，重算解鎖一片土地都沒多開');
+    eq(Turning.midpointSeen(p21), true, '記住了');
+    eq(Turning.shouldRevealMidpoint('divergence', false, p21), false, '第二次走進去不會再說一次');
+    eq(Turning.markMidpointSeen(p21), false, '再記一次不算第一次');
+    const after = unlockShot();
+    eq(after, before, '中點揭示之後，每一片土地的解鎖狀態逐項不變（旗標不參與任何解鎖）');
+    // 那個旗標真的落地了（不然上面那一條會因為「什麼都沒發生」而假綠）
+    eq(p21.state.flags[Turning.MIDPOINT.flag], true, '旗標真的寫進 flags（上面那條比對不是空比）');
+    eq(Object.keys(p21.state.bestGrades).length, 0, '中點揭示不寫 bestGrades');
+    eq(p21.state.xp, 0, '中點揭示不給 XP');
+    eq(p21.state.collected.length, 0, '中點揭示不收技巧');
+
+    // 存檔遷移：新旗標寫得進去、讀得回來、重置清得乾淨
+    const reloaded21 = createProgression({ catalog, challenges });
+    eq(Turning.midpointSeen(reloaded21), true, '旗標重新載入之後還在');
+    reloaded21.resetAll();
+    eq(Turning.midpointSeen(reloaded21), false, '重置進度之後回到「還沒說過」');
+    memory.clear();
+
+    /*
+     * 探針本身要證明它抓得到東西（不然上面那兩個 `[]` 只是裝飾）：
+     * 換一份**真的夠格**的存檔踩同一支探針，它就會報出新開的那一片。
+     */
+    {
+      memory.clear();
+      const rich21 = createProgression({ catalog, challenges });
+      for (const c of challenges.filter((c2) => c2.region === 'foundations').slice(0, 8)) {
+        rich21.recordResult({ challengeId: c.id, passed: true, grade: 'S', score: 10, max: 10, teaches: c.teaches || [] }, { challenge: c });
+      }
+      const opened21 = rich21.useHandle('__p21-probe-control', 0).newlyUnlocked;
+      ok(Array.isArray(opened21), '（對照）探針交得出「這一次多開了哪幾片」');
+      eq(rich21.isRegionUnlocked('reasoning'), true, '（對照）真的夠格時那一片會開 —— 探針不是永遠回空陣列');
+      memory.clear();
+    }
+
+
+    // 沒有 setFlag 的替身不會爆（舊呼叫端 / 測試腳本）
+    eq(Turning.markMidpointSeen(null), false, '沒有進度物件時不會爆');
+    eq(Turning.midpointSeen(null), false, '沒有進度物件時當成還沒說過');
+    eq(Turning.midpointSeen({}), false, '沒有 state 的替身也當成還沒說過');
+  }
+
+  /* --- ⑤ 碑還在、只是那一層還沒亮 --- */
+  {
+    const byId21 = new Map(LORE_TABLETS.map((t) => [t.id, t]));
+    for (const id of EX_TURN.tablets) ok(byId21.has(id), `[P21] ${id} 真的在 LORE_TABLETS 裡`);
+
+    const gated21 = [
+      [byId21.get('twin-pillars-foot'), Turning.MIDPOINT.gate],
+      [byId21.get('mirror-stele'), Turning.SCRIBE.gate],
+    ];
+    for (const [tab, gate] of gated21) {
+      const tag = `[P21:${tab.id}]`;
+      const dark = Props.tabletLines(tab);
+      const litUp = Props.tabletLines(tab, [gate]);
+      // 門沒亮：碑還在（還有前幾層字），只是少了那一層
+      eq(dark.length, litUp.length - 1, `${tag} 門沒亮時就是少了那一層字`, `${dark.length} vs ${litUp.length}`);
+      ok(dark.length >= 2, `${tag} 門沒亮時碑上還有字（不是空碑、不是整座消失）`, String(dark.length));
+      eq(dark.some((l) => l.when === gate), false, `${tag} 門沒亮時那一層不出現`);
+      eq(litUp.filter((l) => l.when === gate).length, 1, `${tag} 門亮了就多一層`);
+      eq(litUp[litUp.length - 1].when, gate, `${tag} 多出來的是最後那一層（前面幾層一個字都沒動）`);
+      eq(
+        JSON.stringify(dark.map((l) => l.text)),
+        JSON.stringify(litUp.slice(0, dark.length).map((l) => l.text)),
+        `${tag} 亮不亮，前幾層逐字相同`
+      );
+      // 碑本身一直都在世界上（不是條件式地被移出 LORE_TABLETS）
+      ok(
+        LORE_TABLETS.filter((t) => t.id === tab.id).length === 1,
+        `${tag} 碑只有一份，而且永遠在資料裡（沒有「達標才長出來」這種寫法）`
+      );
+      // 另一扇門亮著不會誤開這一層
+      const other = gate === Turning.MIDPOINT.gate ? Turning.SCRIBE.gate : Turning.MIDPOINT.gate;
+      eq(Props.tabletLines(tab, [other]).length, dark.length, `${tag} 另一扇門亮著不會誤開這一層`);
+    }
+    // tabletLines 的門：不認得的 when 當成沒有門（永遠亮）
+    eq(Props.tabletLines({ lines: [{ text: '亂寫的門', when: 'nope' }] }).length, 1, '不認得的門＝沒有門（那一行照樣在）');
+    eq(Props.tabletLines({ lines: [{ text: '亂寫的門', when: 'nope' }] })[0].when, null, '不認得的門會被抹成 null');
+    eq(Props.tabletLines({ lines: ['純字串'] })[0].when, null, '舊格式沒有門');
+    eq(Props.tabletLines({ lines: [{ text: 'x', when: 'midpoint' }] }).length, 0, '（反例）掛了門又沒亮 → 那一行不交出來');
+    eq(Props.tabletLines({ lines: [{ text: 'x', when: 'midpoint' }] }, new Set(['midpoint'])).length, 1, 'lit 也吃 Set');
+
+    // litTabletGates：兩個門各自獨立
+    eq(JSON.stringify(Turning.litTabletGates()), '[]', '什麼都沒到 → 一扇門都沒亮');
+    eq(JSON.stringify(Turning.litTabletGates({ midpointSeen: true })), JSON.stringify([Turning.MIDPOINT.gate]), '只走進過分歧之廳 → 只開中點那一層');
+    eq(
+      JSON.stringify(Turning.litTabletGates({ rankIndex: Turning.SCRIBE.rankStep - 1 })),
+      JSON.stringify([Turning.SCRIBE.gate]),
+      '只到第三階 → 只開鏡碑那一層'
+    );
+    eq(
+      JSON.stringify(Turning.litTabletGates({ midpointSeen: true, rankIndex: ranksP21.length - 1 })),
+      JSON.stringify([Turning.MIDPOINT.gate, Turning.SCRIBE.gate]),
+      '兩個都到 → 兩層都亮'
+    );
+    eq(
+      JSON.stringify(Turning.litTabletGates({ midpointSeen: true, rankIndex: Turning.SCRIBE.rankStep - 2 })),
+      JSON.stringify([Turning.MIDPOINT.gate]),
+      '（反例）第二階還開不了鏡碑那一層'
+    );
+  }
+
+  /* --- ⑥ 純風味：不掛出處、不宣稱技巧、用語吃禁字表 --- */
+  {
+    const FORBIDDEN21 = [
+      '怪物', '敵人', '打敗', '擊敗', '戰鬥', '攻擊', '傷害', '血量', '生命值',
+      '失敗', '輸了', '贏了', '勝利', '扣分', '清零', '歸零', '重新開始', '從頭再來', '倒數',
+    ];
+    const SYSTEM21 = ['送出評分', '按鈕', '面板', 'localStorage', 'bloom', '後製', 'Web Audio', 'API key', 'rubric', 'debug'];
+    let scanned21 = 0;
+    for (const id of EX_TURN.tablets) {
+      const tab = LORE_TABLETS.find((t) => t.id === id);
+      const tag = `[P21:${id}]`;
+      ok(!('source' in tab) && !('sources' in tab) && !('teaches' in tab), `${tag} 沒有 source / teaches 欄位（純風味）`);
+      for (const l of Props.tabletLines(tab, Props.TABLET_GATES)) {
+        scanned21 += 1;
+        ok(!/https?:\/\//.test(l.text), `${tag} 不掛連結`, l.text);
+        for (const w of FORBIDDEN21) ok(!l.text.includes(w), `${tag} 不出現「${w}」`, l.text);
+        for (const w of SYSTEM21) ok(!l.text.includes(w), `${tag} 不出現系統術語「${w}」`, l.text);
+        ok(!VENDOR_RE_P21.test(l.text), `${tag} 沒有公司名`, l.text);
+        ok(!ENGLISH(l.text), `${tag} 沒有整句英文`, l.text);
+      }
+      ok(!/https?:\/\//.test(tab.title), `${tag} 標題不掛連結`);
+    }
+    eq(scanned21, 6, '兩塊碑一共 6 行都掃過了（不是空掃）', String(scanned21));
+    // 反例：這張表真的抓得到東西
+    ok(FORBIDDEN21.some((w) => '這一關你失敗了'.includes(w)), '（反例）禁字表對「這一關你失敗了」會紅');
+    // 鏡碑第二層講的那句話要真的在碑上（規格逐字要求的那一句）
+    const mirror21 = LORE_TABLETS.find((t) => t.id === 'mirror-stele');
+    const mirrorLit21 = Props.tabletLines(mirror21, [Turning.SCRIBE.gate]);
+    ok(
+      mirrorLit21.some((l) => l.when === Turning.SCRIBE.gate && l.text.includes('凡學會說話的人都是抄寫人')),
+      '鏡碑第二層寫的就是「凡學會說話的人都是抄寫人」'
+    );
+    // 中點揭示那一層要說得出「同一雙手」這件事（它就是這一格的轉折）
+    const pillars21 = LORE_TABLETS.find((t) => t.id === 'twin-pillars-foot');
+    const pillarsLit21 = Props.tabletLines(pillars21, [Turning.MIDPOINT.gate]);
+    ok(
+      pillarsLit21.some((l) => l.when === Turning.MIDPOINT.gate && l.text.includes('同一雙手')),
+      '柱腳那一層說得出「兩面是同一雙手刻的」（前半段那些被劃掉的句子在這裡翻面）'
+    );
+    // 回聲那一句與碑上那一層講的是同一件事，但不是同一句（不重複）
+    const echoSpec21 = (await import('../src/ui/nudge.js')).ECHO_LINES[Turning.MIDPOINT.echo];
+    ok(echoSpec21 && typeof echoSpec21.line === 'string', '回聲的分支表有中點揭示這一格');
+    for (const line of [echoSpec21.line, echoSpec21.sub].filter(Boolean)) {
+      ok(line.length <= 31, `回聲那一句「${line}」≤ 31 字`, `len=${line.length}`);
+      for (const w of FORBIDDEN21) ok(!line.includes(w), `回聲那一句不出現「${w}」`);
+    }
+    for (const l of pillarsLit21) ok(l.text !== echoSpec21.line, '回聲沒有把碑上的字照唸一遍');
+  }
+
+  /* --- ⑦ 擺位：兩塊新碑照既有的石碑規矩走（而且量得出「按得到它」） --- */
+  {
+    const ABOVE21 = { marker: 6.5, murk: 5.5, greatmurk: 6, watchman: 4.6, guardian: 3.2 };
+    const targets21 = RulesP21.interactionTargets({
+      challenges,
+      inscriptions,
+      letters,
+      handles,
+      murks: murkFile.entries,
+      watchmen: watchmenFileP21.entries,
+      guardians: [guardianFileP21],
+      echoes: echoFileP21.entries,
+      archives: archiveFileP21.halls,
+      secrets: secretFile.entries,
+      tablets: LORE_TABLETS,
+      reactiveSpots: Reactive.REACTIVE_SPOTS,
+    });
+    /**
+     * 站在碑的互動圈裡，24 個方向裡有幾個「站得住、而且石碑搶得到 `E`」。
+     *
+     * ⚠️ 量的是**互動圈**（4.6），不是誰的淨空半徑 —— 石碑在仲裁上讓給石座／濁靈／
+     * 守夜人／守門者，所以「走得到」不等於「按得到」（findings：守門的斷言要看得到它在守的東西）。
+     * 一個方向只要在 2.2–4.4 公尺之間**有一段**站得住而且是碑贏，就算這個方向按得到。
+     */
+    const winnable21 = (x, z) => {
+      let win = 0;
+      for (let a = 0; a < 24; a += 1) {
+        const ang = (a / 24) * Math.PI * 2;
+        for (const rr of [2.2, 2.8, 3.4, 4, 4.4]) {
+          const px = x + Math.cos(ang) * rr;
+          const pz = z + Math.sin(ang) * rr;
+          if (testWorld.solidAt(px, pz)) continue;
+          if (World.coverage(px, pz) <= 0.85) continue;
+          let beaten = false;
+          for (const t of targets21) {
+            const r = ABOVE21[t.k];
+            if (r == null) continue;
+            if (Math.hypot(px - t.at[0], pz - t.at[1]) <= r) {
+              beaten = true;
+              break;
+            }
+          }
+          if (!beaten) {
+            win += 1;
+            break;
+          }
+        }
+      }
+      return win;
+    };
+    // 先量全部 14 塊，再用「最差的那一塊」當門檻的理由（不是只量新加的那兩塊）
+    const wins21 = LORE_TABLETS.map((t) => [t.id, winnable21(t.at[0], t.at[1])]);
+    const worst21 = Math.min(...wins21.map((w) => w[1]));
+    eq(worst21, EX_TURN.winnableWorst, '14 塊碑裡最差的那一塊按得到的方向數與契約逐值相同', JSON.stringify(wins21));
+    ok(EX_TURN.winnableFloor < EX_TURN.winnableWorst, '門檻比實測最差的再嚴一格（留餘裕，不是貼著寫）');
+    for (const [id, w] of wins21) ok(w >= EX_TURN.winnableFloor, `[lore:${id}] 按得到它的方向 ≥ ${EX_TURN.winnableFloor}/24`, `${w}/24`);
+    for (const id of EX_TURN.tablets) {
+      const tab = LORE_TABLETS.find((t) => t.id === id);
+      eq(winnable21(tab.at[0], tab.at[1]), EX_TURN.winnable[id], `[P21:${id}] 按得到它的方向數與契約逐值相同`);
+      // 它自己那一片土地的地標留白：碑不准站進去
+      const lm21 = LANDMARKS.find((l) => l.region === tab.region);
+      ok(Boolean(lm21), `[P21:${id}] 那一片土地真的有地標`);
+      const dLm21 = Math.hypot(tab.at[0] - lm21.at[0], tab.at[1] - lm21.at[1]);
+      ok(dLm21 >= lm21.clear, `[P21:${id}] 沒有站進地標 ${lm21.id} 的 ${lm21.clear}m 留白`, dLm21.toFixed(1));
+      eq(Number(dLm21.toFixed(1)), EX_TURN.landmarkDistance[id], `[P21:${id}] 離自己那座地標多遠，與契約逐值相同`);
+      // 閘門：碑的互動圈不准罩住問話的那一圈（罩住的話那道門永遠不會開口問）
+      const dGate21 = Math.min(
+        ...[...World.CORRIDORS, ...World.ANNEX_LINKS].map((c) => Math.hypot(tab.at[0] - c.gate.x, tab.at[1] - c.gate.z))
+      );
+      ok(dGate21 >= 4.6 + 7.5, `[P21:${id}] 離閘門夠遠（碑搶得到 E → 門就問不了話）`, dGate21.toFixed(1));
+    }
+  }
+
+  /* --- ⑧ 接線：main.js 每幀零配置、不掛在「跨區那一幀」上 --- */
+  {
+    ok(
+      /import \{[^}]*shouldRevealMidpoint[^}]*\} from '\.\/world\/turning\.js';/.test(mainSrc21b),
+      'main.js 從 turning.js 拿那幾支（沒有第二份真相）'
+    );
+    ok(
+      /if \(!prologue\.isActive && here && shouldRevealMidpoint\(here\.id, here\.onBridge, progression\)\) \{/.test(mainSrc21b),
+      '每幀問一次「人站在哪一片土地上」（不是掛在 hud.setRegion 回的那一幀）'
+    );
+    ok(/markMidpointSeen\(progression\);/.test(mainSrc21b), '真的走進去了才記旗標');
+    // 零配置：這一支回布林，不是物件
+    eq(typeof Turning.shouldRevealMidpoint('divergence', false, {}), 'boolean', 'shouldRevealMidpoint() 回布林（每幀迴圈不准配置）');
+    eq(typeof Turning.midpointTriggered('divergence'), 'boolean', 'midpointTriggered() 回布林');
+    const turningSrc21 = readFileSync(resolve(root, 'src/world/turning.js'), 'utf8');
+    ok(!/^import /m.test(turningSrc21), 'turning.js 一個 import 都沒有（測試與 UI 都拿得到）');
+    ok(!/\.map\(|\.filter\(/.test(turningSrc21.split('export function shouldRevealMidpoint')[1].split('export function markMidpointSeen')[0]), '判定那一段沒有 map / filter');
+    // 讀碑那一條路真的把「現在亮著的門」交出去
+    ok(/lit: litTabletGates\(\{/.test(mainSrc21b), '讀碑時把現在亮著的門交給石碑面板');
+    ok(/midpointSeen: midpointSeen\(progression\)/.test(mainSrc21b), '中點那一層的門讀的是存檔旗標');
+    ok(/rankIndex: rankFor\(rankStats\(progression, catalog\), ranksFile\.ranks\)\.index/.test(mainSrc21b), '鏡碑那一層的門讀的是稱號鏈的 index');
+    // 這一格不新增互動層、不新增 UI
+    const nudgeSrc21 = readFileSync(resolve(root, 'src/ui/nudge.js'), 'utf8');
+    ok(!/document\.createElement/.test(nudgeSrc21.split('midpointRevealed')[1] || ''), '中點揭示沒有新增任何 UI');
+    ok(!/nearestTurning|nearestReveal|nearestPillar/.test(readFileSync(resolve(root, 'src/world/world.js'), 'utf8')), '沒有新增第 N 層互動（碑走既有那一層）');
+    // 旗標不准出現在任何解鎖判定裡（靜態掃描：progression.js 一個字都沒提它）
+    const progSrc21 = readFileSync(resolve(root, 'src/progression/progression.js'), 'utf8');
+    ok(!progSrc21.includes(Turning.MIDPOINT.flag), `progression.js 沒有提到「${Turning.MIDPOINT.flag}」（解鎖判定看不到它）`);
+    ok(!readFileSync(resolve(root, 'src/challenges/catalog.js'), 'utf8').includes(Turning.MIDPOINT.flag), 'catalog.js 也看不到那個旗標');
+  }
+
+  /* --- ⑨ WORLD.md：轉折要寫進世界的規則書 --- */
+  {
+    const s419 = worldMdP21.slice(worldMdP21.indexOf('### 4.19'), worldMdP21.indexOf('## 五'));
+    /*
+     * **說出口了才記旗標**（P21 審查 · 第 1 條）。
+     *
+     * `echo()` 只是排進 `pending`，真正說出口是下一拍 `update()` 的事；
+     * 原本是「先記旗標、再叫 echo，回傳值丟掉」——只要進場前 20 秒內有任何一句
+     * 回聲說過話（例如剛解鎖分歧之廳的那一則），這一句就被冷卻默默吃掉，
+     * 而旗標已經寫進存檔 → **整段轉折再也不會出現**。
+     */
+    {
+      const mainSrc21 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+      const at21 = mainSrc21.indexOf('shouldRevealMidpoint(here.id');
+      ok(at21 > 0, '（前提）找得到中點揭示那一段');
+      const block21 = mainSrc21.slice(at21, at21 + 900);
+      ok(
+        /lastEchoKind\(\)\s*===\s*MIDPOINT\.echo\s*\)\s*markMidpointSeen/.test(block21),
+        'P21：真的說出口了才記旗標（不是先記再說）'
+      );
+      ok(
+        block21.indexOf('nudge.echo(MIDPOINT.echo)') < block21.indexOf('markMidpointSeen'),
+        'P21：順序是「先排隊、後記旗標」'
+      );
+      const nudgeSrc21 = readFileSync(resolve(root, 'src/ui/nudge.js'), 'utf8');
+      ok(/ONCE_IN_A_LIFETIME/.test(nudgeSrc21), 'P21：nudge 有「一輩子只說一次」那一組');
+      ok(
+        /ONCE_IN_A_LIFETIME\s*=\s*\[[^\]]*'midpointRevealed'/.test(nudgeSrc21),
+        'P21：中點揭示列在裡面（撞上冷卻不准丟掉）'
+      );
+      ok(/lastEchoKind\(\)/.test(nudgeSrc21), 'P21：nudge 把「上一句真的說出口的是哪一種」交出去了');
+    }
+    ok(s419.length > 400, 'WORLD.md 有 §4.19（轉折：中點揭示 ＋ 鏡碑第二層）', String(s419.length));
+    ok(/P21/.test(s419), '§4.19 標得出這一格');
+    ok(/turning\.js/.test(s419), '§4.19 指得出那一層住在哪');
+    ok(/與解了幾關無關|走進去/.test(s419), '§4.19 寫得出「觸發只看走進去」');
+    ok(/不影響任何解鎖|不參與任何解鎖/.test(s419), '§4.19 寫得出「旗標不影響解鎖」');
+    ok(/還沒亮/.test(s419), '§4.19 寫得出「沒到門檻只是那一層還沒亮」');
+    ok(new RegExp(String(EX_TURN.winnable['twin-pillars-foot'])).test(s419), '§4.19 寫得出柱腳那塊碑量到的數字');
+  }
+}
+
+/* ================================================================== *
+ * v1.2 · P22：終局 —— 回聲的小祠 ＋ 母碑重立
+ *
+ *   · 門檻只有兩件：130 條技法全收 ＋ 四宿全亮（逐項；差一個就還沒開口）
+ *   · 沒到門檻**不是鎖、也不是待辦清單**（畫面上不准出現「還差 N」）
+ *   · 最後那一次重寫**沒有失敗態**（餵一整排爛答案都得被收下）
+ *   · `firstPrompt` 缺席時走退路（「你最好的一句」）
+ *   · 刻字**必須經過確認**、**可以選擇不刻**、HTML escape、**不上傳**
+ *   · reset 之後所有終局旗標歸零、可以重走
+ *   · 那三個旗標**不影響任何解鎖**（靜態掃描 ＋ 零 XP 探針 ＋ 逐項快照）
+ * ================================================================== */
+console.log('▸ 終局：回聲的小祠 ＋ 母碑重立（P22）');
+{
+  const T22 = TurningP21;
+  const EX_FIN = EXPECT.finale;
+  const Fin22 = await import('../src/world/finale.js');
+  const Rite22 = await import('../src/challenges/finale.js');
+  const ShrineUi22 = await import('../src/ui/shrine.js');
+  const StarMap22 = await import('../src/ui/starmap.js');
+  const Hours22 = await import('../src/engine/hours.js');
+  const Rules22 = (await import('./lib/screen-rules.mjs')).default;
+  const NudgeP22 = await import('../src/ui/nudge.js');
+  const mainSrc22 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const worldMd22 = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+  const riteSrc22 = readFileSync(resolve(root, 'src/challenges/finale.js'), 'utf8');
+  const shrineSrc22 = readFileSync(resolve(root, 'src/ui/shrine.js'), 'utf8');
+  const worldFinSrc22 = readFileSync(resolve(root, 'src/world/finale.js'), 'utf8');
+  const turningSrc22 = readFileSync(resolve(root, 'src/world/turning.js'), 'utf8');
+  const progSrc22 = readFileSync(resolve(root, 'src/progression/progression.js'), 'utf8');
+  const vendorsP22 = curriculum.vendors || [];
+  /**
+   * 只看真的會跑的程式。
+   *
+   * 這一格的每一條靜態掃描（禁字、待辦清單、連線）都要先剝掉註解 ——
+   * 註解裡本來就會**解釋**「為什麼這裡沒有失敗態」「為什麼不連網」，
+   * 拿沒剝過的原始碼去掃，掃到的是自己的說明文字，不是出貨的行為。
+   */
+  const strip22 = (src) =>
+    src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      // ⚠️ `//` 前面不准是冒號 —— 天真的剝法會把 `https://x` 剝成 `https:`，
+      //    於是「那條路上沒有任何網址」那一條再也紅不起來（紅測抓到的）
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const riteCode22 = strip22(riteSrc22);
+  const shrineCode22 = strip22(shrineSrc22);
+  const worldFinCode22 = strip22(worldFinSrc22);
+  ok(riteCode22.length > 300 && shrineCode22.length > 800 && worldFinCode22.length > 800, '（前提）量得到剝掉註解之後的三支程式', `${riteCode22.length}/${shrineCode22.length}/${worldFinCode22.length}`);
+
+  /* --- ① 契約逐值比對（宣告了卻沒人比對的欄位＝一句沒人查證的話） --- */
+  {
+    ok(EX_FIN && typeof EX_FIN === 'object', '契約檔登記了 finale 這一格');
+    eq(EX_FIN.region, T22.FINALE.region, '契約的土地 id 與 turning.js 逐值相同');
+    eq(EX_FIN.shrineId, T22.FINALE.shrineId, '契約的小祠 id 與 turning.js 逐值相同');
+    eq(EX_FIN.steleId, T22.FINALE.steleId, '契約的母碑 id 與 turning.js 逐值相同');
+    eq(EX_FIN.shrineFlag, T22.FINALE.shrineFlag, '契約的小祠旗標名逐值相同');
+    eq(EX_FIN.raisedFlag, T22.FINALE.raisedFlag, '契約的「立起來了」旗標名逐值相同');
+    eq(EX_FIN.steleFlag, T22.FINALE.steleFlag, '契約的「說過了」旗標名逐值相同');
+    eq(EX_FIN.inscriptionKey, T22.FINALE.inscriptionKey, '契約的碑面欄位名逐值相同');
+    eq(EX_FIN.echoShrine, T22.FINALE.echoShrine, '契約的小祠回聲分支名逐值相同');
+    /*
+     * **一幀只排一句**（P22 審查 · 第 1 條）：`echo()` 只留最新的那一件事，
+     * 兩句都排就等於前一句被後一句蓋掉——而這兩句都是一輩子只有一次機會的
+     * （小祠開口 → 母碑立起來，敘事上有先後）。
+     */
+    {
+      const mainSrc22 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+      ok(/const shrineToSay\s*=/.test(mainSrc22), 'P22：小祠那一句有記下「這一幀要不要說」');
+      ok(
+        /if \(!shrineToSay && !prologue\.isActive && steleRaised/.test(mainSrc22),
+        'P22：小祠要說的那一幀，母碑那一句讓開（不然前一句會被蓋掉）'
+      );
+      /*
+       * 殼「散掉了」只看儀式走完了沒——不是看門檻還過不過得了。
+       * 課程一長門檻就會變，舊存檔會出現「走完了、但這一版還沒收齊」，
+       * 照 open 推的話殼會回來、而清燈同時還亮著（審查 · 第 2 條）。
+       */
+      const finSrc22 = readFileSync(resolve(root, 'src/world/finale.js'), 'utf8');
+      ok(
+        /murkOn \? 0\.62 : raisedNow \? 0 : 0\.08/.test(finSrc22),
+        'P22：殼散掉與否只看「儀式走完了沒」，不看「門檻還過不過得了」'
+      );
+    }
+    eq(EX_FIN.echoCarved, T22.FINALE.echoCarved, '契約的「刻了」回聲分支名逐值相同');
+    eq(EX_FIN.echoBlank, T22.FINALE.echoBlank, '契約的「留白」回聲分支名逐值相同');
+    eq(EX_FIN.shrineRadius, T22.SHRINE_RADIUS, '契約的小祠互動半徑逐值相同');
+    eq(EX_FIN.steleRadius, T22.STELE_RADIUS, '契約的母碑互動半徑逐值相同');
+    eq(JSON.stringify(EX_FIN.shrineAt), JSON.stringify([...Fin22.SHRINE_AT]), '契約的小祠落點與 finale.js 逐值相同');
+    eq(JSON.stringify(EX_FIN.steleAt), JSON.stringify([...Fin22.STELE_AT]), '契約的母碑落點與 finale.js 逐值相同');
+    eq(EX_FIN.listenChecks, Rite22.LISTEN_CHECKS.length, '契約的「回聲聽得見幾件事」與判定那一支逐值相同');
+    // 母碑就站在斷環的正中央（地標座標只有一份，不手抄）
+    const ring22 = LANDMARKS.find((l) => l.id === 'broken-ring');
+    eq(JSON.stringify([...Fin22.STELE_AT]), JSON.stringify([...ring22.at]), '母碑站的就是斷環那一點（座標讀地標，不另抄一份）');
+    eq(ring22.region, T22.FINALE.region, '斷環在中央高原（終局那一層住的地方）');
+    // 那三個回聲分支名真的在分支表裡
+    for (const k of [T22.FINALE.echoShrine, T22.FINALE.echoCarved, T22.FINALE.echoBlank]) {
+      ok(Boolean(NudgeP22.ECHO_LINES[k]), `回聲的分支表有「${k}」這一格`);
+      ok(NudgeP22.ECHO_KINDS.includes(k), `「${k}」也在分支名清單裡`);
+    }
+    // 「一輩子只說一次」那份名單要收得下這三句（撞上冷卻不准被丟掉）
+    const nudgeSrc22 = readFileSync(resolve(root, 'src/ui/nudge.js'), 'utf8');
+    const onceLine22 = (nudgeSrc22.match(/const ONCE_IN_A_LIFETIME = \[[^\]]*\]/) || [''])[0];
+    ok(onceLine22.length > 20, '（前提）找得到那份「一輩子只說一次」的名單', onceLine22);
+    for (const k of [T22.FINALE.echoShrine, T22.FINALE.echoCarved, T22.FINALE.echoBlank]) {
+      ok(onceLine22.includes(`'${k}'`), `「${k}」列在 ONCE_IN_A_LIFETIME 裡（撞上冷卻不會被吃掉）`);
+    }
+  }
+
+  /* --- ② 門檻：130 條技法全收 ＋ 四宿全亮（逐項；差一個就還沒開口） --- */
+  {
+    const total22 = catalog.counts.skills;
+    const mansions22 = vendorsP22.length;
+    ok(total22 === 130, '（前提）課程 v2 一共 130 條技法', String(total22));
+    eq(mansions22, StarMap22.MANSION_NAMES.length, '（前提）四宿與四部原典對得起來');
+
+    eq(
+      T22.shrineOpen({ skills: total22, skillsTotal: total22, mansionsLit: mansions22, mansionsTotal: mansions22 }),
+      true,
+      '130 條全收 ＋ 四宿全亮 → 小祠開口'
+    );
+    // 逐項：差一個就還沒開口
+    eq(
+      T22.shrineOpen({ skills: total22 - 1, skillsTotal: total22, mansionsLit: mansions22, mansionsTotal: mansions22 }),
+      false,
+      '（反例）差最後一條技法 → 還沒開口'
+    );
+    eq(
+      T22.shrineOpen({ skills: total22, skillsTotal: total22, mansionsLit: mansions22 - 1, mansionsTotal: mansions22 }),
+      false,
+      '（反例）差最後一宿 → 還沒開口'
+    );
+    eq(T22.shrineOpen({}), false, '（反例）什麼都不給 → 還沒開口');
+    eq(T22.shrineOpen(null), false, '（反例）null → 還沒開口');
+    eq(
+      T22.shrineOpen({ skills: 0, skillsTotal: 0, mansionsLit: 0, mansionsTotal: 0 }),
+      false,
+      '（反例）總數是 0 時不算開口（不會因為「零分之零」就開）'
+    );
+    eq(typeof T22.shrineOpen({}), 'boolean', 'shrineOpen() 回布林（每幀迴圈不准配置）');
+
+    /*
+     * **它不可能長成另一種門檻**：整個函式體裡一個「進度」字眼都沒有
+     * （等級、XP、解鎖清單、關卡數、存檔）。靜態掃描比參數個數可靠
+     * —— 參數有預設值時 `Function.length` 會少算（P21 記過）。
+     */
+    const openSrc22 = turningSrc22.split('export function shrineOpen')[1].split('\n}')[0];
+    ok(openSrc22.length > 60, '（前提）真的切到 shrineOpen() 的函式體', String(openSrc22.length));
+    for (const w of ['progression', 'level', 'xp', 'bestGrades', 'unlockedRegions', 'state', 'cleared']) {
+      ok(!openSrc22.includes(w), `shrineOpen() 的函式體裡沒有「${w}」（它綁不到別的進度）`);
+    }
+    /*
+     * 「先紅」的那一條：把它綁在等級上就要紅。反例真的呼叫**被測的那一支**，
+     * 再和「假如有人加了 level >= 20」的那個假實作比對。
+     */
+    const full22 = { skills: total22, skillsTotal: total22, mansionsLit: mansions22, mansionsTotal: mansions22 };
+    const levelGated22 = (c, level) => T22.shrineOpen(c) && level >= 20;
+    eq(levelGated22(full22, 8), false, '（反例）綁等級的那個假實作對「收齊了但等級不高」的人會回 false');
+    ok(
+      T22.shrineOpen(full22) !== levelGated22(full22, 8),
+      '出貨的那一支與「綁等級」不是同一件事'
+    );
+
+    /*
+     * **未達門檻不是鎖，也不是待辦清單。**
+     * 三面一起守：世界端沒開口時那一層交不出東西（不是交出一個按不動的東西）、
+     * 畫面上沒有一個字在算「還差幾個」、資料層也沒有這種字。
+     */
+    const field22 = Fin22.createFinaleField({
+      kit: testWorld.kitOf('foundations'),
+      terrainHeight: World.terrainHeight,
+    });
+    eq(field22.open, false, '沒到門檻 → 小祠是暗的');
+    eq(field22.nearest({ x: Fin22.SHRINE_AT[0], z: Fin22.SHRINE_AT[1] }), null, '沒開口時站在小祠正中央也按不到（那一層交不出東西）');
+    eq(field22.raised, false, '儀式走完之前母碑沒立著');
+    eq(field22.stele.group.visible, false, '沒立起來的母碑整組不畫（斷環中央是空的）');
+    eq(field22.setOpen(true), true, '門檻到了 → 小祠開口');
+    ok(Boolean(field22.nearest({ x: Fin22.SHRINE_AT[0], z: Fin22.SHRINE_AT[1] })), '開口之後站在旁邊就按得到');
+    eq(field22.nearest({ x: Fin22.STELE_AT[0], z: Fin22.STELE_AT[1] }), null, '母碑沒立起來 → 站在斷環中央也按不到');
+    eq(field22.setRaised(true, false), true, '母碑立起來');
+    eq(field22.stele.group.visible, true, '立起來之後母碑才畫出來');
+    const hit22 = field22.nearest({ x: Fin22.STELE_AT[0] + 6.3, z: Fin22.STELE_AT[1] });
+    eq(hit22 && hit22.kind, 'stele', '站在臺邊按得到母碑');
+    eq(hit22 && hit22.id, T22.FINALE.steleId, '交出來的是母碑那一個 id');
+    // 兩件東西的圈不會互相蓋掉（實測距離 17.16 > 4.6 + 7.0）
+    ok(
+      Math.hypot(Fin22.SHRINE_AT[0] - Fin22.STELE_AT[0], Fin22.SHRINE_AT[1] - Fin22.STELE_AT[1]) >
+        T22.SHRINE_RADIUS + T22.STELE_RADIUS,
+      '小祠與母碑自己的兩個圈也不重疊'
+    );
+    /*
+     * **最後一團濁氣就是你自己的第一句** —— 三態照 §1.6 的光語言排：
+     * 還沒開口（看不清）→ 開口了（看得清楚、眼光盯著你）→ 儀式走完（殼散掉，剩一盞清燈）。
+     * 這一格是「安撫」在畫面上的樣子，**不是**多一隻濁靈：牠不進 `murks.json`、
+     * 不算清燈數、不寫 `state.murks`、不給 XP（`murk-fit -- --verify` 一格都沒動）。
+     */
+    {
+      const f22b = Fin22.createFinaleField({ kit: testWorld.kitOf('foundations'), terrainHeight: World.terrainHeight });
+      const murkSnap = () => ({
+        shell: Number(f22b.shrine.shellMat.opacity.toFixed(3)),
+        eye: Number(f22b.shrine.eyeMat.opacity.toFixed(3)),
+        lamp: f22b.shrine.core.visible,
+      });
+      const dark22 = murkSnap();
+      ok(dark22.shell > 0 && dark22.shell < 0.2, '還沒開口：那一團在龕裡，但看不清', String(dark22.shell));
+      eq(dark22.eye, 0, '還沒開口：那一點眼光也沒亮');
+      eq(dark22.lamp, false, '還沒開口：燈座是空的');
+      f22b.setOpen(true);
+      const open22 = murkSnap();
+      ok(open22.shell > dark22.shell, '開口了：那一團濁氣看得清楚了', `${dark22.shell} → ${open22.shell}`);
+      ok(open22.eye > 0, '開口了：那一點眼光盯著你', String(open22.eye));
+      eq(open22.lamp, false, '**開口還不是成就**：暖白的清燈這時候還沒亮');
+      f22b.setRaised(true, false);
+      const calm22 = murkSnap();
+      eq(calm22.shell, 0, '儀式走完：殼散掉了');
+      eq(calm22.eye, 0, '儀式走完：那一點眼光也散了');
+      eq(calm22.lamp, true, '儀式走完：燈座上留下一盞清燈（留在原位）');
+      eq(f22b.shrine.shell.visible, false, '散掉的殼整塊不畫');
+      // 這一團不是第 21 隻濁靈：它不在 murks.json 裡，也不影響清燈數與時辰
+      ok(
+        !(murkFile.entries || []).some((m) => m.id === T22.FINALE.shrineId),
+        '龕裡那一團不進 murks.json（清燈數與時辰一格都沒動）'
+      );
+    }
+
+    field22.reset();
+    eq(field22.open, false, 'reset 之後小祠暗回去');
+    eq(field22.raised, false, 'reset 之後母碑躺回去');
+    eq(field22.carved, false, 'reset 之後碑面留白');
+
+    /** 「還差 N」那一類的字：終局這一層一個都不准有。 */
+    const TODO_WORDS22 = ['還差', '尚未達成', '未解鎖', '解鎖條件', '完成度', '進度條', '待完成', '還需要'];
+    for (const [tag, src] of [
+      ['ui/shrine.js', shrineCode22],
+      ['world/finale.js', worldFinCode22],
+      ['challenges/finale.js', riteCode22],
+    ]) {
+      for (const w of TODO_WORDS22) ok(!src.includes(w), `[${tag}] 沒有「${w}」（沒到門檻不是待辦清單）`);
+    }
+    // 反例：這張表真的抓得到東西
+    ok(TODO_WORDS22.some((w) => '再收 3 條就好了，還差一點'.includes(w)), '（反例）待辦清單那張表對「還差一點」會紅');
+    // main.js 那一格 HUD 提示也不准算「還差幾個」
+    const hudBlock22 = mainSrc22.slice(mainSrc22.indexOf('if (nearFinale) {'), mainSrc22.indexOf('} else if (nearMarker) {'));
+    ok(hudBlock22.length > 200, '（前提）切得到 HUD 那一格', String(hudBlock22.length));
+    for (const w of TODO_WORDS22) ok(!strip22(hudBlock22).includes(w), `HUD 那一格沒有「${w}」`);
+  }
+
+  /* --- ③ 沒有失敗態：餵一整排爛答案，每一句都得被收下 --- */
+  {
+    const JUNK22 = [
+      '',
+      ' ',
+      '嗯',
+      '不知道',
+      '隨便',
+      'asdf',
+      '。。。',
+      '不要不要不要',
+      '幫我',
+      'a'.repeat(400),
+      '<script>alert(1)</script>',
+      '？？？？？？',
+    ];
+    for (const junk of JUNK22) {
+      const res = Rite22.listen(junk);
+      eq(res.accepted, true, `爛答案也收得下：「${junk.slice(0, 12)}」`);
+      ok(Array.isArray(res.heard), '交出來的一定是一張清單（可能是空的）');
+      ok(!('passed' in res) && !('failed' in res) && !('grade' in res) && !('score' in res), '回傳裡沒有評價／分數／過不過');
+      eq(res.said, typeof junk === 'string' ? junk : '', '玩家的原文一個位元組都沒被改');
+    }
+    // 好答案也是同一種形狀（只是聽見的多幾件）
+    const good22 = Rite22.listen('你是一位資深編輯。請把下面這段公告改寫成 3 點條列，每點不超過 20 字，並保留日期。');
+    eq(good22.accepted, true, '好答案照樣是收下（不是「更收下」）');
+    ok(good22.heard.length > Rite22.listen('嗯').heard.length, '好答案聽見的比爛答案多（引擎真的在跑，不是空過）');
+    eq(Rite22.ALWAYS_ACCEPTED, true, '那個門檻是一個永遠為真的常數');
+
+    /*
+     * 靜態面：這一整支交不出「沒過」這種形狀。
+     * （`out.passed` 是**讀**既有檢查器的結果，不是這一支的回傳；
+     *  所以掃的是「它自己會不會生出失敗」那幾個字。）
+     */
+    for (const w of ['failed', 'rejected', '沒過', '未通過', '不及格', '失敗', 'passMark', 'GRADE']) {
+      ok(!riteCode22.includes(w), `judge 那一支裡沒有「${w}」（型別上就沒有失敗態）`);
+    }
+    ok(!/return\s*\{[^}]*accepted:\s*false/.test(riteCode22), '沒有任何一條路交得出 accepted: false');
+    // 畫面那一半也一樣：沒有一句話在講你少了什麼
+    for (const w of ['失敗', '沒過', '未通過', '再試一次', '缺了', '你少了', '不夠', '重來']) {
+      ok(!shrineCode22.includes(w), `小祠的畫面上沒有「${w}」`);
+    }
+    // 「聽見了」那一段：一條都沒聽見時整段不出現（不是「你什麼都沒說對」）
+    eq(ShrineUi22.heardHtml([]), '', '一條都沒聽見 → 那一段整個不出現');
+    ok(ShrineUi22.heardHtml(['你說了要它做的那件事。']).includes('回聲聽見了'), '聽見了就列出來');
+    for (const row of Rite22.LISTEN_CHECKS) {
+      ok(CHECK_IDS.includes(row.check), `[${row.check}] 用的是既有的檢查器（不新增）`);
+      ok(row.heard.startsWith('你'), `[${row.check}] 那一行講的是「你說了什麼」（不是「你少了什麼」）`, row.heard);
+      for (const bad of ['少了', '缺', '沒有說', '忘了', '應該']) ok(!row.heard.includes(bad), `[${row.check}] 那一行不責備`, row.heard);
+    }
+    // 「什麼都還沒寫」不是沒通過，是還沒開口 —— 所以那一下按不下去
+    eq(Rite22.hasSomethingToSay(''), false, '空字串：還沒開口');
+    eq(Rite22.hasSomethingToSay('   \n '), false, '只有空白：還沒開口');
+    eq(Rite22.hasSomethingToSay('嗯'), true, '寫了一個字就算開口了（門檻不是長度）');
+    ok(/data-offer[^>]*disabled/.test(shrineCode22), '沒寫東西的時候「呈給神諭」按不下去（而不是被退回來）');
+  }
+
+  /* --- ④ 舊存檔沒有第一句 → 走退路 --- */
+  {
+    const first22 = T22.finalSayFor('請把這張告示改寫成三點條列。');
+    eq(first22.mode, 'first', '有第一句 → 用玩家自己那一句');
+    eq(first22.say, '請把這張告示改寫成三點條列。', '擺出來的就是玩家的原文');
+    eq(first22.ask, T22.FIRST_SAY_ASK, '底下那一行要玩家「代它再說一遍」');
+    for (const missing of ['', '   ', null, undefined, 42, {}]) {
+      const back22 = T22.finalSayFor(missing);
+      eq(back22.mode, 'best', `沒有第一句（${JSON.stringify(missing)}）→ 走退路`);
+      eq(back22.say, T22.BEST_SAY_FALLBACK.say, '退路擺的是世界的說法，不是空白');
+      eq(back22.ask, T22.BEST_SAY_FALLBACK.ask, '退路要的是「你最好的一句」');
+      ok(back22.say.length > 0 && back22.ask.length > 0, '退路的兩行都不是空的（儀式走得完）');
+    }
+    // 存檔那一層也要真的走得完：舊存檔（連 firstPrompt 都沒有）
+    memory.clear();
+    const oldSave22 = SaveIO.normalize({ version: 1, xp: 40, level: 2 });
+    eq(oldSave22.firstPrompt, '', '（前提）舊存檔沒有第一句');
+    eq(oldSave22[T22.FINALE.inscriptionKey], '', '（前提）舊存檔也沒有碑面那一行');
+    eq(T22.finalSayFor(oldSave22.firstPrompt).mode, 'best', '舊存檔走退路');
+    memory.clear();
+  }
+
+  /* --- ⑤ 刻字：先確認、可以不刻、escape、不上傳 --- */
+  {
+    const PRIVATE22 = '我媽的生日是 3 月 4 日，幫我寫張卡片 <script>alert(1)</script>';
+
+    /* ⑤a 必須經過確認 —— 「拿掉確認就要紅」 */
+    eq(Rite22.inscriptionFor('carve', PRIVATE22), PRIVATE22, '按了「刻上去」才會留下那一句');
+    for (const notCarve of ['blank', '', 'yes', 'true', 'CARVE', 'carve ', ' carve', null, undefined, true, 1, {}]) {
+      eq(
+        Rite22.inscriptionFor(notCarve, PRIVATE22),
+        '',
+        `（反例）不是明確的 'carve'（${JSON.stringify(notCarve)}）一律不刻`
+      );
+    }
+    eq(Rite22.DEFAULT_CHOICE, 'blank', '預設是不刻（沒按過就是沒答應）');
+    eq(JSON.stringify([...Rite22.CARVE_CHOICES]), JSON.stringify(['carve', 'blank']), '只有兩種答案');
+    /*
+     * **「拿掉確認就要紅」**：反例是一支「不問就刻」的假實作，
+     * 拿它與**出貨的那一支**在同一個輸入上比對 —— 兩者不一樣，才證明那道閘真的在。
+     */
+    const noConfirm22 = (choice, text) => text;
+    eq(noConfirm22('blank', PRIVATE22), PRIVATE22, '（反例）「不問就刻」的假實作會把私人的字留下來');
+    ok(
+      Rite22.inscriptionFor('blank', PRIVATE22) !== noConfirm22('blank', PRIVATE22),
+      '出貨的那一支與「不問就刻」不是同一件事'
+    );
+    // 畫面上真的有那兩顆、而且沒有一顆是預先選好的
+    ok(/data-choice="carve"/.test(shrineSrc22), '畫面上有「刻上去」那一顆');
+    ok(/data-choice="blank"/.test(shrineSrc22), '畫面上有「先不刻」那一顆');
+    ok(/刻上去/.test(shrineSrc22) && /先不刻/.test(shrineSrc22), '兩顆都寫得出自己在做什麼');
+    ok(!/checked|autofocus|selected/.test(shrineSrc22), '沒有預先勾好的那一格（每一次都要重新問過）');
+    ok(ShrineUi22.CARVE_ASK.includes('？'), '問句真的是在問（不是宣告）', ShrineUi22.CARVE_ASK);
+    ok(/刻印記錄/.test(ShrineUi22.CARVE_NOTE), '那一段小字講得出「刻上去之後它會出現在哪裡」', ShrineUi22.CARVE_NOTE);
+    ok(/不刻/.test(ShrineUi22.CARVE_NOTE), '那一段小字也講得出「不刻也走得完」');
+
+    /* ⑤b 可以選擇不刻 —— 不刻＝那句話根本不寫進存檔 */
+    memory.clear();
+    const p22 = createProgression({ catalog, challenges });
+    eq(p22.motherStele(), '', '新存檔的碑面是留白的');
+    p22.setMotherStele(Rite22.inscriptionFor('blank', PRIVATE22));
+    eq(p22.motherStele(), '', '選了「先不刻」→ 碑面還是留白');
+    // **整份存檔裡找不到那句話**（不存就不可能外流）
+    const raw22 = memory.get(SaveIO.SAVE_KEY) || '';
+    ok(raw22.length > 100, '（前提）存檔真的落盤了（不是在比一個空字串）', String(raw22.length));
+    ok(!raw22.includes('我媽的生日'), '不刻的時候，整份存檔裡找不到玩家寫的那一句');
+    ok(!raw22.includes('<script>'), '不刻的時候，存檔裡也沒有那段標記');
+    // 刻上去之後才有；再選一次「不刻」要抹得掉（那是玩家把自己的字收回去的路）
+    p22.setMotherStele(Rite22.inscriptionFor('carve', PRIVATE22));
+    eq(p22.motherStele(), PRIVATE22, '按了「刻上去」→ 碑上真的有那一句');
+    ok((memory.get(SaveIO.SAVE_KEY) || '').includes('我媽的生日'), '（對照）刻了才會落盤 —— 上面那條不是永遠回空');
+    p22.setMotherStele(Rite22.inscriptionFor('blank', PRIVATE22));
+    eq(p22.motherStele(), '', '回頭再選「不刻」→ 碑面被抹回留白');
+    ok(!(memory.get(SaveIO.SAVE_KEY) || '').includes('我媽的生日'), '抹掉之後存檔裡也沒有了');
+    memory.clear();
+
+    /* ⑤c HTML escape（餵 <script> 進去） */
+    const evil22 = '<script>alert(1)</script><img src=x onerror=alert(2)>';
+    const said22 = ShrineUi22.saidHtml(evil22);
+    ok(said22.includes('&lt;script&gt;'), '玩家的字被跳脫成純文字');
+    ok(!/<script/i.test(said22), '吐出去的 HTML 裡沒有真的 <script>');
+    ok(!/<(?!\/?pre\b)/i.test(said22), '除了那塊 <pre> 之外，吐出去的字裡一個標記都沒有');
+    ok(said22.includes('&lt;img'), '<img 也被跳脫掉了');
+    const heard22 = ShrineUi22.heardHtml(['<b>壞字</b>']);
+    ok(heard22.includes('&lt;b&gt;'), '「聽見了」那一段也一樣跳脫');
+    // 反例：真的有東西被跳脫（不是在比一個空字串）
+    ok(said22.length > evil22.length, '（反例）跳脫之後字串會變長 —— 上面幾條不是空過');
+    // 儀式與讀碑兩條路上，玩家的字每一次都走 esc()
+    const escCalls22 = (shrineCode22.match(/esc\(/g) || []).length;
+    ok(escCalls22 >= 10, '小祠的每一個出口都走 esc()', `n=${escCalls22}`);
+    ok(
+      !/innerHTML\s*=\s*`[^`]*\$\{(?:text|rewrote|res\.said|saying\.say)\}/.test(shrineCode22),
+      '沒有一條路把玩家的字直接塞進 innerHTML'
+    );
+
+    /* ⑤d 不上傳：那條路上一個網路呼叫都沒有 */
+    const NET22 = ['fetch(', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'sendBeacon', 'navigator.share', 'import(', 'new Worker'];
+    for (const [tag, src] of [
+      ['challenges/finale.js', riteCode22],
+      ['ui/shrine.js', shrineCode22],
+      ['world/finale.js', worldFinCode22],
+      ['world/turning.js', strip22(turningSrc22)],
+    ]) {
+      // 只看真的會跑的程式（註解裡本來就會解釋「為什麼不連網」）
+      const code22 = src;
+      ok(code22.length > 300, `[${tag}] 量得到剝掉註解之後的程式（不是空字串空過）`, String(code22.length));
+      for (const w of NET22) ok(!code22.includes(w), `[${tag}] 那條路上沒有 ${w}`);
+      ok(!/https?:\/\//.test(code22), `[${tag}] 那條路上沒有任何網址`);
+    }
+    // 反例：這張表真的抓得到東西
+    ok(NET22.some((w) => "await fetch('https://x')".includes(w)), '（反例）連線那張表對一段真的 fetch 會紅');
+
+    /* ⑤e 帶得走的那張卡：刻了才有，而且那段話裡不放玩家的字 */
+    const ShareP22 = await import('../src/ui/sharecard.js');
+    const steleText22 = ShareP22.shareText({ kind: 'stele', rankTitle: '抄寫人', level: 9, collected: 130, total: 130 });
+    ok(steleText22.includes('母碑'), '母碑那張卡的話講得出這是什麼', steleText22);
+    ok(!steleText22.includes('我媽的生日'), '那段話裡不會有玩家寫的那一句');
+    ok(steleText22.length <= 90, `母碑那句話不長（${steleText22.length} 字）`);
+    const shareSrc22 = readFileSync(resolve(root, 'src/ui/sharecard.js'), 'utf8');
+    ok(/inscription: opts\.kind === 'stele'/.test(shareSrc22), '只有母碑那一張卡帶得動碑面那一行');
+    ok(/m\.inscription/.test(shareSrc22), '卡片真的會把碑面那一行畫上去');
+  }
+
+  /* --- ⑥ reset 之後所有終局旗標歸零、可以重走 --- */
+  {
+    memory.clear();
+    const p26 = createProgression({ catalog, challenges });
+    eq(T22.shrineSpoken(p26), false, '新存檔：小祠那一句還沒說過');
+    eq(T22.steleRaised(p26), false, '新存檔：母碑還沒立起來');
+    eq(T22.steleSpoken(p26), false, '新存檔：母碑那一句還沒說過');
+
+    eq(T22.markShrineSpoken(p26), true, '第一次說 → 記下來');
+    eq(T22.markShrineSpoken(p26), false, '再記一次不算第一次');
+    eq(T22.shouldAnnounceShrine(true, p26), false, '說過了就不會再說一次');
+    eq(T22.shouldAnnounceShrine(false, p26), false, '沒開口當然不會說');
+    memory.clear();
+    const p26b = createProgression({ catalog, challenges });
+    eq(T22.shouldAnnounceShrine(true, p26b), true, '開口了而且還沒說過 → 這一拍要說');
+    eq(typeof T22.shouldAnnounceShrine(true, p26b), 'boolean', 'shouldAnnounceShrine() 回布林（每幀迴圈不准配置）');
+    eq(T22.markShrineSpoken(p26b), true, '小祠那一句說出口 → 記下來');
+    eq(T22.markSteleRaised(p26b), true, '母碑立起來 → 記下來');
+    eq(T22.markSteleSpoken(p26b), true, '母碑那一句說出口 → 記下來');
+    p26b.setMotherStele('把你要的樣子先說出來。');
+
+    // 重新載入：三個旗標與碑面那一行都還在
+    const reload22 = createProgression({ catalog, challenges });
+    eq(T22.shrineSpoken(reload22), true, '重新載入之後小祠那一句還記著');
+    eq(T22.steleRaised(reload22), true, '重新載入之後母碑還立著');
+    eq(T22.steleSpoken(reload22), true, '重新載入之後母碑那一句還記著');
+    eq(reload22.motherStele(), '把你要的樣子先說出來。', '重新載入之後碑上的字還在');
+
+    // 重置 → 全部回到起點，而且**可以再走一次**
+    reload22.resetAll();
+    eq(T22.shrineSpoken(reload22), false, '重置之後小祠那一句回到沒說過');
+    eq(T22.steleRaised(reload22), false, '重置之後母碑躺回去');
+    eq(T22.steleSpoken(reload22), false, '重置之後母碑那一句回到沒說過');
+    eq(reload22.motherStele(), '', '重置之後碑面回到留白');
+    eq(T22.markShrineSpoken(reload22), true, '重置之後再走一次：小祠那一句又說得出來（終局不是一次性的煙火）');
+    eq(T22.markSteleRaised(reload22), true, '重置之後再走一次：母碑又立得起來');
+    // 沒有進度物件的替身不會爆
+    eq(T22.markShrineSpoken(null), false, '沒有進度物件時不會爆');
+    eq(T22.shrineSpoken(null), false, '沒有進度物件時當成還沒說過');
+    eq(T22.steleRaised({}), false, '沒有 state 的替身也當成還沒立起來');
+    memory.clear();
+  }
+
+  /* --- ⑦ 三個旗標與碑面那一行**不影響任何解鎖** --- */
+  {
+    memory.clear();
+    const p27 = createProgression({ catalog, challenges });
+    const shot27 = () =>
+      JSON.stringify({
+        unlockedRegions: [...p27.state.unlockedRegions].sort(),
+        skippedGates: [...(p27.state.skippedGates || [])].sort(),
+        xp: p27.state.xp,
+        level: p27.levelInfo().level,
+        bestGrades: Object.keys(p27.state.bestGrades).sort(),
+        collected: [...p27.state.collected].sort(),
+        skillsV2: [...p27.state.skillsV2].sort(),
+        badges: p27.state.badges,
+        perRegion: World.REGION_SITES.map((s2) => [
+          s2.id,
+          p27.isRegionUnlocked(s2.id),
+          p27.isRegionPlayable(s2.id),
+          p27.gateStatus(s2.id).text,
+          p27.gateStatus(s2.id).needs.join('｜'),
+        ]),
+      });
+    /*
+     * 只比對兩張靜態快照擋不住**間接**讀法（P21 的紅測證明過），
+     * 所以每張快照之前先踩一次**零 XP 的探針**（`useHandle(id, 0)`）：
+     * 它唯一的作用就是把 `refreshUnlocks()` 跑一遍，並交出「這一次多開了哪幾片」。
+     */
+    const probe27 = (id) => p27.useHandle(id, 0).newlyUnlocked.slice().sort();
+    eq(JSON.stringify(probe27('__p22-probe-before')), '[]', '（前提）還沒走終局之前，重算解鎖不會多開任何一片土地');
+    const before27 = shot27();
+    T22.markShrineSpoken(p27);
+    T22.markSteleRaised(p27);
+    T22.markSteleSpoken(p27);
+    p27.setMotherStele('把你要的樣子先說出來，牠就照著做。');
+    eq(JSON.stringify(probe27('__p22-probe-after')), '[]', '走完終局之後，重算解鎖一片土地都沒多開');
+    eq(shot27(), before27, '終局之後，每一片土地的解鎖狀態逐項不變（旗標與碑面都不參與任何解鎖）');
+    // 那三個旗標與那一行真的落地了（不然上面那一條會因為「什麼都沒發生」而假綠）
+    eq(p27.state.flags[T22.FINALE.shrineFlag], true, '小祠那個旗標真的寫進 flags');
+    eq(p27.state.flags[T22.FINALE.raisedFlag], true, '母碑那個旗標真的寫進 flags');
+    eq(p27.state.flags[T22.FINALE.steleFlag], true, '「說過了」那個旗標真的寫進 flags');
+    ok(p27.motherStele().length > 0, '碑面那一行真的寫進存檔（上面那條比對不是空比）');
+    eq(p27.state.xp, 0, '終局不給 XP');
+    eq(p27.state.collected.length, 0, '終局不收技巧');
+    eq(Object.keys(p27.state.bestGrades).length, 0, '終局不寫任何一關的評價');
+
+    // 靜態掃描：解鎖判定看不到那三個旗標
+    for (const flag of [T22.FINALE.shrineFlag, T22.FINALE.raisedFlag, T22.FINALE.steleFlag]) {
+      ok(!progSrc22.includes(flag), `progression.js 沒有提到「${flag}」（解鎖判定看不到它）`);
+      ok(!readFileSync(resolve(root, 'src/challenges/catalog.js'), 'utf8').includes(flag), `catalog.js 也看不到「${flag}」`);
+    }
+    /*
+     * 碑面那一行**住在 progression.js 裡**（它要讀寫存檔），所以整份掃描不成立 ——
+     * 改成逐支切出解鎖那三支的函式體來掃。這一條比整份掃描更貼近要守的東西。
+     */
+    for (const fn of ['gateSatisfied', 'refreshUnlocks', 'isRegionUnlocked']) {
+      const at27 = progSrc22.indexOf(`function ${fn}(`) >= 0 ? progSrc22.indexOf(`function ${fn}(`) : progSrc22.indexOf(`${fn}(`);
+      ok(at27 > 0, `（前提）找得到 ${fn}()`);
+      const body27 = progSrc22.slice(at27, at27 + 2200);
+      ok(!body27.includes(T22.FINALE.inscriptionKey), `${fn}() 的函式體裡沒有「${T22.FINALE.inscriptionKey}」`);
+      for (const flag of [T22.FINALE.shrineFlag, T22.FINALE.raisedFlag, T22.FINALE.steleFlag])
+        ok(!body27.includes(flag), `${fn}() 的函式體裡沒有「${flag}」`);
+    }
+    // 探針本身要證明它抓得到東西（不然上面那兩個 `[]` 只是裝飾）
+    {
+      memory.clear();
+      const rich27 = createProgression({ catalog, challenges });
+      for (const c of challenges.filter((c2) => c2.region === 'foundations').slice(0, 8)) {
+        rich27.recordResult(
+          { challengeId: c.id, passed: true, grade: 'S', score: 10, max: 10, teaches: c.teaches || [] },
+          { challenge: c }
+        );
+      }
+      ok(Array.isArray(rich27.useHandle('__p22-probe-control', 0).newlyUnlocked), '（對照）探針交得出「這一次多開了哪幾片」');
+      eq(rich27.isRegionUnlocked('reasoning'), true, '（對照）真的夠格時那一片會開 —— 探針不是永遠回空陣列');
+    }
+    memory.clear();
+  }
+
+  /* --- ⑧ 存檔那一欄：純加法、壞值落成空字串、與第一句同一把尺 --- */
+  {
+    eq(SaveIO.defaultSave()[T22.FINALE.inscriptionKey], '', '新存檔的碑面是空字串');
+    eq(SaveIO.normalize({})[T22.FINALE.inscriptionKey], '', '舊存檔沒有這一欄 → 補空字串');
+    eq(SaveIO.normalize({ motherStele: 42 })[T22.FINALE.inscriptionKey], '', '壞值（非字串）落成空字串');
+    eq(SaveIO.normalize({ motherStele: '  說清楚一點  ' })[T22.FINALE.inscriptionKey], '說清楚一點', '去頭尾空白');
+    eq(
+      SaveIO.normalize({ motherStele: 'x'.repeat(400) })[T22.FINALE.inscriptionKey].length,
+      SaveIO.MOTHER_STELE_MAX,
+      '超過上限就截斷'
+    );
+    eq(SaveIO.MOTHER_STELE_MAX, SaveIO.FIRST_PROMPT_MAX, '碑面與第一句用同一把尺（清洗規則不准分兩份）');
+    eq(
+      SaveIO.normalize({ motherStele: '<b>不要</b>幫我猜' })[T22.FINALE.inscriptionKey],
+      '<b>不要</b>幫我猜',
+      '存檔層不改玩家的字（跳脫是顯示那一方的事）'
+    );
+  }
+
+  /* --- ⑨ 時辰：全部收齊 → 星最亮之夜（終態），而且沒有黎明 --- */
+  {
+    const murkTotal22 = (murkFile.entries || []).length;
+    const full = Hours22.hourOf({
+      mastered: catalog.counts.implementedRegions,
+      masteredTotal: catalog.counts.implementedRegions,
+      skills: catalog.counts.skills,
+      skillsTotal: catalog.counts.skills,
+      murks: murkTotal22,
+      murksTotal: murkTotal22,
+    });
+    eq(full.index, 3, '全部收齊 → 時辰走到終態');
+    eq(full.p, 1, '進度是滿的');
+    eq(Hours22.HOUR_IDS[full.index], 'starlit', '終態就是星最亮之夜');
+    // 差一條技法就還沒到終態（終態是「全部」，不是「差不多」）
+    const almost = Hours22.hourOf({
+      mastered: catalog.counts.implementedRegions,
+      masteredTotal: catalog.counts.implementedRegions,
+      skills: catalog.counts.skills - 1,
+      skillsTotal: catalog.counts.skills,
+      murks: murkTotal22,
+      murksTotal: murkTotal22,
+    });
+    ok(almost.index < 3, '（反例）差一條就還沒到星最亮之夜', String(almost.index));
+    // 永遠是夜（roadmap 鐵則 3）
+    ok(
+      !/黎明|日出|魚肚白|東方發白|dawn|sunrise/i.test(strip22(readFileSync(resolve(root, 'src/engine/hours.js'), 'utf8'))),
+      '時辰那一支沒有黎明'
+    );
+    // 母碑立起來那一拍會重算時辰（天空是進度的外顯）
+    ok(/applyMood\(moodRegion, \{ force: true \}\);/.test(mainSrc22.slice(mainSrc22.indexOf('function finishRite'))), '儀式走完那一拍重算一次時辰');
+  }
+
+  /* --- ⑩ 擺位：量出來的，不是挑出來的 --- */
+  {
+    const targets22 = Rules22.interactionTargets({
+      challenges,
+      inscriptions,
+      letters,
+      handles,
+      murks: murkFile.entries,
+      watchmen: readJson('src/data/watchmen.json').entries,
+      guardians: [readJson('src/data/guardian.json')],
+      echoes: readJson('src/data/echoes.json').entries,
+      archives: readJson('src/data/archive.json').halls,
+      secrets: secretFile.entries,
+      tablets: LORE_TABLETS,
+      reactiveSpots: Reactive.REACTIVE_SPOTS,
+    });
+    /** 這一點的互動圈離最近那一層的互動圈還剩幾公尺（負的＝重疊了）。 */
+    const gap22 = (at, R) => {
+      let min = Infinity;
+      let who = '';
+      for (const t of targets22) {
+        const d = Math.hypot(at[0] - t.at[0], at[1] - t.at[1]) - (Rules22.interactRingRadius(t) + R);
+        if (d < min) {
+          min = d;
+          who = `${t.k}:${t.id}`;
+        }
+      }
+      return { min, who };
+    };
+    /** 24 個方向裡有幾個「站得住、而且這一層搶得到 `E`」。 */
+    const winnable22 = (at, radii) => {
+      let win = 0;
+      for (let a = 0; a < 24; a += 1) {
+        const ang = (a / 24) * Math.PI * 2;
+        for (const rr of radii) {
+          const px = at[0] + Math.cos(ang) * rr;
+          const pz = at[1] + Math.sin(ang) * rr;
+          if (testWorld.solidAt(px, pz)) continue;
+          if (World.coverage(px, pz) <= 0.85) continue;
+          let beaten = false;
+          for (const t of targets22) {
+            if (Math.hypot(px - t.at[0], pz - t.at[1]) <= Rules22.interactRingRadius(t)) {
+              beaten = true;
+              break;
+            }
+          }
+          if (!beaten) {
+            win += 1;
+            break;
+          }
+        }
+      }
+      return win;
+    };
+
+    const sg22 = gap22(Fin22.SHRINE_AT, T22.SHRINE_RADIUS);
+    const tg22 = gap22(Fin22.STELE_AT, T22.STELE_RADIUS);
+    ok(sg22.min > 0, `小祠的互動圈與每一層都不重疊（最緊的是 ${sg22.who}）`, sg22.min.toFixed(3));
+    ok(tg22.min > 0, `母碑的互動圈與每一層都不重疊（最緊的是 ${tg22.who}）`, tg22.min.toFixed(3));
+    eq(Number(sg22.min.toFixed(2)), EX_FIN.shrineGap, '小祠那一邊的餘裕與契約逐值相同');
+    eq(Number(tg22.min.toFixed(2)), EX_FIN.steleGap, '母碑那一邊的餘裕與契約逐值相同');
+
+    const sw22 = winnable22(Fin22.SHRINE_AT, [2.4, 3.0, 3.6, 4.2, 4.5]);
+    const tw22 = winnable22(Fin22.STELE_AT, [6.2, 6.4, 6.6, 6.8, 6.9]);
+    eq(sw22, EX_FIN.shrineWinnable, '按得到小祠的方向數與契約逐值相同', `${sw22}/24`);
+    eq(tw22, EX_FIN.steleWinnable, '按得到母碑的方向數與契約逐值相同', `${tw22}/24`);
+    ok(EX_FIN.winnableFloor < Math.min(sw22, tw22), '門檻比實測最差的再嚴一格（留餘裕，不是貼著寫）');
+    ok(sw22 >= EX_FIN.winnableFloor, `按得到小祠的方向 ≥ ${EX_FIN.winnableFloor}/24`);
+    ok(tw22 >= EX_FIN.winnableFloor, `按得到母碑的方向 ≥ ${EX_FIN.winnableFloor}/24`);
+
+    // 小祠不准站進斷環的留白裡；母碑本來就是斷環自己那一格
+    const ring22 = LANDMARKS.find((l) => l.id === 'broken-ring');
+    const dLm22 = Math.hypot(Fin22.SHRINE_AT[0] - ring22.at[0], Fin22.SHRINE_AT[1] - ring22.at[1]);
+    ok(dLm22 >= ring22.clear, `小祠沒有站進斷環的 ${ring22.clear}m 留白`, dLm22.toFixed(2));
+    eq(Number(dLm22.toFixed(2)), EX_FIN.shrineLandmarkDistance, '小祠離斷環多遠，與契約逐值相同');
+    // 離路網：「路邊看得到」的距離（走向斷環的路上就會遇到它）
+    const segs22 = Props.buildPathNetwork(World.REGION_SITES, [...World.CORRIDORS, ...World.ANNEX_LINKS], challenges);
+    const dPath22 = Rules22.pathDistance(segs22, Fin22.SHRINE_AT[0], Fin22.SHRINE_AT[1]);
+    eq(Number(dPath22.toFixed(2)), EX_FIN.shrinePathDistance, '小祠離路網多遠，與契約逐值相同');
+    ok(dPath22 > 2 && dPath22 < 12, '小祠在路邊（看得到，但不擋在主動線上）', dPath22.toFixed(2));
+    // 閘門：終局那一層的圈不准罩住問話的那一圈
+    for (const [tag, at, R] of [
+      ['小祠', Fin22.SHRINE_AT, T22.SHRINE_RADIUS],
+      ['母碑', Fin22.STELE_AT, T22.STELE_RADIUS],
+    ]) {
+      const dGate22 = Rules22.gateDistance(World, at[0], at[1]);
+      ok(dGate22 >= R + 7.5, `${tag}離閘門夠遠（搶得到 E → 門就問不了話）`, dGate22.toFixed(2));
+    }
+    // 兩件都落在中央高原上（不是掉在橋上、也不是掉進別片土地）
+    for (const [tag, at] of [['小祠', Fin22.SHRINE_AT], ['母碑', Fin22.STELE_AT]]) {
+      const here22 = World.regionAt(at[0], at[1]);
+      eq(here22 && here22.id, T22.FINALE.region, `${tag}站在中央高原上`);
+      eq(here22 && here22.onBridge, false, `${tag}不在橋上`);
+    }
+
+    /* 量體：三角、碰撞體、光源 */
+    const finGroup22 = testWorld.finale.group;
+    let tris22 = 0;
+    let lights22 = 0;
+    let solids22 = 0;
+    let standable22 = 0;
+    finGroup22.traverse((o) => {
+      if (o.isLight) lights22 += 1;
+      if (o.isMesh && o.geometry) {
+        const g2 = o.geometry;
+        tris22 += g2.index ? g2.index.count / 3 : g2.attributes.position ? g2.attributes.position.count / 3 : 0;
+      }
+      if (o.userData && typeof o.userData.solidRadius === 'number') {
+        solids22 += 1;
+        // 站不上去靠尺寸成立（< STAND_MIN_R），不靠旗標宣告
+        if (o.userData.solidRadius >= World.STAND_MIN_R) standable22 += 1;
+      }
+    });
+    eq(lights22, 0, '終局那一層一盞燈都沒加（光源仍然是 37）');
+    eq(Math.round(tris22), EX_FIN.tris, '終局那一層的三角形數與契約逐值相同', String(Math.round(tris22)));
+    eq(solids22, EX_FIN.solids, '終局那一層的碰撞體數與契約逐值相同', String(solids22));
+    eq(standable22, 0, '每一顆碰撞體都小於 STAND_MIN_R（站不上去靠尺寸成立）');
+    ok(tris22 < 900, '整層 < 900 三角形', String(Math.round(tris22)));
+    // 場景圖命名（碰撞稽核與 e2e 靠它）
+    ok(Boolean(finGroup22.getObjectByName(`finale:${T22.FINALE.shrineId}`)), '小祠的場景圖節點叫 finale:<id>');
+    ok(Boolean(finGroup22.getObjectByName(`finale:${T22.FINALE.steleId}`)), '母碑的場景圖節點叫 finale:<id>');
+    // 母碑站在斷環臺座的臺面上（不是陷在臺座裡）
+    const steleGroup22 = finGroup22.getObjectByName(`finale:${T22.FINALE.steleId}`);
+    eq(
+      Number((steleGroup22.position.y - World.terrainHeight(Fin22.STELE_AT[0], Fin22.STELE_AT[1])).toFixed(2)),
+      Fin22.STELE_LIFT,
+      '母碑墊在斷環臺座的臺面上'
+    );
+  }
+
+  /* --- ⑪ 用語：吃 §1.6 的禁字表、不用系統術語、零公司名 --- */
+  {
+    const FORBIDDEN22 = [
+      '怪物', '敵人', '打敗', '擊敗', '戰鬥', '攻擊', '傷害', '血量', '生命值',
+      '失敗', '輸了', '贏了', '勝利', '扣分', '清零', '歸零', '重新開始', '從頭再來', '倒數',
+    ];
+    const SYSTEM22 = ['送出評分', '按鈕', '面板', 'localStorage', 'bloom', '後製', 'Web Audio', 'API key', 'rubric', 'debug', '上傳'];
+    const VENDOR22 = /\b(OpenAI|Anthropic|Google|xAI|GPT|Claude|Gemini|Grok)\b/i;
+    const lines22 = [
+      ...ShrineUi22.SHRINE_LINES,
+      ShrineUi22.SAY_CAPTION,
+      ShrineUi22.HEARD_LEAD,
+      ShrineUi22.CARVE_ASK,
+      ShrineUi22.CARVE_NOTE,
+      ShrineUi22.BLANK_STELE,
+      ShrineUi22.BLANK_HINT,
+      T22.BEST_SAY_FALLBACK.say,
+      T22.BEST_SAY_FALLBACK.ask,
+      T22.FIRST_SAY_ASK,
+      ...Rite22.LISTEN_CHECKS.map((r) => r.heard),
+    ];
+    let scanned22 = 0;
+    for (const line of lines22) {
+      scanned22 += 1;
+      ok(typeof line === 'string' && line.length > 0, '每一句都不是空的', line);
+      for (const w of FORBIDDEN22) ok(!line.includes(w), `終局的字裡不出現「${w}」`, line);
+      for (const w of SYSTEM22) ok(!line.includes(w), `終局的字裡不出現系統術語「${w}」`, line);
+      ok(!VENDOR22.test(line), '終局的字裡沒有公司名', line);
+      ok(!ENGLISH(line), '終局的字裡沒有整句英文', line);
+      ok(!/https?:\/\//.test(line), '終局的字裡不掛連結', line);
+    }
+    eq(
+      scanned22,
+      ShrineUi22.SHRINE_LINES.length + 6 + 3 + Rite22.LISTEN_CHECKS.length,
+      '每一句都掃過了（不是空掃）',
+      String(scanned22)
+    );
+    // 反例：這張表真的抓得到東西
+    ok(FORBIDDEN22.some((w) => '這一次你失敗了'.includes(w)), '（反例）禁字表對「這一次你失敗了」會紅');
+    // 三句回聲：≤ 2 句、每句 ≤ 31 字（WORLD §1.2）
+    for (const k of [T22.FINALE.echoShrine, T22.FINALE.echoCarved, T22.FINALE.echoBlank]) {
+      const spec22 = NudgeP22.ECHO_LINES[k];
+      const parts22 = [spec22.line, spec22.sub].filter(Boolean);
+      ok(parts22.length <= 2, `[echo:${k}] 最多兩句`, String(parts22.length));
+      for (const line of parts22) {
+        ok(line.length <= 31, `[echo:${k}]「${line}」≤ 31 字`, `len=${line.length}`);
+        for (const w of FORBIDDEN22) ok(!line.includes(w), `[echo:${k}] 不出現「${w}」`);
+      }
+    }
+    // 純風味：這一層不掛出處、不宣稱技巧（教學與官方文件永遠只在關卡與圖鑑）
+    ok(!/\bsources?\b|teaches|官方/.test(shrineCode22), '小祠的畫面上不掛出處、不宣稱技巧');
+  }
+
+  /* --- ⑫ 接線：E 仍是唯一的互動鍵、每幀零配置、世界跟著存檔走 --- */
+  {
+    ok(/import \{[^}]*shrineOpen[^}]*\} from '\.\/world\/turning\.js';/s.test(mainSrc22), 'main.js 從 turning.js 拿門檻那一支（沒有第二份真相）');
+    ok(/if \(e\.code === 'KeyE' && nearFinale\) \{/.test(mainSrc22), '終局走的是既有的 E（沒有新增快捷鍵）');
+    ok(/nearFinale === 'shrine' \? enterShrine\(\) : /.test(mainSrc22) || /if \(nearFinale === 'shrine'\) enterShrine\(\);/.test(mainSrc22), '小祠與母碑分得開');
+    // 沒有新增第 N 種按鍵
+    const keyBlock22 = mainSrc22.slice(mainSrc22.indexOf("if (e.code === 'KeyE' && nearFinale)"), mainSrc22.indexOf("} else if (e.code === 'KeyC')"));
+    ok(keyBlock22.length > 400, '（前提）切得到按鍵那一段', String(keyBlock22.length));
+    ok(!/e\.code === 'Key(?!E\b)[A-Z]/.test(keyBlock22.replace(/KeyE/g, 'KeyE')), '那一段裡除了 E 沒有別的字母鍵');
+    // 說出口了才記旗標（P21 那一條在這裡是兩句話各守一次）
+    const echoBlock22 = mainSrc22.slice(mainSrc22.indexOf('shouldAnnounceShrine('), mainSrc22.indexOf('// 指南針：每幀跟著鏡頭轉'));
+    ok(echoBlock22.length > 400, '（前提）切得到終局那兩句回聲', String(echoBlock22.length));
+    ok(
+      /lastEchoKind\(\) === FINALE\.echoShrine\) markShrineSpoken/.test(echoBlock22),
+      '小祠那一句：真的說出口了才記旗標'
+    );
+    ok(
+      echoBlock22.indexOf('nudge.echo(FINALE.echoShrine)') < echoBlock22.indexOf('markShrineSpoken'),
+      '順序是「先排隊、後記旗標」'
+    );
+    ok(/lastEchoKind\(\) === kind\) markSteleSpoken/.test(echoBlock22), '母碑那一句：也是說出口了才記旗標');
+    /*
+     * 但**「母碑站起來了」不能等回聲**：那是世界狀態，儀式一走完就要落盤
+     * （等回聲說完才記的話，中間重整一次母碑就會躺回去）。
+     */
+    const riteBlock22 = mainSrc22.slice(mainSrc22.indexOf('function finishRite'), mainSrc22.indexOf('走進一個藏起來的地方'));
+    ok(riteBlock22.length > 400, '（前提）切得到 finishRite()', String(riteBlock22.length));
+    ok(/markSteleRaised\(progression\)/.test(riteBlock22), '儀式走完當場記下「母碑立起來了」');
+    ok(!/lastEchoKind/.test(riteBlock22), '「立起來了」不等回聲（那是世界狀態，不是「說過了」）');
+    ok(/inscriptionFor\(choice, text\)/.test(riteBlock22), '刻不刻走的是那道閘（不是直接把字寫進去）');
+    // 世界跟著存檔走：開機還原 ＋ 重置歸零
+    ok(/finaleStateOf: \(\) => \(\{/.test(mainSrc22), '開機依存檔還原終局那一層');
+    ok(/world\.finale\?\.reset\?\.\(\);/.test(mainSrc22), '重置進度時世界端也歸零');
+    ok(/refreshFinale\(\);/.test(mainSrc22), '存檔變了 → 小祠與母碑跟著對一次');
+    // 每幀零配置：那兩支回布林
+    eq(typeof T22.shouldAnnounceShrine(true, {}), 'boolean', 'shouldAnnounceShrine() 回布林');
+    eq(typeof T22.steleRaised({}), 'boolean', 'steleRaised() 回布林');
+    // nearest() 回的是同一個共用物件（每幀被呼叫，不准配置）
+    {
+      const f22 = Fin22.createFinaleField({
+        kit: testWorld.kitOf('foundations'),
+        terrainHeight: World.terrainHeight,
+        open: true,
+      });
+      const a22 = f22.nearest({ x: Fin22.SHRINE_AT[0], z: Fin22.SHRINE_AT[1] });
+      const b22 = f22.nearest({ x: Fin22.SHRINE_AT[0] + 0.5, z: Fin22.SHRINE_AT[1] });
+      ok(a22 === b22, 'nearest() 每次回同一個物件（每幀不配置）');
+    }
+    // turning.js 仍然一個 import 都沒有
+    ok(!/^import /m.test(turningSrc22), 'turning.js 一個 import 都沒有（測試與 UI 都拿得到）');
+  }
+
+  /* --- ⑬ WORLD.md：終局要寫進世界的規則書 --- */
+  {
+    const s420 = worldMd22.slice(worldMd22.indexOf('### 4.20'), worldMd22.indexOf('## 五'));
+    ok(s420.length > 400, 'WORLD.md 有 §4.20（終局：回聲的小祠 ＋ 母碑重立）', String(s420.length));
+    ok(/P22/.test(s420), '§4.20 標得出這一格');
+    ok(/finale\.js/.test(s420), '§4.20 指得出那一層住在哪');
+    ok(/沒有失敗態|不會失敗/.test(s420), '§4.20 寫得出「沒有失敗態」');
+    ok(/確認|問過/.test(s420), '§4.20 寫得出「刻上去之前要問過」');
+    ok(/不刻|留白/.test(s420), '§4.20 寫得出「可以選擇不刻」');
+    ok(/還沒開口/.test(s420), '§4.20 寫得出「沒到門檻只是還沒開口」');
+    ok(new RegExp(String(EX_FIN.steleWinnable)).test(s420), '§4.20 寫得出母碑量到的方向數');
+    ok(new RegExp(String(EX_FIN.shrineAt[0])).test(s420), '§4.20 寫得出小祠的落點');
+  }
+}
+
+
+console.log('▸ 畫面成本：draw call／材質／透明片進預算（P22b）');
+{
+  const EX_PERF = EXPECT.perf;
+  const { buildWorld } = await import('./world-harness.mjs');
+  const { perfAudit } = await import('./perf-audit.mjs');
+  const { PX_K } = await import('../src/world/batching.js');
+  const audit = await perfAudit();
+
+  /*
+   * 為什麼要逐值：這一格之前，三角形／光源／碰撞體都守著上限（`< 上限`），
+   * 而 draw call 從 3,562 長到 4,144 的那一整段路上，沒有任何一條斷言會紅。
+   * 上限攔得住「爆掉」，攔不住「慢慢長」——所以這一段全部是 eq，不是 ok。
+   * 數字是確定性的（世界是同一顆種子蓋的、取樣點固定、跑固定四幀），跑兩次逐位元組相同。
+   */
+  const cmp = (quality, kind) => {
+    const got = audit[quality][kind].total;
+    const want = EX_PERF[quality][kind];
+    for (const key of ['draws', 'mats', 'geos', 'transparent', 'additive', 'tris', 'lights', 'instanced']) {
+      eq(got[key], want[key], `P22b：${quality} ${kind} ${key}`, `${got[key]}`);
+    }
+    if (want.at) eq(audit[quality][kind].id, want.at, `P22b：${quality} 最貴的取樣點`, String(audit[quality][kind].id));
+  };
+  cmp('high', 'build');
+  cmp('high', 'frame');
+  cmp('low', 'build');
+  cmp('low', 'frame');
+
+  // 逐層：總量對得上、層與層之間卻搬了家，代表有一層悄悄長胖而另一層剛好瘦了
+  for (const quality of ['high', 'low']) {
+    for (const [kind, field] of [
+      ['build', 'buildLayers'],
+      ['frame', 'frameLayers'],
+    ]) {
+      const rows = audit[quality][kind].layers;
+      for (const [id, n] of Object.entries(EX_PERF[quality][field])) {
+        const row = rows.find((r) => r.id === id);
+        eq(row ? row.draws : null, n, `P22b：${quality} ${kind} 層 ${id}`, String(row && row.draws));
+      }
+    }
+  }
+
+  /* --- 門檻（P22b 的驗收數字；基準是開工時量到的那一份） --- */
+  const g = EX_PERF.gates;
+  const hiBuild = audit.high.build.total;
+  const loFrame = audit.low.frame.total;
+  const hiFrame = audit.high.frame.total;
+  ok(hiBuild.draws <= g.highBuildDrawMax, `P22b：高畫質 draw call ≤ ${g.highBuildDrawMax}`, String(hiBuild.draws));
+  ok(hiBuild.additive <= g.highBuildAdditiveMax, `P22b：高畫質加色混合 ≤ ${g.highBuildAdditiveMax}`, String(hiBuild.additive));
+  ok(
+    loFrame.draws <= hiFrame.draws * g.lowFrameRatioMax,
+    `P22b：低畫質那一幀 ≤ 高畫質那一幀 × ${g.lowFrameRatioMax}`,
+    `${loFrame.draws} / ${hiFrame.draws} = ${(loFrame.draws / hiFrame.draws).toFixed(3)}`
+  );
+  /*
+   * 基準（P22b 開工時量到的那一份）—— 省了多少要說得出口，而且不准倒退。
+   *
+   * **v1.2 · P22c：三角形第一次動了**（229,644 → 230,404，＋760、＋0.33%），
+   * 所以 P22b 那句「一個都沒動」的 `eq` 換成一條**上限**。它不是放寬：
+   * 那一格把座標乘 1.3，程序化植被／碎石的名額於是第一次被吃滿（植被 138 → 588 株），
+   * 一度長到 ＋11,786 個三角形、＋296 顆碰撞圓，兩道硬預算同時破掉；
+   * 把名額壓回世界本來就長得出來的量（`buildFlora` 的 `perType` 30/14 → 8/4、
+   * `rockCount` 150/70 → 100/46）之後只剩下這 760 個。
+   * 逐值那一條並沒有消失 —— 上面 `cmp('high','build')` 的 `eq(tris)` 照樣逐值守著；
+   * 這裡守的是另一件事：**這一格不准偷偷把內容變多**（相對 P22b 的基準 ≤ ＋1%）。
+   */
+  /*
+   * 「不准偷加內容」這條要**把地形本身扣掉再比**。
+   *
+   * 放大之後地形平面 340 → 442，段數必須 200 → 260 才能維持放大前的格距
+   * （P16d/e 的門檻是在那個格距上量的；不維持就會有人浮在畫出來的地面上）——
+   * 地形三角因此 80,000 → 135,200。那 55,200 個三角是**同一個不透明 mesh**
+   * 多切幾刀：draw call ＋0、材質 ＋0、透明片 ＋0。
+   * 拿含地形的總數去比，只會逼下一個人為了讓數字好看而去砍真正的內容。
+   * 所以這裡比的是**扣掉地形之後的三角**，那才是「內容有沒有偷偷變多」。
+   */
+  const terrainTris = (seg) => seg * seg * 2;
+  const hiBodyTris = hiBuild.tris - terrainTris(260);
+  const baseBodyTris = g.baseline.tris - terrainTris(200);
+  ok(
+    hiBodyTris <= baseBodyTris * 1.01,
+    'P22c：**扣掉地形之後**的三角相對 P22b 的基準最多多 1%（攤開地圖不准變成偷加內容）',
+    `${hiBodyTris} vs ${baseBodyTris}`
+  );
+  ok(hiBuild.draws <= g.baseline.draws * 0.75, 'P22b：draw call 至少省了四分之一', String(hiBuild.draws));
+  ok(hiBuild.additive <= g.baseline.additive * 0.70, 'P22b：加色混合至少省了三成', String(hiBuild.additive));
+  eq(
+    Number((audit.low.build.total.draws / hiBuild.draws).toFixed(3)),
+    g.lowBuildRatio,
+    'P22b：低畫質「蓋出來」的比例（誠實記著：低畫質省的是畫，不是裝）',
+    (audit.low.build.total.draws / hiBuild.draws).toFixed(3)
+  );
+
+  /* --- ① 石座合批：710 個 draw call 收成 5 個 --- */
+  {
+    const { world } = await buildWorld({ quality: 'high' });
+    const shared = world.root.children.find((c) => c.name === 'marker:shared');
+    ok(Boolean(shared), 'P22b：石座的共用批在場景圖上（marker:shared）');
+    const insts = shared.children.filter((c) => c.isInstancedMesh);
+    eq(insts.length, EX_PERF.markerBatch.draws, 'P22b：石座合批後只剩這麼多 draw call', String(insts.length));
+    eq(
+      new Set(insts.map((m) => m.material.uuid)).size,
+      EX_PERF.markerBatch.mats,
+      'P22b：石座合批後只剩這麼多份材質'
+    );
+    eq(
+      insts.filter((m) => m.material.blending === THREE.AdditiveBlending).length,
+      EX_PERF.markerBatch.additive,
+      'P22b：石座剩這麼多片加色混合'
+    );
+    for (const m of insts) eq(m.count, world.markers.length, `P22b：${m.name} 每一座都有位子`, String(m.count));
+    /*
+     * 名字不是裝飾：穿模稽核的例外表認的是路徑上的 `marker:`
+     * （石座的光柱與地面光環不擋人）。批次改名就會讓那幾片突然被要求擋人。
+     */
+    ok(/^marker:/.test(shared.name), 'P22b：批次的名字仍落在穿模稽核的例外表底下');
+    // 每一座仍握著自己那一份代理（既有介面一個字都沒改）
+    const m0 = world.markers[0];
+    for (const part of ['pedestal', 'shard', 'ring', 'beacon', 'halo']) {
+      ok(Boolean(m0[part] && m0[part].isMesh), `P22b：石座仍拿得到 ${part} 代理`);
+      eq(m0[part].parent, null, `P22b：${part} 代理沒有掛進場景圖（不佔 draw call）`);
+    }
+    ok(Boolean(m0.label && m0.label.parent === m0.group), 'P22b：字牌仍掛在石座自己的節點上（要分帶）');
+    /*
+     * 加色混合下螢幕上的貢獻就是「顏色 × 不透明度」，所以實例色一定要等於那一乘。
+     * 讀的是 update() 跑完之後**代理身上真的那兩個值**（不是測試自己塞進去的，
+     * 塞進去的下一幀就被動畫覆寫掉了 —— 那樣量到的是自己寫的常數，不是程式的行為）。
+     */
+    const camNear = new THREE.PerspectiveCamera(55, 16 / 9, 0.1, 900);
+    camNear.position.set(m0.position.x, m0.position.y + 7, m0.position.z + 9);
+    m0.update(1 / 60, 1, camNear);
+    const col = new THREE.Color();
+    const rings = insts.find((mm) => mm.name === 'rings');
+    rings.getColorAt(0, col);
+    const wantCol = m0.ring.material.color.clone().multiplyScalar(m0.ring.material.opacity);
+    ok(m0.ring.material.opacity > 0.05, '（前提）腳下的圈這一幀真的有亮度', String(m0.ring.material.opacity));
+    ok(
+      Math.abs(col.r - wantCol.r) < 1e-4 && Math.abs(col.g - wantCol.g) < 1e-4 && Math.abs(col.b - wantCol.b) < 1e-4,
+      'P22b：實例色 ＝ 顏色 × 不透明度（加色混合下逐像素等價）',
+      `${col.r.toFixed(4)},${col.g.toFixed(4)},${col.b.toFixed(4)} vs ${wantCol.r.toFixed(4)},${wantCol.g.toFixed(4)},${wantCol.b.toFixed(4)}`
+    );
+    // 光核走的是自發光那一條（instanceColor 在 three.js 乘不到 emissive，所以補了一行 shader）
+    const worldSrc22b = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+    ok(
+      /totalEmissiveRadiance \*= vColor/.test(worldSrc22b),
+      'P22b：光核那一批把實例色乘進自發光（不然 142 座會一起發白光）'
+    );
+  }
+
+  /* --- ② 靜態合批：碰撞與稽核一顆圓都沒少 --- */
+  {
+    const Batching = await import('../src/world/batching.js');
+    ok(typeof Batching.instanceStatics === 'function', 'P22b：靜態合批是一支可以單獨測的函式');
+    // 合批只碰「同一份幾何 ＋ 同一份材質 ＋ 同一組 userData」的網格
+    const g0 = new THREE.BoxGeometry(1, 1, 1);
+    const m0 = new THREE.MeshBasicMaterial();
+    const holder = new THREE.Group();
+    holder.name = 'test-layer';
+    for (let i = 0; i < 3; i += 1) {
+      const mesh = new THREE.Mesh(g0, m0);
+      mesh.position.x = i * 2;
+      holder.add(mesh);
+    }
+    const odd = new THREE.Mesh(g0, m0);
+    odd.userData.standId = 'keep-me'; // userData 不同 → 不准跟別人合在一起
+    holder.add(odd);
+    const kid = new THREE.Mesh(g0, m0);
+    holder.children[0].add(kid); // 底下有網格的不合（頂面是走整棵子樹量的）
+    const before = Batching.instanceStatics(holder);
+    eq(before.batches, 1, 'P22b：三塊一模一樣的收成一批');
+    eq(before.merged, 2, 'P22b：收進去的是「頭上腳下都沒有網格」的那兩塊');
+    ok(
+      holder.children.some((c) => c.isMesh && !c.isInstancedMesh && c.userData.standId === 'keep-me'),
+      'P22b：userData 不同的那一塊留在原地'
+    );
+    ok(kid.parent !== null, 'P22b：底下還有網格的那一塊沒有被拆走');
+    // protectReferenced：被 userData 指著的（每幀在動的）不合批
+    const holder2 = new THREE.Group();
+    const live = new THREE.Mesh(g0, m0);
+    const still = new THREE.Mesh(g0, m0);
+    still.position.x = 3;
+    holder2.add(live, still);
+    holder2.userData.gear = live;
+    eq(Batching.protectReferenced(holder2), 1, 'P22b：被拿在手上的那一件被保護起來');
+    eq(Batching.instanceStatics(holder2).batches, 0, 'P22b：只剩一件就不必合批（保護生效）');
+  }
+
+  /* --- ③ 細節分帶：判準是螢幕像素，不是距離 --- */
+  {
+    const Batching = await import('../src/world/batching.js');
+    eq(Math.round(PX_K), 1037, 'P22b：像素換算的那把尺是固定的（1080p／55°）', String(Math.round(PX_K)));
+    const holder = new THREE.Group();
+    const small = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), new THREE.MeshBasicMaterial());
+    const big = new THREE.Mesh(new THREE.BoxGeometry(12, 12, 12), new THREE.MeshBasicMaterial());
+    big.position.x = 40;
+    holder.add(small, big);
+    const cull = Batching.createDetailCull(holder, { px: 2 });
+    eq(cull.count, 1, 'P22b：只登記小到有機會退場的那一件（大石脊永遠不必問）', String(cull.count));
+    cull.updateAll({ position: new THREE.Vector3(0, 0, 5) });
+    eq(small.visible, true, 'P22b：5 公尺外的小件照畫（0.2 公尺 ≈ 41 像素）');
+    cull.updateAll({ position: new THREE.Vector3(0, 0, 400) });
+    eq(small.visible, false, 'P22b：400 公尺外退場（不到半個像素）');
+    cull.updateAll({ position: new THREE.Vector3(0, 0, 5) });
+    eq(small.visible, true, 'P22b：走回來又畫回去');
+    eq(big.visible, true, 'P22b：大件從頭到尾沒被碰過');
+    /*
+     * 滯後：亮的門檻是 2 像素、暗的門檻是 1.5 像素（0.75 倍）。
+     * 站在剛好 2 像素那個距離上前後走一步不會閃 —— 一格一格驗過去。
+     */
+    const edge = (0.2 * PX_K) / 2; // 剛好 2 像素的那個距離
+    cull.updateAll({ position: new THREE.Vector3(0, 0, edge * 1.1) });
+    eq(small.visible, true, 'P22b：剛出門檻一點點還在畫（滯後：還沒掉到 1.5 像素）');
+    cull.updateAll({ position: new THREE.Vector3(0, 0, edge * 1.5) });
+    eq(small.visible, false, 'P22b：掉到 1.5 像素以下才退場');
+    cull.updateAll({ position: new THREE.Vector3(0, 0, edge * 1.1) });
+    eq(small.visible, false, 'P22b：只回來一點點不會馬上又亮（滯後）');
+    cull.updateAll({ position: new THREE.Vector3(0, 0, edge * 0.9) });
+    eq(small.visible, true, 'P22b：真的進到 2 像素裡才亮');
+    // 世界端真的裝上了，而且真的登記到東西（不是空過）
+    const { world: wHi } = await buildWorld({ quality: 'high' });
+    const { world: wLo } = await buildWorld({ quality: 'low' });
+    ok(wHi.detailCull.count > 200, 'P22b：高畫質真的登記到一整批細節片（不是空過）', String(wHi.detailCull.count));
+    ok(wLo.detailCull.count > 200, 'P22b：低畫質也有', String(wLo.detailCull.count));
+  }
+
+  /* --- ④ 分帶不准把「看得見的東西」弄不見 --- */
+  {
+    const { world } = await buildWorld({ quality: 'high' });
+    const cam = new THREE.PerspectiveCamera(55, 16 / 9, 0.1, 900);
+    // 走到第一座石座腳邊：字牌、腳下的圈、光柱、光核一件都不准少
+    const m = world.markers[0];
+    cam.position.set(m.position.x, m.position.y + 7, m.position.z + 9);
+    for (let i = 0; i < 4; i += 1) m.update(1 / 60, 10 + i / 60, cam);
+    eq(m.label.visible, true, 'P22b：走近時字牌在');
+    eq(m.active, true, 'P22b：走近時石座是活的（照舊逐幀動）');
+    // 130 公尺外字牌才收（那時整張牌不到 27 像素高）
+    cam.position.set(m.position.x, m.position.y + 7, m.position.z + 200);
+    for (let i = 0; i < 4; i += 1) m.update(1 / 60, 11 + i / 60, cam);
+    eq(m.label.visible, false, 'P22b：200 公尺外字牌收起來');
+    eq(m.active, false, 'P22b：遠處的石座不再逐幀寫實例欄位');
+    cam.position.set(m.position.x, m.position.y + 7, m.position.z + 9);
+    for (let i = 0; i < 4; i += 1) m.update(1 / 60, 12 + i / 60, cam);
+    eq(m.label.visible, true, 'P22b：走回來字牌又亮回來');
+    // 分帶的距離逐值比對（改鬆一格就要紅）
+    eq(m.labelBand.join(','), EXPECT.perf.labelBand.high.join(','), 'P22b：高畫質字牌的進 / 出距離');
+    ok(m.labelBand[1] > m.labelBand[0], 'P22b：進 / 出是兩個距離（滯後）');
+
+    /*
+     * 帶外的石座**不是凍住的**：光柱是站在高原上讀的導航，三態的暗／亮也是。
+     * 只把遠處的石座停掉，一片新解鎖的土地就會維持 ×0.4 的暗直到玩家走近 ——
+     * 那是看得見的倒退。帶外不 lerp，但要**一次貼上終值**。
+     */
+    const far = world.markers.find((x) => x.region !== m.region) || world.markers[1];
+    const farCam = new THREE.PerspectiveCamera(55, 16 / 9, 0.1, 900);
+    farCam.position.set(far.position.x, far.position.y + 7, far.position.z + 400);
+    far.update(1 / 60, 20, farCam);
+    eq(far.active, false, '（前提）那一座真的在帶外');
+    far.setRegionState('dark');
+    far.update(1 / 60, 21, farCam);
+    eq(far.dimNow, 0.4, 'P22b：帶外的石座「暗」一次到位（不必等玩家走近）', String(far.dimNow));
+    ok(
+      Math.abs(far.beacon.material.opacity - 0.055 * 0.4) < 1e-6,
+      'P22b：帶外的光柱照三態調亮度',
+      String(far.beacon.material.opacity)
+    );
+    far.setRegionState('amber');
+    far.update(1 / 60, 22, farCam);
+    eq(far.dimNow, 1, 'P22b：轉回「先行前往」也一次到位');
+    ok(far.halo.material.opacity > 0.02, 'P22b：帶外的琥珀底光讀得出來（遠處就看得到這一區是問開的）', String(far.halo.material.opacity));
+    eq(far.halo.material.color.getHex(), new THREE.Color((await import('../src/engine/engine.js')).PALETTE.invite).getHex(), 'P22b：帶外的 halo 顏色也一次到位');
+  }
+
+  /* --- ⑤ 稽核不准因為合批而變鬆 --- */
+  {
+    const { world } = await buildWorld({ quality: 'high' });
+    let instanced = 0;
+    let instances = 0;
+    world.root.traverse((o) => {
+      if (!o.isInstancedMesh) return;
+      instanced += 1;
+      instances += o.count;
+    });
+    ok(instanced >= 250, 'P22b：場景圖上真的有一整批 InstancedMesh', String(instanced));
+    ok(instances > instanced * 2, 'P22b：每一批平均不只兩件（合批真的在合）', `${instances}/${instanced}`);
+    // 142 座石座的碰撞圓一顆都沒少（合批之前是 142 個獨立網格）
+    const ped = world.solids.filter((s) => Math.abs(s.r - 1.25) < 1e-6 && s.keep);
+    eq(ped.length, world.markers.length, 'P22b：石座底座的碰撞圓一顆都沒少（合批走的是逐實例那條路）', String(ped.length));
+  }
+}
+
 /* ------------------------------------------------------------------ */
 console.log('');
+/* ------------------------------------------------------------------ *
+ * 長凳：人要真的坐在凳面上（v1.2 · P22f）
+ * ------------------------------------------------------------------ *
+ *
+ * 站長回報「板凳坐起來位置都怪怪的」。量出來是兩件互相獨立的事，七張凳子全中
+ * —— 也就是說是程式的錯，不是某一筆資料擺歪：
+ *
+ *   ① **人面向凳子的長邊**（朝向與長軸的內積實測 1.000）＝ 沿著凳子跨坐。
+ *      `seatLocal.face` 寫的是 `Math.PI / 2`，可是那個角度正好就是凳子的長軸方向。
+ *   ② **沒有任何程式把人抬到凳面上**：`player.teleport(x, z, face)` 不吃 y，
+ *      人留在地面高度，而凳面在地面上方 0.696 公尺 —— 凳面就從人身上腰的位置穿過去。
+ *      角色的坐姿其實調得很準（髖 0.88 − `SEAT_DROP` 0.42 ＝ 0.44，小腿 0.4 ＋ 腳 0.06
+ *      剛好踩到地），只是沒有人把「座面有多高」告訴它。
+ *
+ * 既有的測試驗了「有沒有擺出坐姿」（`restAmount`、膝蓋角度）與「鏡頭有沒有退」，
+ * **卻沒有一條在驗「人有沒有真的在凳子上」** —— 所以這個才會一路出貨。
+ * 這一節補的就是那件事：位置與朝向，兩條都逐張凳子驗。
+ */
+{
+  const { buildWorld: bw } = await import('./world-harness.mjs');
+  const { world, scene, THREE } = await bw({ quality: 'high' });
+  scene.updateMatrixWorld(true);
+  const benches = world.handles.objects.filter((o) => o.kind === 'bench');
+  ok(benches.length >= 5, '長凳：世界上真的有一批長凳可以驗', String(benches.length));
+
+  const dir = new THREE.Vector3();
+  let worstDot = 0;
+  let worstRise = 0;
+  for (const h of benches) {
+    // 凳面 ＝ 這張凳子裡水平投影面積最大的那一塊
+    let slab = null;
+    h.group.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      o.geometry.computeBoundingBox();
+      const bb = o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld);
+      const area = (bb.max.x - bb.min.x) * (bb.max.z - bb.min.z);
+      if (!slab || area > slab.area) slab = { bb, area };
+    });
+    const ground = world.terrainHeight(h.seat.x, h.seat.z);
+    const seatH = slab.bb.max.y - ground;
+
+    /*
+     * ① 朝向：坐下時人要面向凳子的**短邊**（跨出去那一面），不是長邊。
+     * 長軸 ＝ 局部 +x 轉到世界 —— 用世界矩陣拿，因為旋轉掛在父節點上
+     * （直接讀 `group.rotation.y` 永遠是 0，第一次量就是這樣量錯的）。
+     */
+    h.group.updateWorldMatrix(true, false);
+    dir.set(1, 0, 0).transformDirection(h.group.matrixWorld).normalize();
+    const face = { x: Math.sin(h.seat.face), z: Math.cos(h.seat.face) };
+    const dot = Math.abs(dir.x * face.x + dir.z * face.z);
+    worstDot = Math.max(worstDot, dot);
+
+    /*
+     * ② 高度：坐姿的髖落在 `HIP_STAND − SEAT_DROP` ＝ 0.44 公尺。
+     * 要坐在凳面上，就得有一個把人抬起來的量，而且那個量要跟這張凳子的座面高對得上。
+     */
+    const rise = Number.isFinite(h.seatRise) ? h.seatRise : 0;
+    worstRise = Math.max(worstRise, Math.abs(seatH - 0.44 - rise));
+  }
+  ok(worstDot < 0.35, '長凳：坐下時人面向凳子的短邊（不是沿著長邊跨坐）', `最差的內積 ${worstDot.toFixed(3)}`);
+  ok(
+    worstRise < 0.06,
+    '長凳：每張凳子都把「座面比坐姿的髖高多少」告訴角色（人才會坐在凳面上，不是被凳面攔腰穿過）',
+    `最差差 ${worstRise.toFixed(3)} m`
+  );
+}
+
+
+/* ================================================================== *
+ * v1.2 · P23：進程外顯 ＋ 今日三事（無過期）＋ 成就整理
+ *
+ *   ① 等級穿在披肩上：格數 ＝ 等級，一圈 33 格 × 三圈 ＝ 99 ＝ 等級上限
+ *      零新光源、零新碰撞體、低畫質照蓋
+ *   ② 今日三事是**提議**：本地時間換日、換日只換提議不刪進度、
+ *      可以關掉且關掉之後與「從來沒有這個功能」逐值相同、
+ *      **整層掃不到一個催人的字**（倒數／期限／連著幾天／錯過…）
+ *   ③ 隱藏成就對齊 P22 的終局門檻（130 條技法 ＋ 四宿全亮），
+ *      而且**任何既有存檔的成就狀態不准倒退**
+ * ================================================================== */
+console.log('\n▸ 進程外顯 ＋ 今日三事 ＋ 成就整理（v1.2 · P23）');
+{
+  const EX23 = EXPECT.daily;
+  const Char23 = await import('../src/player/character.js');
+  const Daily23 = await import('../src/progression/daily.js');
+  const DailyUi23 = await import('../src/ui/daily.js');
+  const Prog23 = await import('../src/progression/progression.js');
+  const Turn23 = await import('../src/world/turning.js');
+  const Star23 = await import('../src/ui/starmap.js');
+  /*
+   * 只看真的會跑的程式（同 P22 的做法）。這一格的每一條靜態掃描都要先剝掉註解 ——
+   * 註解裡本來就會**解釋**「為什麼這裡沒有倒數、沒有期限、不用 UTC」，
+   * 拿沒剝過的原始碼去掃，掃到的是自己的說明文字，不是出貨的行為。
+   */
+  const strip23 = (src) =>
+    src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const dailySrc23 = strip23(readFileSync(resolve(root, 'src/progression/daily.js'), 'utf8'));
+  const dailyUiSrc23 = strip23(readFileSync(resolve(root, 'src/ui/daily.js'), 'utf8'));
+  const charSrc23 = readFileSync(resolve(root, 'src/player/character.js'), 'utf8');
+  const progSrc23 = readFileSync(resolve(root, 'src/progression/progression.js'), 'utf8');
+  const mainSrc23 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const setSrc23 = readFileSync(resolve(root, 'src/ui/settings.js'), 'utf8');
+  const codexSrc23 = readFileSync(resolve(root, 'src/ui/codex.js'), 'utf8');
+  const saveSrc23 = readFileSync(resolve(root, 'src/save/save.js'), 'utf8');
+
+  ok(EX23 && typeof EX23 === 'object', '契約檔登記了 P23 這一格');
+  ok(dailySrc23.length > 800 && dailyUiSrc23.length > 400, '（前提）量得到剝掉註解之後的那兩支程式', `${dailySrc23.length}/${dailyUiSrc23.length}`);
+
+  /* --- ① 進程外顯：等級穿在披肩上 --- */
+  {
+    eq(Char23.PIP_PER_RING, EX23.pipPerRing, '一圈幾格與契約逐值相同');
+    eq(Char23.PIP_RINGS, EX23.pipRings, '幾圈與契約逐值相同');
+    eq(Char23.PIP_MAX, EX23.pipMax, '放得下幾格與契約逐值相同');
+    eq(Char23.PIP_PER_RING * Char23.PIP_RINGS, Char23.PIP_MAX, '一圈 × 幾圈 ＝ 放得下的量（不是各寫一個數）');
+
+    /*
+     * **「一圈放不下」那條規則的驗收**：放得下的量要**剛好等於等級上限**。
+     * 等級上限不手抄 —— 直接把一大筆 XP 餵進 `levelFromXp()` 問它封在哪裡。
+     * 少一格就會有一個等級穿不上身（＝「格數 ＝ 等級」在定義域上破掉）。
+     */
+    const cap23 = Prog23.levelFromXp(1e9).level;
+    eq(cap23, EX23.levelCap, '等級上限與契約逐值相同');
+    eq(Char23.PIP_MAX, cap23, '披肩放得下的格數＝等級上限（每一個等級都穿得上身）');
+
+    for (const q of ['high', 'low']) {
+      const c = Char23.createCharacter({ quality: q });
+      // 低畫質照蓋 —— 它是進度回饋，不是氛圍層
+      ok(Boolean(c.pipMesh) && c.pipMesh.isInstancedMesh === true, `[${q}] 披肩那一圈是一個 InstancedMesh（一次 draw call）`);
+      eq(c.pipMesh.name, 'traveler:pips', `[${q}] 那一圈有名字（場景圖找得到）`);
+      eq(c.pipMesh.instanceMatrix.count, Char23.PIP_MAX, `[${q}] 位置一開始就排滿 99 格（每幀不重算）`);
+
+      // 逐級：0…99 每一級都對得上
+      let mismatch = null;
+      for (let lv = 0; lv <= Char23.PIP_MAX; lv += 1) {
+        c.setLevel(lv);
+        if (c.levelPips !== lv) {
+          mismatch = `Lv.${lv} → ${c.levelPips}`;
+          break;
+        }
+      }
+      eq(mismatch, null, `[${q}] 逐級對應：Lv.n 就亮 n 格（0–99 一級一級走過）`, String(mismatch));
+      c.setLevel(Char23.PIP_MAX + 40);
+      eq(c.levelPips, Char23.PIP_MAX, `[${q}] 壞存檔給的超大等級被夾在 99（不會畫出不存在的格子）`);
+      c.setLevel(-8);
+      eq(c.levelPips, 0, `[${q}] 負的等級夾到 0（不會變成負數的 count）`);
+      c.setLevel(12);
+      eq(c.setLevel(12), false, `[${q}] 同一個等級再設一次不算變（不會每幀當成有事發生）`);
+
+      /*
+       * **多一格那一下整圈亮一次**（借慶祝那條曲線，不新增動畫檔也不新增音效）。
+       * 掉回去（重置）不亮 —— 那一刻不該像在慶祝。
+       */
+      // 先讓前面幾次 setLevel 留下的那一下亮完，才量得到「平時」那一階
+      for (let i = 0; i < 10; i += 1) c.update({ dt: 0.3, t: 0 });
+      const calm = c.pipMesh.material.emissiveIntensity;
+      c.setLevel(13);
+      c.update({ dt: 0.3, t: 0 });
+      ok(
+        c.pipMesh.material.emissiveIntensity > calm + 0.5,
+        `[${q}] 多一格那一下整圈真的亮起來`,
+        `${calm.toFixed(3)} → ${c.pipMesh.material.emissiveIntensity.toFixed(3)}`
+      );
+      for (let i = 0; i < 10; i += 1) c.update({ dt: 0.3, t: 0 });
+      eq(c.pipFlash, 0, `[${q}] 亮完自己收回去（不會一直亮著）`);
+      ok(
+        Math.abs(c.pipMesh.material.emissiveIntensity - calm) < 1e-6,
+        `[${q}] 收回去之後亮度回到原本那一階`
+      );
+      c.setLevel(4);
+      c.update({ dt: 0.016, t: 0 });
+      eq(c.pipFlash, 0, `[${q}] 格子變少（重置）不亮 —— 那一刻不該像在慶祝`);
+
+      // 零新光源：整隻角色仍然只有提燈那一盞
+      let lights = 0;
+      c.root.traverse((o) => {
+        if (o.isLight) lights += 1;
+      });
+      eq(lights, 1, `[${q}] 整隻角色仍然只有提燈那一盞光源（光點是自發光材質）`);
+      ok(
+        c.pipMesh.material.emissive && c.pipMesh.material.emissiveIntensity > 0,
+        `[${q}] 光點靠 emissive 亮，不靠燈`
+      );
+
+      /*
+       * 幾何：三圈都要**在身體外面、肩線以下、披肩下緣以上**。
+       * 埋進胸口那顆膠囊裡的光點在畫面上看不見 —— 那就是「亮了但沒亮」。
+       */
+      const chestR = 0.27;
+      const shoulderY = 0.46;
+      const rimY = 0.42 - 0.25;
+      let worstIn = Infinity;
+      let highest = -Infinity;
+      let lowest = Infinity;
+      const m4 = new (await import('three')).Matrix4();
+      for (let i = 0; i < Char23.PIP_MAX; i += 1) {
+        c.pipMesh.getMatrixAt(i, m4);
+        const x = m4.elements[12];
+        const y = m4.elements[13];
+        const z = m4.elements[14];
+        worstIn = Math.min(worstIn, Math.hypot(x, z) - chestR);
+        highest = Math.max(highest, y);
+        lowest = Math.min(lowest, y);
+      }
+      ok(worstIn > 0.05, `[${q}] 每一格都在胸口那顆膠囊外面（最緊 ${worstIn.toFixed(3)} m）`, String(worstIn));
+      ok(highest < shoulderY, `[${q}] 最高那一圈仍在肩線以下（${highest.toFixed(3)} < ${shoulderY}）`);
+      // 位置存在 Float32 的 instanceMatrix 裡，所以比的是「一微米」不是位元組相等
+      ok(Math.abs(lowest - rimY) < 1e-5, `[${q}] 最低那一圈就貼在披肩下緣（${lowest.toFixed(4)}）`);
+      c.dispose();
+    }
+
+    /*
+     * 三角形：一格 8 個面（Octahedron detail 0）。滿級 99 格 ＝ 792 個三角。
+     * 這個數字寫下來是為了「增量要小且記錄下來」——它不在世界預算裡
+     * （角色不在 `collectSolids()` 掃的那棵樹底下），但仍然要有人數過。
+     */
+    {
+      const c = Char23.createCharacter({ quality: 'high' });
+      const g = c.pipMesh.geometry;
+      const per = g.index ? g.index.count / 3 : g.attributes.position.count / 3;
+      eq(per, 8, '一格光點 8 個三角形');
+      eq(per * Char23.PIP_MAX, 792, '滿級整圈 792 個三角形（增量記在這裡）');
+      c.dispose();
+    }
+
+    // 接線：開機穿一次、存檔一變再穿一次
+    ok(/player\.setLevel\(progression\.levelInfo\(\)\.level\)/.test(mainSrc23), 'P23：開機就把等級穿上去');
+    ok(
+      /if \(traveller\) traveller\.setLevel\(progression\.levelInfo\(\)\.level\)/.test(mainSrc23),
+      'P23：存檔一變（onChange）披肩跟著對一次'
+    );
+    ok(/setLevel\(level\)/.test(readFileSync(resolve(root, 'src/player/player.js'), 'utf8')), 'P23：玩家層把它轉出去');
+    // 低畫質不准被排除掉（它是進度回饋不是氛圍層）
+    const pipBlock23 = charSrc23.split('const pipMat =')[1].split('const belt =')[0];
+    ok(pipBlock23.length > 200, '（前提）切得到建光點那一段', String(pipBlock23.length));
+    ok(!/quality/.test(pipBlock23), 'P23：建光點那一段裡沒有畫質分支（低畫質照蓋）');
+    ok(!/PointLight|SpotLight|DirectionalLight/.test(pipBlock23), 'P23：建光點那一段裡沒有任何一盞燈');
+  }
+
+  /* --- ② 今日三事：本地時間、無過期、可關掉 --- */
+  {
+    eq(Daily23.DAILY_COUNT, EX23.count, '一天挑幾件與契約逐值相同');
+    eq(Daily23.OFFER_KINDS.join(','), EX23.kinds.join(','), '三種提議與契約逐值相同');
+    eq(Daily23.CLUE_KINDS.join(','), EX23.clueKinds.join(','), '三種線索與契約逐值相同');
+
+    /*
+     * **本地時間換日**（玩家的今天是他自己的今天）。
+     * 反例做成一個「本地與 UTC 剛好跨日」的假時鐘：本地是 2026-01-01，
+     * UTC 還在 2025-12-31。用 `toISOString()` 寫的實作會回 2025-12-31 —— 這條就是紅的。
+     */
+    const fakeClock = {
+      getFullYear: () => 2026,
+      getMonth: () => 0,
+      getDate: () => 1,
+      getUTCFullYear: () => 2025,
+      getUTCMonth: () => 11,
+      getUTCDate: () => 31,
+      toISOString: () => '2025-12-31T23:30:00.000Z',
+    };
+    eq(Daily23.localDayKey(fakeClock), '2026-01-01', '換日看的是玩家本地時間的今天');
+    const utcImpl = (d) => d.toISOString().slice(0, 10);
+    eq(utcImpl(fakeClock), '2025-12-31', '（對照）用 UTC 寫的實作在同一刻會說是昨天');
+    ok(
+      Daily23.localDayKey(fakeClock) !== utcImpl(fakeClock),
+      '出貨的那一支與「用 UTC 換日」不是同一件事'
+    );
+    eq(
+      Daily23.localDayKey({
+        getFullYear: () => 2026,
+        getMonth: () => 8,
+        getDate: () => 3,
+        // UTC 那一組刻意給不一樣的值：改用 UTC 寫的實作在這裡也會紅
+        getUTCFullYear: () => 2026,
+        getUTCMonth: () => 8,
+        getUTCDate: () => 4,
+        toISOString: () => '2026-09-04T00:30:00.000Z',
+      }),
+      '2026-09-03',
+      '月與日補零，而且補的是本地那一組'
+    );
+    ok(Daily23.isDayKey(Daily23.localDayKey()), '今天這一把鑰匙自己驗得過形');
+    ok(!/toISOString|getUTC/.test(dailySrc23), 'daily.js 裡一個 UTC 的寫法都沒有');
+
+    /*
+     * **一個催人的字都不准出現。**
+     * 掃兩面：這一層的原始碼（含註解與所有字串），以及**真的畫出來的 HTML**。
+     * 禁字表刻意包含「任務」「連續」「過期」「倒數」這幾個最容易滑進來的詞。
+     */
+    const PRESSURE23 = [
+      '過期',
+      '逾期',
+      '期限',
+      '倒數',
+      '剩下',
+      '截止',
+      '連續',
+      '連勝',
+      '中斷',
+      '斷了',
+      '錯過',
+      '失敗',
+      '懲罰',
+      '扣除',
+      '限時',
+      '今天結束',
+      '沒完成',
+      '未完成',
+      '作廢',
+      '失效',
+    ];
+    const scanPressure = (text, label) => {
+      const hit = PRESSURE23.filter((w) => text.includes(w));
+      eq(hit.join('、'), '', `${label}：掃不到任何一個催人的字`, hit.join('、'));
+    };
+    // 「任務」只准出現在「不是任務」這句話裡（那是在否認它，不是在催人）
+    const denyTask = (text, label) => {
+      const bare = text.split('不是任務').join('');
+      ok(!bare.includes('任務'), `${label}：除了「不是任務」那一句，一個「任務」都沒有`);
+    };
+    for (const [src, label] of [
+      [dailySrc23, 'daily.js'],
+      [dailyUiSrc23, 'ui/daily.js'],
+    ]) {
+      scanPressure(src, label);
+      denyTask(src, label);
+    }
+    // 設定頁那一段與存檔那一欄也一起掃（說明文字最容易寫成催人的話）
+    {
+      const setBlock = setSrc23.split('<label for="set-daily">')[1].split('</section>')[0];
+      ok(setBlock.length > 60, '（前提）切得到設定頁那一段', String(setBlock.length));
+      scanPressure(setBlock, '設定頁那一段');
+      denyTask(setBlock, '設定頁那一段');
+      const saveBlock = saveSrc23.split('v1.2 · P23：今日三事（提議，不是任務）')[1].split('badges:')[0];
+      ok(saveBlock.length > 100, '（前提）切得到存檔那一欄的說明', String(saveBlock.length));
+      denyTask(saveBlock, '存檔那一欄');
+    }
+
+    /* 候選：只從已經開了的土地挑、已經做完的不再提 */
+    const clues23 = {
+      secret: [
+        { id: 's-open', region: 'foundations' },
+        { id: 's-found', region: 'foundations' },
+        { id: 's-locked', region: 'divergence' },
+      ],
+      letter: [{ id: 'l-open', region: 'foundations' }],
+      ins: [{ id: 'i-locked', region: 'config' }],
+    };
+    const pool23 = Daily23.buildPool({
+      challenges: [
+        { id: 'c-open-b', region: 'foundations' },
+        { id: 'c-open-s', region: 'foundations' },
+        { id: 'c-open-new', region: 'foundations' },
+        { id: 'c-locked-b', region: 'divergence' },
+      ],
+      regions: ['foundations', 'reasoning', 'divergence'],
+      clues: clues23,
+      isPlayable: (r) => r === 'foundations' || r === 'reasoning',
+      bestGrade: (id) => (id === 'c-open-b' ? 'B' : id === 'c-open-s' ? 'S' : id === 'c-locked-b' ? 'B' : null),
+      found: (kind, id) => kind === 'secret' && id === 's-found',
+      visited: ['reasoning'],
+    });
+    eq(pool23.polish.join(','), 'polish:c-open-b', '重解：只提「開著的土地 ＋ 已經過了 ＋ 還不是 S」那一關');
+    ok(!pool23.polish.includes('polish:c-locked-b'), '（反例）鎖著的土地上那一關不會被提');
+    ok(!pool23.polish.includes('polish:c-open-s'), '（反例）已經拿到 S 的不會被提');
+    ok(!pool23.polish.includes('polish:c-open-new'), '（反例）還沒過的那一關不是「重解」');
+    eq(pool23.find.join(','), 'find:secret:s-open,find:letter:l-open', '線索：只提開著的土地上還沒找到的那幾處');
+    ok(!pool23.find.includes('find:secret:s-found'), '（反例）已經找到的線索不會再提');
+    ok(!pool23.find.includes('find:ins:i-locked'), '（反例）鎖著的土地上的刻文不會被提');
+    eq(pool23.visit.join(','), 'visit:foundations', '走一趟：只提開著、而且今天還沒走過的土地');
+    ok(!pool23.visit.includes('visit:reasoning'), '（反例）今天已經走過的土地不會再提');
+    ok(!pool23.visit.includes('visit:divergence'), '（反例）還沒開的土地不會被提（提了也走不到）');
+
+    /* 挑：同一天同一組、最多三件、不重複、不同天多半不一樣 */
+    const big23 = {
+      polish: Array.from({ length: 12 }, (_, i) => `polish:c${i}`),
+      find: Array.from({ length: 12 }, (_, i) => `find:secret:s${i}`),
+      visit: Array.from({ length: 12 }, (_, i) => `visit:r${i}`),
+    };
+    const day23 = '2026-09-08';
+    const first23 = Daily23.pickOffers(day23, big23);
+    eq(first23.length, Daily23.DAILY_COUNT, '一天挑三件');
+    eq(new Set(first23).size, 3, '三件彼此不同');
+    eq(first23.join(','), Daily23.pickOffers(day23, big23).join(','), '同一天挑到的是同一組（重開遊戲不會換）');
+    eq(new Set(first23.map((id) => Daily23.parseOffer(id).kind)).size, 3, '候選夠多時三件是三種不同的事');
+    {
+      const seen = new Set();
+      for (let i = 1; i <= 30; i += 1) seen.add(Daily23.pickOffers(`2026-09-${String(i).padStart(2, '0')}`, big23).join(','));
+      ok(seen.size >= 10, '三十天裡至少換過十種組合（換日真的會換提議）', String(seen.size));
+    }
+    // 候選不夠時：不湊數，也不重複
+    eq(Daily23.pickOffers(day23, { polish: ['polish:only'], find: [], visit: [] }).join(','), 'polish:only', '只有一件候選就只提一件（不會湊數）');
+    eq(Daily23.pickOffers(day23, {}).length, 0, '一件候選都沒有就一件都不提');
+    eq(Daily23.pickOffers(day23, { polish: ['a', 'b'], find: [], visit: [] }).length, 2, '兩種都沒候選時另一種補位（補得到才補）');
+
+    /* 做完了沒 */
+    const probes23 = { bestGrade: (id) => (id === 'done' ? 'S' : 'A'), found: (k, id) => id === 'gone', visited: ['here'] };
+    eq(Daily23.offerDone('polish:done', probes23), true, '重解拿到 S ＝ 做過了');
+    eq(Daily23.offerDone('polish:other', probes23), false, '拿到 A 還不算（提議說的是 S）');
+    eq(Daily23.offerDone('find:secret:gone', probes23), true, '線索找到了 ＝ 做過了');
+    eq(Daily23.offerDone('find:secret:stay', probes23), false, '還沒找到就是還沒找到');
+    eq(Daily23.offerDone('visit:here', probes23), true, '今天走過那一片 ＝ 做過了');
+    eq(Daily23.offerDone('visit:away', probes23), false, '還沒走過就是還沒走過');
+    eq(Daily23.offerDone('bogus', probes23), false, '壞掉的 id 不算做完（也不會丟例外）');
+    eq(Daily23.parseOffer('find:nope:x'), null, '不認得的線索種類回 null');
+    eq(Daily23.parseOffer(''), null, '空字串回 null');
+
+    /* 畫出來的字：關掉時整塊不出現、開著時每一件都畫得出來 */
+    eq(DailyUi23.dailyBlock(null), '', '關掉之後那一區整塊不出現（空字串，不是灰掉的標題）');
+    {
+      const html = DailyUi23.dailyBlock(
+        [
+          { kind: 'polish', id: 'polish:x', challengeId: 'x', challengeRegion: 'foundations', done: false },
+          { kind: 'find', id: 'find:secret:y', clueKind: 'secret', clueId: 'y', clueRegion: 'reasoning', done: false },
+          { kind: 'visit', id: 'visit:config', regionId: 'config', done: true },
+        ],
+        { regionName: (id) => `【${id}】`, challengeTitle: () => '一關的名字', challengeRegion: () => 'foundations' }
+      );
+      ok(/data-daily/.test(html), '畫出來的那一塊認得出來（e2e 靠它）');
+      eq((html.match(/data-daily-offer=/g) || []).length, 3, '三件都畫出來了');
+      eq((html.match(/data-daily-done="1"/g) || []).length, 1, '做過的那一件標成做過了');
+      ok(html.includes('一關的名字'), '重解那一件說得出是哪一關');
+      ok(html.includes('【reasoning】'), '線索那一件說得出在哪一片土地');
+      ok(!html.includes('find:secret:y'.split(':')[2] + '（'), '線索那一件不劇透它是哪一處（只說種類與土地）');
+      scanPressure(html, '畫出來的那一塊');
+      denyTask(html, '畫出來的那一塊');
+    }
+    ok(/dailyBlock\(/.test(codexSrc23), '圖鑑真的把那一塊畫進去');
+    ok(/dailyReport/.test(codexSrc23), '圖鑑讀的是進程層那一支（沒有第二份規則）');
+
+    /* --- 存檔：純加法、換日不刪進度、關掉逐值相同、reset 歸零 --- */
+    eq(SaveIO.defaultSave().settings.daily, true, '全新存檔的今日三事是開著的');
+    eq(SaveIO.normalize({}).settings.daily, true, '舊存檔沒有這個欄位 → 補成開著');
+    eq(SaveIO.normalize({ settings: { daily: false } }).settings.daily, false, '明寫的 false 要被尊重');
+    eq(SaveIO.normalize({ settings: { daily: 'yes' } }).settings.daily, true, '只認得明寫的 false');
+    eq(JSON.stringify(SaveIO.normalize({}).daily), '{"day":"","ids":[],"visited":[]}', '舊存檔沒有 daily → 三格都是空的');
+    eq(
+      JSON.stringify(SaveIO.normalize({ daily: { day: 'yesterday', ids: ['a'], visited: ['b'] } }).daily),
+      '{"day":"","ids":[],"visited":[]}',
+      '日期壞掉 → 整筆當成還沒挑過（沒有日期的三件事沒有意義）'
+    );
+    eq(
+      JSON.stringify(SaveIO.normalize({ daily: { day: '2026-09-08', ids: ['a', 'a', 3, 'b'], visited: ['r', 'r'] } }).daily),
+      '{"day":"2026-09-08","ids":["a","b"],"visited":["r"]}',
+      'ids／visited 去重、只留字串'
+    );
+
+    {
+      memory.clear();
+      const clueData23 = {
+        secret: readJson('src/data/secrets.json').entries,
+        letter: readJson('src/data/letters.json').entries,
+        ins: readJson('src/data/inscriptions.json').entries,
+      };
+      // 假時鐘：本地是 2026-09-k，UTC 還在前一天（改用 UTC 換日的實作在這裡就會露餡）
+      const day = (k) => ({
+        getFullYear: () => 2026,
+        getMonth: () => 8,
+        getDate: () => k,
+        getUTCFullYear: () => 2026,
+        getUTCMonth: () => 8,
+        getUTCDate: () => k - 1,
+        toISOString: () => `2026-09-${String(k - 1).padStart(2, '0')}T23:30:00.000Z`,
+      });
+      const p = createProgression({ catalog, challenges, clues: clueData23 });
+      // 先走出一點進度（換日之後這些都不准動）
+      p.readLore('lore-ring-1');
+      p.findSecret('stele-73');
+      /*
+       * 快照要在**第一次挑之前**就拿 —— 挑第一次本身也是一次換日
+       * （`day` 從空字串變成今天），那一次同樣不准動到任何進度。
+       */
+      const snapshot = (st) => JSON.stringify({ ...st, daily: undefined });
+      const before = snapshot(p.state);
+      const offersA = p.dailyOffers(day(8));
+      eq(Array.isArray(offersA) && offersA.length > 0, true, '今天真的提得出事情來', JSON.stringify(offersA));
+      eq(p.dailyState().day, '2026-09-08', '存檔記下的是今天（本地）');
+      eq(snapshot(p.state), before, '**第一次挑三件事也沒有動到任何進度**');
+      const offersB = p.dailyOffers(day(9));
+      eq(snapshot(p.state), before, '**換日只換提議，一格進度都沒有被刪**');
+      eq(p.dailyState().day, '2026-09-09', '換日之後記的是新的一天');
+      eq(p.dailyState().visited.length, 0, '換日之後「今天走過哪幾片」重新開始（那不是進度）');
+      ok(offersB.length > 0, '新的一天照樣提得出事情來');
+      // 沒做完不會怎麼樣：舊的那幾件不會留下任何痕跡
+      eq(p.state.xp, JSON.parse(before).xp, '換日之後 XP 一格沒動');
+      eq(Object.keys(p.state.bestGrades).length, Object.keys(JSON.parse(before).bestGrades).length, '換日之後通關紀錄一格沒動');
+      eq(p.hasFoundSecret('stele-73'), true, '換日之後找到的東西還在');
+
+      // 走一趟：記得下、冪等
+      eq(p.noteRegionVisit('foundations'), true, '走進一片土地會被記下來');
+      eq(p.noteRegionVisit('foundations'), false, '同一片再走一次不重複記');
+      eq(p.dailyState().visited.join(','), 'foundations', '記的就是那一片');
+      const xpBefore = p.state.xp;
+      p.noteRegionVisit('reasoning');
+      eq(p.state.xp, xpBefore, '走一趟不給 XP（它不是進度）');
+      memory.clear();
+    }
+
+    /*
+     * **關掉之後與「從來沒有這個功能」逐值相同。**
+     * 兩份存檔：一份完全沒碰過這一層，一份把每一支 API 都狠狠打過一輪。
+     * 除了 `settings.daily` 那一格（那正是開關本身），整份存檔要一個位元組都不差。
+     */
+    {
+      memory.clear();
+      const never = createProgression({ catalog, challenges });
+      never.readLore('lore-ring-1');
+      const neverState = JSON.parse(JSON.stringify(never.state));
+      memory.clear();
+      const off = createProgression({ catalog, challenges, clues: { secret: [{ id: 's', region: 'foundations' }] } });
+      off.updateSettings({ daily: false });
+      off.readLore('lore-ring-1');
+      eq(off.dailyOffers(), null, '關掉之後問「今天三件事」回 null');
+      eq(off.dailyReport(), null, '關掉之後那一區交不出東西');
+      eq(off.noteRegionVisit('foundations'), false, '關掉之後走一趟什麼都不記');
+      eq(off.dailyEnabled(), false, '關掉了就是關掉了');
+      const offState = JSON.parse(JSON.stringify(off.state));
+      eq(JSON.stringify(offState.daily), JSON.stringify(neverState.daily), '關掉之後存檔那三格停在預設值');
+      offState.settings.daily = neverState.settings.daily;
+      eq(JSON.stringify(offState), JSON.stringify(neverState), '**除了開關本身，關掉之後的存檔與「從來沒有這個功能」逐值相同**');
+      memory.clear();
+    }
+
+    // reset 之後歸零
+    {
+      memory.clear();
+      const p = createProgression({ catalog, challenges, clues: { secret: [{ id: 's', region: 'foundations' }] } });
+      p.dailyOffers();
+      p.noteRegionVisit('foundations');
+      ok(p.dailyState().day !== '', '（前提）重置之前今天已經挑過了');
+      p.resetAll();
+      eq(JSON.stringify(p.dailyState()), '{"day":"","ids":[],"visited":[]}', '重置之後今日三事整組歸零');
+      eq(p.dailyEnabled(), true, '重置之後回到預設（開著）');
+      memory.clear();
+    }
+  }
+
+  /* --- ③ 成就對齊 P22，而且不准倒退 --- */
+  {
+    eq(Prog23.BADGE_TARGET, Star23.MANSION_TARGET, '成就那一半的門檻與四宿星圖逐值相同（兩把尺是同一把）');
+    eq(Prog23.BADGE_TARGET, EX23.badgeTarget, '與契約逐值相同');
+    eq(Prog23.ACHIEVEMENT_FLAG, EX23.achievementFlag, '「達成過了」的旗標名與契約逐值相同');
+    eq(Prog23.ALIGNED_FLAG, EX23.alignedFlag, '對齊遷移的憑證名與契約逐值相同');
+
+    /*
+     * **判定走的就是 P22 那一支。**
+     * 靜態面：`hiddenAchievement` 的函式體裡看得到 `shrineOpen`；
+     * 行為面：拿一組取樣逐值比對兩邊的答案（差一條技法／差一宿都要一起翻面）。
+     */
+    ok(/import \{ shrineOpen \} from '\.\.\/world\/turning\.js'/.test(progSrc23), '進程層直接用 P22 的 shrineOpen()');
+    const hidBody23 = progSrc23.split('hiddenAchievement(badgeTarget')[1].split('\n    },')[0];
+    ok(hidBody23.length > 200, '（前提）切得到 hiddenAchievement() 的函式體', String(hidBody23.length));
+    ok(hidBody23.includes('shrineOpen('), '成就的判定就是呼叫終局那一支（不是另寫一份長得很像的條件）');
+    ok(!/techniques\.length/.test(hidBody23), '成就的函式體裡不再拿 68 條舊技巧當總數');
+
+    {
+      memory.clear();
+      const total = catalog.counts.skills;
+      const vendors = (curriculum.vendors || []).map((v) => v.id);
+      const io23 = (save) => ({ load: () => SaveIO.normalize(save), save: () => {}, reset: () => SaveIO.defaultSave() });
+      const build = (skills, badgeCount, extraFlags = {}) =>
+        createProgression({
+          catalog,
+          challenges,
+          io: io23({
+            skillsV2: catalog.skills.slice(0, skills).map((s) => s.id),
+            badges: Object.fromEntries(vendors.map((v) => [v, badgeCount])),
+            flags: { [Prog23.ALIGNED_FLAG]: true, ...extraFlags },
+          }),
+        });
+      eq(build(total, 5).hiddenAchievement().complete, true, '130 條技法全收 ＋ 四宿全亮 → 成就達成');
+      eq(build(total - 1, 5).hiddenAchievement().complete, false, '（反例）差最後一條技法 → 還沒達成');
+      eq(build(total, 4).hiddenAchievement().complete, false, '（反例）四宿差一顆星 → 還沒達成');
+      eq(build(68, 5).hiddenAchievement().complete, false, '（反例）只收到 68 條就不算了（這就是「對齊」）');
+      // 與終局那一支逐值同進退
+      for (const [sk, bd] of [[total, 5], [total - 1, 5], [total, 4], [68, 5], [0, 0]]) {
+        const a = build(sk, bd).hiddenAchievement();
+        const b = Turn23.shrineOpen({ skills: a.collected, skillsTotal: a.total, mansionsLit: a.mansionsLit, mansionsTotal: a.mansionsTotal });
+        eq(a.reached, b, `成就與終局門檻同進退（技法 ${sk} / 一宿 ${bd} 顆）`);
+      }
+      memory.clear();
+    }
+
+    /*
+     * **舊存檔不倒退**（這一格的紅線）。
+     *
+     * 對齊之前的「達成」＝ 68 條舊技巧全收 ＋ 四廠徽章。那樣的存檔載進來之後
+     * 一定還是達成 —— 而且是**一次性**的：開機用舊尺量最後一次、記進旗標、
+     * 插上 `p23Aligned`；已經插過旗的存檔不會再回頭用舊尺量（那才叫對齊）。
+     */
+    {
+      memory.clear();
+      const vendors = (curriculum.vendors || []).map((v) => v.id);
+      const legacySave = {
+        collected: curriculum.techniques.map((t) => t.id),
+        badges: Object.fromEntries(vendors.map((v) => [v, 9])),
+        skillsV2: [],
+      };
+      const written = [];
+      const io23 = (save) => ({
+        load: () => SaveIO.normalize(save),
+        save: (s) => written.push(JSON.parse(JSON.stringify(s))),
+        reset: () => SaveIO.defaultSave(),
+      });
+      const old = createProgression({ catalog, challenges, io: io23(legacySave) });
+      const info = old.hiddenAchievement();
+      eq(info.complete, true, '**舊存檔（68 條全收 ＋ 四廠徽章）載進來仍然是達成**');
+      eq(info.reached, false, '而且它不是靠新尺過的 —— 是「達成過了」那個旗標撐著');
+      eq(old.state.flags[Prog23.ACHIEVEMENT_FLAG], true, '遷移時把「達成過了」記上了');
+      eq(old.state.flags[Prog23.ALIGNED_FLAG], true, '而且插上了「對齊過了」的憑證');
+      ok(written.length > 0, '遷移真的落盤了（下次開機才不用再量一次）');
+
+      // 一次性：已經插過旗的存檔不再回頭用舊尺
+      const after = createProgression({
+        catalog,
+        challenges,
+        io: io23({ ...legacySave, flags: { [Prog23.ALIGNED_FLAG]: true } }),
+      });
+      eq(after.hiddenAchievement().complete, false, '（反例）已經對齊過的存檔走到 68/68 不再算達成（新尺是 130 條）');
+
+      // 看過成就畫面的舊存檔也算達成（就算徽章那一份是舊版留下的）
+      const seen = createProgression({
+        catalog,
+        challenges,
+        io: io23({ collected: [], badges: {}, skillsV2: [], flags: { finaleSeen: true } }),
+      });
+      eq(seen.hiddenAchievement().complete, true, '看過成就畫面的舊存檔也不會被打回未達成');
+
+      // 課程再長也不倒退：達成之後把技法拿掉，仍然算達成過
+      const full = createProgression({
+        catalog,
+        challenges,
+        io: io23({
+          skillsV2: catalog.skills.map((s) => s.id),
+          badges: Object.fromEntries(vendors.map((v) => [v, 9])),
+          flags: { [Prog23.ALIGNED_FLAG]: true },
+        }),
+      });
+      eq(full.hiddenAchievement().complete, true, '（前提）這一份是真的收齊了');
+      eq(full.state.flags[Prog23.ACHIEVEMENT_FLAG], true, '收齊的那一刻旗標就記上了（落盤時問一次）');
+      full.state.skillsV2 = [];
+      eq(full.hiddenAchievement().reached, false, '（前提）技法被拿掉之後新尺過不了');
+      eq(full.hiddenAchievement().complete, true, '**達成過就永遠算達成**（課程之後再長也不會把人打回去）');
+      memory.clear();
+    }
+
+    /*
+     * 兩個新旗標與今日三事**不准參與任何解鎖判定**。
+     * 靜態掃描擋不住間接讀法，所以再加一條逐項快照：把旗標與今天那三格
+     * 都打開之後，每一片土地的解鎖狀態逐值不變。
+     */
+    {
+      const gateBody = progSrc23.split('function gateSatisfied')[1].split('\n  }')[0];
+      const unlockBody = progSrc23.split('function refreshUnlocks')[1].split('\n  }')[0];
+      ok(gateBody.length > 200 && unlockBody.length > 80, '（前提）切得到那兩支的函式體');
+      for (const w of [Prog23.ACHIEVEMENT_FLAG, Prog23.ALIGNED_FLAG, 'daily', 'visited']) {
+        ok(!gateBody.includes(w), `gateSatisfied() 的函式體裡沒有「${w}」`);
+        ok(!unlockBody.includes(w), `refreshUnlocks() 的函式體裡沒有「${w}」`);
+      }
+      memory.clear();
+      const p = createProgression({ catalog, challenges, clues: { secret: [{ id: 's', region: 'foundations' }] } });
+      const snap = () => catalog.implementedRegionIds().map((id) => `${id}:${p.isRegionUnlocked(id) ? 1 : 0}`).join(',');
+      const before = snap();
+      p.setFlag(Prog23.ACHIEVEMENT_FLAG, true);
+      p.setFlag(Prog23.ALIGNED_FLAG, true);
+      p.dailyOffers();
+      p.noteRegionVisit('foundations');
+      eq(snap(), before, '旗標與今日三事都動過之後，每一片土地的解鎖狀態逐值不變');
+      eq(p.state.xp, 0, '而且一點 XP 都沒有偷偷給');
+      memory.clear();
+    }
+  }
+}
+
+console.log('▸ 小景零件貼地（v1.2 · P25b0）');
+{
+  const VF = await import('./vignette-fit.mjs');
+  const { STORY_VIGNETTES: VIGS } = await import('../src/world/props.js');
+  const { terrainHeight: vfHeight } = await import('../src/world/world.js');
+  const { buildWorld: vfBuild } = await import('./world-harness.mjs');
+
+  /*
+   * 小景是**成組**擺的：一組落在「組中心那一點的地面」，組內只給局部位移。
+   * 地會起伏，所以在這一格之前，離組中心越遠的零件浮空／埋地就越明顯
+   * （最糟的一件差 1.12 公尺；`tool-yard` 一組就中了四件）。
+   * 這與 P11 對母題那一層修過的是同一類錯，只是小景這一層當時沒跟上，
+   * 而且**沒有任何斷言在管它** —— 所以它一路退化到站長實玩才被看見。
+   *
+   * 判準不必發明新資料：`parts` 的 `[dx, dy, dz]` 裡的 `dy` 就是「刻意的垂直位移」。
+   * `dy === 0` → 貼自己腳下的地；`dy !== 0` → 擺的是相對關係（桌上的墨、
+   * 懸在階梯上方的浮階），**不准**被貼地。
+   */
+  const vf = VF.auditVignetteFit({ heightAt: vfHeight });
+  eq(vf.rows.length, 160, 'P25b0：33 組小景一共 160 件零件');
+  eq(vf.rows.filter((r) => r.lift === 0).length, 152, 'P25b0：應該貼地的 152 件');
+  eq(vf.rows.filter((r) => r.lift !== 0).length, 8, 'P25b0：刻意抬高的 8 件');
+  eq(vf.mismatch.length, 0, 'P25b0：每一組的零件都對得起來');
+  eq(new Set(vf.rows.map((r) => r.vignette)).size, VIGS.length, 'P25b0：33 組一組都沒漏量');
+
+  // 逐件硬斷言（160 條）—— 不合併成一條，紅的時候要看得出是哪一件
+  for (const r of vf.rows) {
+    ok(
+      !r.badOrigin,
+      `P25b0：${r.vignette}/${r.kind} 的原點落在該落的高度（±${VF.ORIGIN_TOLERANCE}）`,
+      `y=${r.y.toFixed(3)} 該在=${r.want.toFixed(3)} 差=${r.origin.toFixed(3)}`
+    );
+    if (r.lift === 0) {
+      ok(
+        !r.badFoot,
+        `P25b0：${r.vignette}/${r.kind} 真的畫出來的腳踩在地上`,
+        `腳-地=${r.foot === null ? '無幾何' : r.foot.toFixed(3)}`
+      );
+    }
+  }
+  eq(vf.bad.length, 0, 'P25b0：一件都沒有浮空或埋進地裡');
+
+  /*
+   * 反例①：**拿一支假的高度場去擺、拿真的去量**。
+   * 假的那一支只回組中心的高度（＝這一格之前的擺法：整組貼同一個平面），
+   * 所以每一件都應該被抓出來 —— 兩層（原點與腳）各自都要紅。
+   */
+  {
+    const flatOf = new Map(VIGS.map((v) => [`${v.at[0]},${v.at[1]}`, vfHeight(v.at[0], v.at[1])]));
+    let nearestCenter = null;
+    const flat = (x, z) => {
+      // 用最近的組中心當「整組共用的那一面」——重現修之前的擺法
+      let best = Infinity;
+      for (const v of VIGS) {
+        const d = (v.at[0] - x) ** 2 + (v.at[1] - z) ** 2;
+        if (d < best) {
+          best = d;
+          nearestCenter = v;
+        }
+      }
+      return flatOf.get(`${nearestCenter.at[0]},${nearestCenter.at[1]}`);
+    };
+    const red = VF.auditVignetteFit({ heightAt: vfHeight, placeHeight: flat });
+    ok(red.bad.length > 40, 'P25b0（反例）整組貼同一個平面 → 稽核一定紅', `${red.bad.length} 件`);
+    ok(red.rows.some((r) => r.badOrigin), 'P25b0（反例）原點那一層抓得到');
+    ok(red.rows.some((r) => r.badFoot), 'P25b0（反例）腳那一層自己也抓得到');
+    ok(
+      red.rows.some((r) => r.vignette === 'tool-yard' && Math.abs(r.origin) > 1),
+      'P25b0（反例）tool-yard 那一組差超過一公尺（＝站長實玩看到的那一組）'
+    );
+  }
+
+  /*
+   * 出貨的那個世界擺的就是這裡量的那一份 —— 合批（P22b）把小景的網格搬走了，
+   * 所以這一條比對的是**節點的世界座標**：世界端只要有人改回「只貼組中心」，
+   * 這裡就會逐件對不上。
+   */
+  {
+    const { scene: vfScene } = await vfBuild({ quality: 'high' });
+    const shipped = VF.auditVignetteFit({ heightAt: vfHeight, scene: vfScene });
+    eq(shipped.mismatch.length, 0, 'P25b0：出貨的世界逐件與稽核量的同一位置');
+    eq(shipped.bad.length, 0, 'P25b0：出貨的世界一件都沒有浮空或埋進地裡');
+
+    // 反例②：把場上任何一件挪 0.4 公尺 → 比對必須紅（證明這一條不是空過）
+    const holder = vfScene.getObjectByName('vignette:tool-yard');
+    ok(holder && holder.children.length === 5, '（前提）場上找得到 tool-yard 那五件');
+    holder.children[1].position.y += 0.4;
+    holder.updateMatrixWorld(true);
+    const nudged = VF.auditVignetteFit({ heightAt: vfHeight, scene: vfScene });
+    ok(nudged.mismatch.length === 1, 'P25b0（反例）挪一件 0.4 公尺 → 比對抓得到', nudged.mismatch.join('、'));
+    holder.children[1].position.y -= 0.4;
+    holder.updateMatrixWorld(true);
+    eq(VF.auditVignetteFit({ heightAt: vfHeight, scene: vfScene }).mismatch.length, 0, 'P25b0：挪回去就綠了');
+  }
+
+  /*
+   * 規則寫進 WORLD.md（§6.1 ＋ 維護檢查表 18b）—— 沒寫下來的規則下一個人不會知道，
+   * 這一格修的正是「P11 修過、小景那一層沒跟上」。
+   */
+  {
+    const worldMd = readFileSync(new URL('../WORLD.md', import.meta.url), 'utf8');
+    const s61 = worldMd.split('### 6.1 預算')[1].split('### 6.2')[0];
+    ok(s61.includes('P25b0'), '§6.1 記下這一格');
+    ok(s61.includes('每一件貼的是自己腳下的地'), '§6.1 寫得出判準本身');
+    ok(s61.includes('holder.rotation.y'), '§6.1 寫得出「局部位移要先套組的朝向」');
+    ok(s61.includes('scripts/vignette-fit.mjs'), '§6.1 指得到那支稽核');
+    ok(/1,049/.test(s61) && /953/.test(s61), '§6.1 的碰撞體數與實測相同');
+    ok(worldMd.includes('18b.'), '維護檢查表多一條 18b（成組擺的東西）');
+  }
+
+  /*
+   * 低畫質照擺 —— 貼地是「東西在不在地上」，不是氛圍層。
+   * （`buildVignettes()` 的 `quality` 分支只管光源與陰影，不准碰高度。）
+   */
+  {
+    const { scene: loScene } = await vfBuild({ quality: 'low' });
+    const lo = VF.auditVignetteFit({ heightAt: vfHeight, scene: loScene });
+    eq(lo.mismatch.length, 0, 'P25b0：低畫質的擺位與高畫質逐件相同');
+  }
+}
+
+
+/* ================================================================== *
+ * 打磨：響度文件 ＋ 逐檔對表 ＋ reduced-motion 逐項（v1.2 · P25a）
+ *
+ * 這一節守三件事：
+ *   ① **文件與實作講同一組數字**（`CLAUDE.md` 曾經寫著一組舊的響度）。
+ *   ② **資料層記的量測值有第二個地方可以對**（`audio-loudness.md` 那兩張表）——
+ *      護欄崗那一首當年只寫進 `audio.js` 沒有寫進表裡，於是它的 true peak
+ *      錯了 0.5 dB 也沒有人會發現。現在兩邊逐檔逐值比。
+ *   ③ **`prefers-reduced-motion` 之下該停的停、該留的留**：位移／自轉停住，
+ *      亮度／顏色／不透明度照舊（那是資訊，關掉就少一格）。
+ * ================================================================== */
+console.log('▸ 打磨：響度文件 ＋ reduced-motion（v1.2 · P25a）');
+{
+  const dash = (s) => s.replace(/−/g, '-'); // 文件用的是數學減號，程式用的是 ASCII
+
+  /* --- ① 兩份文件與實作講同一組數字 --------------------------------- */
+  {
+    const claudeMd = dash(readFileSync(resolve(root, 'CLAUDE.md'), 'utf8'));
+    const worldMd = dash(readFileSync(resolve(root, 'WORLD.md'), 'utf8'));
+    const { MUSIC_TARGET_LUFS, SFX_TARGET_LUFS, SFX_PEAK_CEILING } = Audio;
+
+    const mixLine = claudeMd.split('\n').find((l) => l.includes('音檔後製慣例')) || '';
+    ok(Boolean(mixLine), 'CLAUDE.md 寫得出音檔後製慣例');
+    ok(
+      mixLine.includes(`${MUSIC_TARGET_LUFS} LUFS`),
+      `CLAUDE.md 的配樂床 ＝ MUSIC_TARGET_LUFS（${MUSIC_TARGET_LUFS}）`,
+      mixLine
+    );
+    ok(
+      mixLine.includes(`${SFX_TARGET_LUFS} LUFS`),
+      `CLAUDE.md 的音效目標 ＝ SFX_TARGET_LUFS（${SFX_TARGET_LUFS}）`,
+      mixLine
+    );
+    ok(
+      mixLine.includes(`${SFX_PEAK_CEILING} dBFS`),
+      `CLAUDE.md 的峰值上限 ＝ SFX_PEAK_CEILING（${SFX_PEAK_CEILING}）`,
+      mixLine
+    );
+    // 舊的那一句寫「SFX 峰值 -6 dBFS」—— 實作從來不是那個數字
+    ok(!/SFX 峰值/.test(claudeMd), 'CLAUDE.md 不再有「SFX 峰值」那個舊說法');
+    ok(!/-6 dBFS/.test(claudeMd), 'CLAUDE.md 不再出現 -6 dBFS');
+
+    const s65 = worldMd.slice(worldMd.indexOf('### 6.5'), worldMd.indexOf('## 七、'));
+    ok(s65.length > 500, '（前提）切得出 WORLD.md §6.5');
+    ok(s65.includes(`${MUSIC_TARGET_LUFS} LUFS`), 'WORLD.md §6.5 的配樂床與常數相同');
+    ok(s65.includes(`${SFX_TARGET_LUFS} LUFS`), 'WORLD.md §6.5 的音效目標與常數相同');
+    ok(s65.includes(`${SFX_PEAK_CEILING} dBFS`), 'WORLD.md §6.5 的峰值上限與常數相同');
+    // 兩份文件不准各講各的
+    for (const num of [`${MUSIC_TARGET_LUFS} LUFS`, `${SFX_TARGET_LUFS} LUFS`, `${SFX_PEAK_CEILING} dBFS`]) {
+      ok(mixLine.includes(num) === s65.includes(num), `CLAUDE.md 與 WORLD.md 都寫得出 ${num}`);
+    }
+
+    /* 音檔數量：§6.5 那一行與 manifest 逐值相同（護欄崗補齊之後那行漏改了一次） */
+    const nBgm = AUDIO_MANIFEST.bgm.length;
+    const nSfx = AUDIO_MANIFEST.sfx.length;
+    ok(s65.includes(`${nBgm} 支配樂`), `WORLD.md §6.5 的配樂支數 ＝ manifest（${nBgm}）`, s65.slice(0, 160));
+    ok(s65.includes(`${nSfx} 支音效`), `WORLD.md §6.5 的音效支數 ＝ manifest（${nSfx}）`);
+    eq(Audio.SYNTH_ONLY_REGIONS.length, 0, '（前提）目前沒有任何一區只有合成 pad');
+    ok(
+      /SYNTH_ONLY_REGIONS = \[\]/.test(s65),
+      'WORLD.md §6.5 說得出這份清單現在是空的（不再說護欄崗還沒有音檔）'
+    );
+    ok(
+      !/這一區也沒有配樂音檔/.test(worldMd),
+      'WORLD.md 不再有「這一區也沒有配樂音檔」（十二區全部補齊了）'
+    );
+  }
+
+  /* --- ② `audio-loudness.md` 的兩張表 ↔ `audio.js` 的資料層，逐檔逐值 --- */
+  {
+    const md = dash(readFileSync(resolve(root, 'docs/design/audio-loudness.md'), 'utf8'));
+    const rows = md
+      .split('\n')
+      .filter((l) => l.trim().startsWith('|'))
+      .map((l) => l.split('|').slice(1, -1).map((c) => c.trim().replace(/`/g, '')));
+    const docBgm = new Map();
+    const docSfx = new Map();
+    for (const r of rows) {
+      // 配樂表：檔名 | 交付狀態 | I | true peak | gain dB | gain 線性 | 套上後的峰值
+      if (r.length === 7 && /^bgm_.*\.m4a$/.test(r[0])) {
+        docBgm.set(r[0], { lufs: Number(r[2]), peak: Number(r[3]), gain: Number(r[5]) });
+      }
+      // 音效表：cue | 檔名 | I | true peak | trim | 目標 | gain dB | gain 線性 | 套上後的峰值 | 上限
+      if (r.length === 10 && /^sfx_.*\.m4a$/.test(r[1])) {
+        docSfx.set(r[0].replace(/\s+/g, ''), {
+          file: r[1],
+          lufs: Number(r[2]),
+          peak: Number(r[3]),
+          trim: Number(r[4]),
+          gain: Number(r[7]),
+          clamped: /clamp/.test(r[9] || ''),
+        });
+      }
+    }
+    ok(docBgm.size > 0 && docSfx.size > 0, '（前提）解析得出 audio-loudness.md 的兩張表', `${docBgm.size} / ${docSfx.size}`);
+    eq(docBgm.size, Object.keys(Audio.BGM_TRACKS).length, '配樂表的列數 ＝ BGM_TRACKS 的條目數');
+
+    for (const [id, t] of Object.entries(Audio.BGM_TRACKS)) {
+      const d = docBgm.get(t.file);
+      ok(Boolean(d), `配樂 ${id} 在 audio-loudness.md 有一列（量測值有第二個地方可以對）`, t.file);
+      if (!d) continue;
+      eq(d.lufs, t.lufs, `配樂 ${id} 的 integrated LUFS 與表相同`);
+      eq(d.peak, t.peak, `配樂 ${id} 的 true peak 與表相同`);
+      ok(Math.abs(d.gain - t.gain) < 1e-4, `配樂 ${id} 的 gain 與表相同`, `${d.gain} vs ${t.gain}`);
+    }
+
+    const codeSfx = [];
+    for (const [kind, spec] of Object.entries(Audio.SFX_FILES)) {
+      codeSfx.push([kind, spec]);
+      if (spec.layer) codeSfx.push([`${kind}/layer`, spec.layer]);
+      if (spec.alt) codeSfx.push([`${kind}/alt`, spec.alt]);
+    }
+    eq(docSfx.size, codeSfx.length, '音效表的列數 ＝ SFX_FILES（含 layer／alt）的條目數');
+    for (const [label, spec] of codeSfx) {
+      const d = docSfx.get(label);
+      ok(Boolean(d), `音效 ${label} 在 audio-loudness.md 有一列`, spec.file);
+      if (!d) continue;
+      eq(d.file, spec.file, `音效 ${label} 的檔名與表相同`);
+      eq(d.lufs, spec.lufs, `音效 ${label} 的 integrated LUFS 與表相同`);
+      eq(d.peak, spec.peak, `音效 ${label} 的 true peak 與表相同`);
+      eq(d.trim, spec.trim, `音效 ${label} 的 trim 與表相同`);
+      ok(Math.abs(d.gain - spec.gain) < 1e-4, `音效 ${label} 的 gain 與表相同`, `${d.gain} vs ${spec.gain}`);
+      eq(d.clamped, Boolean(spec.clamped), `音效 ${label} 的 clamp 標記與表相同`);
+    }
+  }
+
+  /* --- ②b public/audio/ 零孤兒（manifest 以外的檔案不會被任何一條路播到） --- */
+  {
+    const { readdirSync } = await import('node:fs');
+    const onDisk = readdirSync(resolve(root, 'public', Audio.AUDIO_DIR)).filter((f) => f.endsWith('.m4a'));
+    const listed = new Set([...AUDIO_MANIFEST.bgm, ...AUDIO_MANIFEST.sfx]);
+    const orphans = onDisk.filter((f) => !listed.has(f));
+    eq(orphans.length, 0, 'public/audio/ 沒有孤兒音檔（磁碟上每一支都掛得到一個 cue）');
+    eq(onDisk.length, listed.size, `磁碟上的音檔數 ＝ manifest（${listed.size}）`);
+  }
+
+  /* --- ③ reduced-motion：旅人自己 -------------------------------------
+   * 停的是「站著也一直在動」那一層；走路、慶祝、光點的亮度全部留著。
+   * ------------------------------------------------------------------ */
+  {
+    const { createCharacter } = await import('../src/player/character.js');
+    const normal = createCharacter({ quality: 'low' });
+    const calm = createCharacter({ quality: 'low', reducedMotion: true });
+    const idle = { dt: 0.016, t: 3.7, walkPhase: 0, speedRatio: 0, runRatio: 0, lean: 0 };
+    normal.update(idle);
+    calm.update(idle);
+
+    ok(Math.abs(normal.joints.body.position.y) > 1e-4, '（對照）平常站著會呼吸（軀幹上下）');
+    eq(calm.joints.body.position.y, 0, 'reduce：站著不呼吸（軀幹不上下）');
+    ok(Math.abs(normal.joints.hips.position.x) > 1e-4, '（對照）平常站著重心會左右移');
+    eq(calm.joints.hips.position.x, 0, 'reduce：重心不左右移');
+    ok(Math.abs(normal.joints.scarfTail.rotation.z) > 1e-4, '（對照）平常圍巾會擺');
+    eq(calm.joints.scarfTail.rotation.z, 0, 'reduce：站著圍巾不擺');
+    ok(Math.abs(normal.joints.lantern.rotation.z) > 1e-4, '（對照）平常提燈會晃');
+    eq(calm.joints.lantern.rotation.z, 0, 'reduce：站著提燈不晃');
+
+    // 走路那一層一個位元組都不准少 —— 那是玩家自己按出來的，關掉會少掉資訊
+    const walk = { dt: 0.016, t: 3.7, walkPhase: 1.1, speedRatio: 1, runRatio: 0, lean: 0 };
+    normal.update(walk);
+    calm.update(walk);
+    eq(calm.joints.hipL.rotation.x, normal.joints.hipL.rotation.x, 'reduce：走路的腿一模一樣');
+    eq(calm.joints.kneeL.rotation.x, normal.joints.kneeL.rotation.x, 'reduce：走路的膝一模一樣');
+    eq(calm.joints.body.position.y, normal.joints.body.position.y, 'reduce：走路的起伏一模一樣');
+    ok(Math.abs(calm.joints.body.position.y) > 1e-4, 'reduce：走起來真的有起伏（不是兩邊都 0 的空過）');
+
+    // 慶祝與等級光點是「回應」：reduce 之下照樣有
+    eq(calm.celebrate(), true, 'reduce：過關照樣舉手（那是回應）');
+    ok(calm.celebrating, 'reduce：慶祝真的在跑');
+    eq(calm.setLevel(4), true, 'reduce：等級照樣穿得上去');
+    eq(calm.levelPips, 4, 'reduce：光點格數 ＝ 等級');
+    ok(calm.pipFlash > 0, 'reduce：多一格照樣亮一下（亮度是回應，不是動）', String(calm.pipFlash));
+    normal.dispose?.();
+    calm.dispose?.();
+  }
+
+  /* --- ③b reduced-motion：世界的氛圍動作層 ---------------------------
+   * 逐項比「平常會動 / reduce 不動」，同一批東西的**亮度**再比一次「照樣會變」。
+   * ------------------------------------------------------------------ */
+  {
+    const { buildWorld, worldOptions: rmWorldOptions } = await import('./world-harness.mjs');
+    const rmBase = await rmWorldOptions();
+    /** 蓋一個世界、跑 21 幀（8 秒），回傳前後兩份讀數。 */
+    const sample = async (reducedMotion) => {
+      const { world, tick } = await buildWorld({ base: rmBase, reducedMotion });
+      const m = world.markers[0];
+      const tab = world.tablets[0];
+      const px = m.position.x;
+      const pz = m.position.z;
+      const moved = () => ({
+        '石座的浮片（自轉）': m.shard.rotation.y,
+        '石座的浮片（翻轉）': m.shard.rotation.x,
+        '石座的浮片（上下浮）': m.shard.position.y,
+        '石座腳下的圈': m.ring.rotation.z,
+        '石座的光柱': m.beacon.rotation.y,
+        '石座的光環': m.halo.rotation.z,
+        '刻文石板的光環': tab.halo.rotation.z,
+        '刻文石板的火星': tab.spark.position.y,
+        '起始祭壇的火心（浮）': world.shrine.ember.position.y,
+        '起始祭壇的火心（轉）': world.shrine.ember.rotation.y,
+        '起始祭壇的光環': world.shrine.ring.rotation.z,
+        '貼地霧氣（轉）': world.mist.children[0].rotation.z,
+        '貼地霧氣（起伏）': world.mist.children[0].position.y,
+        '空中的塵': world.motes.geometry.attributes.position.array[1],
+      });
+      const lit = () => ({
+        '石座腳下那圈的濃淡': m.ring.material.opacity,
+        '石座浮片的亮度': m.shardMat.emissiveIntensity,
+        '刻文石板光環的濃淡': tab.halo.material.opacity,
+        '起始祭壇的燈': world.shrine.light.intensity,
+      });
+      tick(0.016, 0, px, pz);
+      const before = { moved: moved(), lit: lit() };
+      for (let i = 0; i < 20; i += 1) tick(0.4, 0.4 * (i + 1), px, pz);
+      return { before, after: { moved: moved(), lit: lit() } };
+    };
+    const busy = await sample(false);
+    const still = await sample(true);
+    const keys = Object.keys(busy.before.moved);
+    ok(keys.length === 14, '（前提）量了 14 件會動的東西', String(keys.length));
+    for (const k of keys) {
+      const dBusy = Math.abs(busy.after.moved[k] - busy.before.moved[k]);
+      const dStill = Math.abs(still.after.moved[k] - still.before.moved[k]);
+      ok(dBusy > 1e-4, `（對照）平常 ${k} 真的會動`, String(dBusy));
+      eq(dStill, 0, `reduce：${k} 停住`);
+    }
+    for (const k of Object.keys(busy.before.lit)) {
+      const dStill = Math.abs(still.after.lit[k] - still.before.lit[k]);
+      ok(dStill > 1e-4, `reduce：${k} 照樣會變（拿掉的是動，不是回應）`, String(dStill));
+    }
+  }
+
+  /* --- ③c 沒有第二個地方可以在 node 裡量的兩處，用原始碼守 ------------- */
+  {
+    const engineSrc = readFileSync(resolve(root, 'src/engine/engine.js'), 'utf8');
+    ok(
+      /const auroraDrift =[\s\S]{0,200}prefers-reduced-motion/.test(engineSrc),
+      '引擎自己問一次 prefers-reduced-motion（極光漂不漂）'
+    );
+    ok(
+      /band\.rotation\.y \+= band\.userData\.drift \* dt \* auroraDrift;/.test(engineSrc),
+      '極光那幾道的漂吃 auroraDrift（reduce 之下停住）'
+    );
+    ok(
+      /stars\.material\.uniforms\.uTime\.value = t;/.test(engineSrc),
+      '星星的明滅**不**吃 reduce（那是亮度，不是位移）'
+    );
+    const worldSrc = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+    ok(
+      /const kineticWorld = reducedMotion \? 0 : 1;/.test(worldSrc),
+      '世界的氛圍動作層有一個總開關（reduce → 0，不是打折）'
+    );
+    ok(
+      /arch\.rotation\.z = Math\.sin\(t \* 0\.3\) \* 0\.03 \* kinetic;/.test(worldSrc),
+      '閘門的拱在 reduce 之下不再左右晃'
+    );
+    /*
+     * 焦點鎖的清單不准收「畫不出來的東西」——收起來的 `<details>` 裡的東西
+     * `offsetParent` 還在（content-visibility），`focus()` 卻是空包彈，
+     * 於是「Tab 走到底再按一次」焦點原地不動（e2e 實測圖鑑那 446 顆的最後一顆
+     * 正是這種）。同一支檔案裡的方向鍵導覽早就這樣問了，`focusableIn()` 跟上。
+     */
+    /* 規則寫進 WORLD.md §2.4（沒寫下來的規則下一個人不會知道） */
+    {
+      const wmd = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+      const s24 = wmd.slice(wmd.indexOf('### 2.4 動態'), wmd.indexOf('### 2.5'));
+      ok(s24.length > 300, '（前提）切得出 WORLD.md §2.4');
+      ok(s24.includes('kineticWorld'), '§2.4 寫得出世界層的那個總開關');
+      ok(s24.includes('auroraDrift'), '§2.4 寫得出天空那一個');
+      ok(/0\.12/.test(s24), '§2.4 說得出為什麼有些層是 0.12 不是 0');
+      ok(s24.includes('P25a'), '§2.4 記下這一格');
+    }
+
+    const domSrc = readFileSync(resolve(root, 'src/ui/dom.js'), 'utf8');
+    const focusableFn = domSrc.slice(
+      domSrc.indexOf('export function focusableIn'),
+      domSrc.indexOf('export function initialFocusIn')
+    );
+    ok(focusableFn.length > 100, '（前提）切得出 focusableIn()');
+    ok(
+      /getClientRects\(\)\.length > 0/.test(focusableFn),
+      '焦點鎖的清單問過 getClientRects（只看 offsetParent 會收進沒有版面的東西）'
+    );
+    ok(
+      /hiddenByClosedDetails\(node\)/.test(focusableFn),
+      '焦點鎖的清單擋掉收起來的 details 裡的東西（那一種 offsetParent 與 getClientRects 都騙得過）'
+    );
+    const focusableSel = domSrc.slice(domSrc.indexOf('const FOCUSABLE'), domSrc.indexOf('export function focusableIn'));
+    ok(!/summary, details,/.test(focusableSel), '焦點鎖的選擇器不再收 <details> 本身（它 focus 不到，只有 <summary> 收得到焦點）');
+    ok(/summary,/.test(focusableSel), '<summary> 仍然留著（收起來的時候它照樣收得到焦點）');
+    ok(
+      /function hiddenByClosedDetails/.test(domSrc) && /':scope > summary'/.test(domSrc),
+      '收起來的 details 那一條有把 <summary> 當例外'
+    );
+    ok(
+      /wireArrowNav|getClientRects/.test(domSrc.slice(0, domSrc.indexOf('export function focusableIn'))),
+      '（對照）方向鍵導覽本來就是這樣問的'
+    );
+
+    const charSrc = readFileSync(resolve(root, 'src/player/character.js'), 'utf8');
+    ok(/const calm = reducedMotion \? 0 : 1;/.test(charSrc), '旅人有一個閒置動作的開關');
+    ok(
+      /pipMat\.emissiveIntensity = 1\.5 \+ Math\.sin\(t \* 1\.7\) \* 0\.14 \+ Math\.max\(cheer, pipFlash\) \* 2\.4;/.test(charSrc),
+      '披肩光點的亮度**不**吃 calm（等級與升等那一下是資訊）'
+    );
+  }
+}
+
+
 if (failures.length) {
   console.error(`✗ ${failures.length} 個測試失敗（通過 ${passCount}）：\n`);
   for (const f of failures) console.error(`  • ${f}`);

@@ -315,16 +315,56 @@ export function rovingList(container, itemSelector) {
   });
 }
 
-/** 可被鍵盤 focus 的元素（焦點鎖用）。 */
+/**
+ * 可被鍵盤 focus 的元素（焦點鎖用）。
+ *
+ * v1.2 · P25a：**`details` 從這張表上拿掉**。沒有 `tabindex` 的 `<details>` 在 Chrome 上
+ * `tabIndex` 是 -1、`focus()` 是空包彈 —— 收得到焦點的一直都只有它的 `<summary>`。
+ * 它留在表上的後果不是「多一顆」，是**焦點鎖的「最後一顆」可能誰也不是**。
+ */
 const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, details, [tabindex]:not([tabindex="-1"])';
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
 
-/** 面板裡目前可 focus 的元素（看得見的才算）。 */
+/**
+ * 這個節點是不是躺在一個**收起來的** `<details>` 裡（那一段沒有被畫出來）。
+ *
+ * 為什麼要單獨問這一條：收起來的 `<details>` 的內容在 Chrome 上走的是
+ * `::details-content` 的 `content-visibility: hidden` —— 那是個**內部 pseudo-element**，
+ * 不是 DOM 節點。所以 `offsetParent` 還在、`getClientRects()` 還有一個框、
+ * `getComputedStyle()` 上上下下也找不到任何一層 hidden，**但 `focus()` 就是不會過去**。
+ * 實測圖鑑那一面：76 顆候選裡有 48 顆 focus 不到（24 顆是 `<details>` 本身，
+ * 24 顆是收起來的 `<details>` 裡的出處連結）。
+ *
+ * `<summary>` 是例外：收起來的時候它照樣畫得出來、照樣收得到焦點。
+ */
+function hiddenByClosedDetails(node) {
+  for (let d = node.closest('details'); d; d = d.parentElement?.closest('details') || null) {
+    if (d.open) continue;
+    const summary = d.querySelector(':scope > summary');
+    if (!(summary && summary.contains(node))) return true;
+  }
+  return false;
+}
+
+/**
+ * 面板裡目前可 focus 的元素（看得見的才算）。
+ *
+ * v1.2 · P25a：清單上**每一顆都要真的 focus 得到**。焦點鎖拿這張清單決定
+ * 「第一顆 / 最後一顆」，只要那兩顆其中之一 focus 不到，就會發生
+ * 「Tab 走到底再按一次，焦點原地不動」。實測圖鑑那一面 76 顆候選裡有 48 顆是這樣。
+ * 所以這裡問三件事：
+ *   ① `getClientRects()`（方向鍵那一支早就這樣問了，這裡跟上）——擋掉沒有版面的；
+ *   ② `hiddenByClosedDetails()` ——擋掉收起來的 `<details>` 裡的東西
+ *      （那一種**騙得過** offsetParent 與 getClientRects，見那支函式的說明）；
+ *   ③ 選擇器本身不再收 `<details>`（見 FOCUSABLE）。
+ */
 export function focusableIn(root) {
   return Array.from(root.querySelectorAll(FOCUSABLE)).filter((node) => {
     if (node.hidden || node.getAttribute('aria-hidden') === 'true') return false;
+    if (node === document.activeElement) return true;
+    if (hiddenByClosedDetails(node)) return false;
     // offsetParent 為 null = 被隱藏（position:fixed 例外，但面板內不會有）
-    return node.offsetParent !== null || node === document.activeElement;
+    return node.offsetParent !== null && node.getClientRects().length > 0;
   });
 }
 

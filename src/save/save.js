@@ -21,6 +21,20 @@ export const SAVE_KEY = 'promptasy.v1.save';
 export const LEGACY_SAVE_KEYS = Object.freeze(['promptarcade.v1.save']);
 export const SAVE_VERSION = 1;
 
+/**
+ * v1.2 · P16c：守夜人聊得出來的四種情報 id。
+ * 存檔的 `watchmen[*].seen` 只認得這四個 —— 資料層的真相住在
+ * `src/progression/watchtalk.js` 的 `WATCH_TOPICS`，這裡逐字相同（`test:rubric` 比對）。
+ */
+export const WATCH_TOPICS = Object.freeze(['stuck', 'way', 'lore', 'skill']);
+
+/** v1.2 · P23：今日三事的日期長什麼樣（`YYYY-MM-DD`，玩家本地時間的今天）。 */
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** 一天最多存幾個提議 id（`daily.js` 的 `DAILY_COUNT` 是 3；這裡留一格餘裕給壞存檔）。 */
+const DAILY_IDS_MAX = 4;
+/** 一天最多記幾片走過的土地（世界一共 12 片）。 */
+const DAILY_VISITED_MAX = 16;
+
 /** 全新存檔。 */
 export function defaultSave() {
   return {
@@ -42,6 +56,8 @@ export function defaultSave() {
     secretsFound: [],
     // Phase 25：已經動過的器物 id（陶罐 / 火盆 / 響石…；純風味，不進圖鑑、不算徽章）
     handlesUsed: [],
+    // v1.2 · P07：撿到的抄寫人殘頁 id（一半教一件小事、一半純風味；不佔關卡評價）
+    lettersFound: [],
     // Phase 29：玩家選擇「先行前往」而提前開啟的閘門（區域 id）。
     // 純記帳用 —— 它只說明「這道門是被問開的，不是被考過的」，
     // 不影響 XP、圖鑑、徽章，也不會把任何一關算成已通關。
@@ -78,6 +94,99 @@ export function defaultSave() {
     penlessSeals: [],
     scribeSeals: [],
     samplesSeen: [],
+    /**
+     * v1.2 · P10b · 最少技巧達成（`leanSeals`）：用**不多於內建最精簡範例解**的技法數
+     * 通過的關卡 id。純加法、冪等、不給 XP、不進 `bestGrades`、不是任何東西的解鎖條件。
+     *
+     * 刻意**沒有**「最少字」那一枚 —— 短 ≠ 好 prompt（roadmap §0 鐵則明文否決）。
+     */
+    leanSeals: [],
+    /**
+     * v1.2 · P02：濁靈（murks.json）的安撫進度 —— **單一物件欄** `{ [murkId]: { hits, grade } }`。
+     *
+     *   hits   已命中的 rubric 列 index（整數、去重、排序）—— 跨次**累積聯集，永不清零**
+     *   grade  安撫後的最佳評價（'S'|'A'|'B'|'C'）；還沒安撫＝ null
+     *
+     * 為什麼不用 `bestGrades`：那是 142 關的分子（已通關數／稱號／區域解鎖／統計全靠它），
+     * 濁靈不是關卡。這一欄純加法：不影響 `refreshUnlocks()`、圖鑑技巧數、徽章、印記；
+     * `normalize()` 給 `{}`、逐鍵驗形；`reset()` 自然清空。
+     */
+    murks: {},
+    /**
+     * v1.2 · P16c：守夜人（watchmen.json）—— **單一物件欄** `{ [watchmanId]: { met, seen } }`。
+     *
+     *   met   聊過了沒（走近按 `E` 開過那扇小窗就算）
+     *   seen  問過哪幾種情報（'stuck' | 'way' | 'lore' | 'skill'，去重）
+     *
+     * 純加法，而且**一格都不影響進度**：不給 XP、不寫 `bestGrades`、不進 142 關的分母、
+     * 不收技巧、不算徽章、不是任何東西的解鎖條件（`refreshUnlocks()` 從頭到尾沒讀過它）。
+     * 它只決定「腳下那一圈光要不要留一點餘溫」與「技巧小知識輪到第幾條」。
+     */
+    watchmen: {},
+    /**
+     * v1.2 · P16c：卡在哪一關（`struggles`）—— **單一物件欄**
+     * `{ [challengeId]: { tries, hits } }`。
+     *
+     *   tries  這一關**沒過**的呈遞次數（過了就整筆刪掉 —— 過了就不是卡關）
+     *   hits   跨次**累積**命中過的檢查器 id（同濁靈的聯集，永不清零）
+     *
+     * 守夜人的「卡關提示」讀的就是這一欄：試最多次、還沒過的那一關，
+     * 指向它 rubric 裡還沒命中的那一條。同樣純加法、不影響任何既有欄位。
+     */
+    struggles: {},
+    /**
+     * v1.2 · P18：守門者（guardian.json）—— **單一物件欄**
+     * `{ [guardianId]: { hits, turns, convinced } }`。
+     *
+     *   hits       交辦上已經對上的那幾行（門閂 id，去重排序）—— 跨次**累積聯集，永不清零**
+     *   turns      跟他說過幾句（純記帳）
+     *   convinced  說服過了沒（說服過就不會退回去）
+     *
+     * 純加法，而且**一格都不影響進度**：不給 XP、不寫 `bestGrades`、不進 142 關的分母、
+     * 不收技巧、不算徽章、不是任何東西的解鎖條件（`refreshUnlocks()` 從頭到尾沒讀過它）。
+     * 它只決定「他胸前那塊板亮了幾行」與「腳下那一圈要不要留餘溫」。
+     */
+    guardians: {},
+    /**
+     * v1.2 · P19：推開了哪幾條**相鄰區捷徑**（`world.js` 的 `SHORTCUTS`）——
+     * **單一物件欄** `{ [shortcutId]: true }`。
+     *
+     * 純加法，而且**只往開的方向走**：推開了就不會再關上（`normalize()` 只留 `true`，
+     * 所以壞值與 `false` 一律等於「還沒推開」）。它不給 XP、不進圖鑑、不算徽章、
+     * 不是任何東西的解鎖條件（`refreshUnlocks()` 從頭到尾沒讀過它）——
+     * 它只決定「那道門底下那 2.4 公尺走不走得過去」。
+     */
+    shortcuts: {},
+    /**
+     * v1.2 · P07：玩家在**序章**送出的第一段 prompt（原文，去頭尾空白、≤ 280 字）。
+     *
+     * 「第一句就是第一句」—— 寫進去之後永不覆寫（`captureFirstPrompt()` 只寫一次）。
+     * 只存在這台裝置上，不上傳、不進分享卡；終局（P22）會把它還給玩家。
+     * 舊存檔沒有這一欄 → `normalize()` 給空字串，終局改用「你最好的一句」。
+     */
+    firstPrompt: '',
+    /**
+     * v1.2 · P22：母碑上刻的那一行（空字串＝碑面留白）。
+     *
+     * 這是玩家在終局重寫的那一句 —— 也是玩家自己打的字。
+     * **只有明確按下「刻上去」才會寫進來**；選了「不刻」＝這一欄根本不會有東西
+     * （不存就不可能外流）。它只留在這台裝置上，不上傳；顯示的一方一律 HTML escape。
+     * 刻上去之後才會出現在帶得走的那張刻印記錄上。
+     */
+    motherStele: '',
+    /**
+     * v1.2 · P23：今日三事（提議，不是任務）。
+     *
+     *   day     `YYYY-MM-DD`（**玩家本地時間**的今天；空字串＝還沒挑過）
+     *   ids     今天那三個提議的 id（見 `src/progression/daily.js`）
+     *   visited 今天走過哪幾片土地（「走一趟」那一種提議看它）
+     *
+     * 純加法，而且**一格都不影響進度**：不給 XP、不寫 `bestGrades`、不收技巧、
+     * 不算徽章、不是任何東西的解鎖條件。換日只是換三個提議 ——
+     * 這裡沒有「連著幾天」、沒有「錯過」、沒有任何會讓玩家少一樣東西的欄位。
+     * 設定裡關掉之後，這三格永遠停在預設值（那一層一個字都不寫）。
+     */
+    daily: { day: '', ids: [], visited: [] },
     badges: { openai: 0, anthropic: 0, google: 0, xai: 0 },
     settings: {
       music: 'ambient-01',
@@ -89,6 +198,10 @@ export function defaultSave() {
       promptMode: 'guided',
       // Phase 17：效能監視器（右上角的即時數字）。預設關閉 —— 它是給想看的人用的診斷面板
       perfMonitor: false,
+      // v1.2 · P19：螢火指路（螢火群整體流向下一個建議去處）。預設開啟 —— 它是導覽，不是特效
+      guides: true,
+      // v1.2 · P23：今日三事。預設開啟 —— 它是提議，不是任務；關掉之後與從來沒有這個功能一樣
+      daily: true,
     },
     flags: { introSeen: false, prologueDone: false },
   };
@@ -108,6 +221,35 @@ function storage() {
 }
 
 const num = (v, fallback) => (Number.isFinite(v) ? v : fallback);
+/** v1.2 · P07：`firstPrompt` 的上限（字元）。超過就截斷 —— 它是一句話，不是一篇文章。 */
+export const FIRST_PROMPT_MAX = 280;
+/**
+ * v1.2 · P07：把任意值正規化成可以存的 `firstPrompt`。
+ * 純文字：去頭尾空白、把控制字元換成空白（跨行照樣留著換行）、截到 280 字。
+ * 顯示的一方永遠要自己跳脫（HTML escape）—— 這裡不動玩家寫的字。
+ */
+export function firstPrompt(v) {
+  if (typeof v !== 'string') return '';
+  // eslint-disable-next-line no-control-regex
+  const clean = v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').trim();
+  return clean.length > FIRST_PROMPT_MAX ? clean.slice(0, FIRST_PROMPT_MAX) : clean;
+}
+/**
+ * v1.2 · P22：母碑上那一行的上限（字元）—— 與第一句同一把尺。
+ * 碑上刻的是一句話，不是一篇文章；兩邊共用同一個數字，之後改也只改一處。
+ */
+export const MOTHER_STELE_MAX = FIRST_PROMPT_MAX;
+/**
+ * v1.2 · P22：把任意值正規化成可以刻上母碑的一行。
+ *
+ * 清洗規則與 `firstPrompt()` **逐字相同**（去頭尾空白、控制字元換成空白、截到上限），
+ * 而且同樣**不動玩家寫的字** —— HTML escape 是顯示那一方的責任。
+ * 走同一支的理由：兩欄裝的是同一種東西（玩家自己打的一句話），
+ * 清洗規則分兩份就是等著哪一天只修到其中一份。
+ */
+export function motherStele(v) {
+  return firstPrompt(v);
+}
 const strArr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : null);
 
 /** 版本遷移。目前只有 v1；未來新增版本時在此往上補。 */
@@ -136,6 +278,95 @@ export function normalize(raw) {
     }
   }
 
+  /*
+   * v1.2 · P02：濁靈進度。逐鍵驗形：`hits` 必須是陣列（不是就整筆丟）、裡面只留
+   * 非負整數並去重排序；`grade` 只認 S/A/B/C，其餘（含 undefined）一律 null；
+   * 存了 grade ＝ 安撫過，而安撫一定至少命中一列 —— 沒有 hits 的 grade 是壞值，落成 null。
+   */
+  const murks = {};
+  if (d.murks && typeof d.murks === 'object' && !Array.isArray(d.murks)) {
+    for (const [k, v] of Object.entries(d.murks)) {
+      if (typeof k !== 'string' || !k || k.length > 64) continue;
+      if (!v || typeof v !== 'object' || !Array.isArray(v.hits)) continue;
+      const hits = [...new Set(v.hits.filter((n) => Number.isInteger(n) && n >= 0))].sort((a, b) => a - b);
+      const grade = hits.length && typeof v.grade === 'string' && ['S', 'A', 'B', 'C'].includes(v.grade) ? v.grade : null;
+      murks[k] = { hits, grade };
+    }
+  }
+
+  /*
+   * v1.2 · P16c：守夜人。逐鍵驗形 —— `met` 一律落成布林；`seen` 只留認得的四種情報 id、
+   * 去重排序。整筆都不合形就丟掉（壞值不該讓遊戲開不起來，也不該被當成真的）。
+   */
+  const watchmen = {};
+  if (d.watchmen && typeof d.watchmen === 'object' && !Array.isArray(d.watchmen)) {
+    for (const [k, v] of Object.entries(d.watchmen)) {
+      if (typeof k !== 'string' || !k || k.length > 64) continue;
+      if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+      const seen = [...new Set((Array.isArray(v.seen) ? v.seen : []).filter((x) => WATCH_TOPICS.includes(x)))].sort();
+      watchmen[k] = { met: Boolean(v.met) || seen.length > 0, seen };
+    }
+  }
+
+  /*
+   * v1.2 · P16c：卡在哪一關。`tries` 是非負整數（不是就整筆丟）、`hits` 只留字串並去重排序。
+   * 沒有 `hits` 的 `tries` 是合法的（第一次就全掛）—— 那正是守夜人最該講的一種。
+   */
+  const struggles = {};
+  if (d.struggles && typeof d.struggles === 'object' && !Array.isArray(d.struggles)) {
+    for (const [k, v] of Object.entries(d.struggles)) {
+      if (typeof k !== 'string' || !k || k.length > 64) continue;
+      if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+      const tries = Number.isFinite(v.tries) ? Math.max(0, Math.round(v.tries)) : 0;
+      if (tries <= 0) continue;
+      const hits = [...new Set((Array.isArray(v.hits) ? v.hits : []).filter((x) => typeof x === 'string' && x))].sort();
+      struggles[k] = { tries, hits };
+    }
+  }
+
+  /*
+   * v1.2 · P18：守門者。逐鍵驗形 —— `hits` 必須是陣列（不是就整筆丟）、裡面只留字串並去重排序；
+   * `turns` 落成非負整數；`convinced` 落成布林。
+   * **只往累積的方向落**：對上過的那幾行是聯集，這裡沒有任何一條路把它變短。
+   */
+  const guardians = {};
+  if (d.guardians && typeof d.guardians === 'object' && !Array.isArray(d.guardians)) {
+    for (const [k, v] of Object.entries(d.guardians)) {
+      if (typeof k !== 'string' || !k || k.length > 64) continue;
+      if (!v || typeof v !== 'object' || !Array.isArray(v.hits)) continue;
+      const hits = [...new Set(v.hits.filter((x) => typeof x === 'string' && x && x.length <= 64))].sort();
+      const turns = Number.isFinite(v.turns) ? Math.max(0, Math.round(v.turns)) : 0;
+      guardians[k] = { hits, turns, convinced: Boolean(v.convinced) };
+    }
+  }
+
+  /*
+   * v1.2 · P19：捷徑。逐鍵驗形 —— 只留**明明白白是 `true`** 的那幾條；
+   * 其餘（`false`、字串、物件、壞鍵）一律當成「還沒推開」而直接不收。
+   * 這一欄沒有任何一條路可以把已經開的門關回去（同濁靈／守門者的聯集規矩）。
+   */
+  const shortcuts = {};
+  if (d.shortcuts && typeof d.shortcuts === 'object' && !Array.isArray(d.shortcuts)) {
+    for (const [k, v] of Object.entries(d.shortcuts)) {
+      if (typeof k !== 'string' || !k || k.length > 64) continue;
+      if (v === true) shortcuts[k] = true;
+    }
+  }
+
+  /*
+   * v1.2 · P23：今日三事。`day` 驗形（`YYYY-MM-DD`）；**日期壞掉就整筆當成還沒挑過** ——
+   * 沒有日期的三個提議是沒有意義的（不知道它們是哪一天的）。
+   * `ids` / `visited` 只留字串、去重、各自截斷。這一欄沒有任何一條路可以扣掉進度。
+   */
+  const daily = { day: '', ids: [], visited: [] };
+  if (d.daily && typeof d.daily === 'object' && !Array.isArray(d.daily) && DAY_KEY_RE.test(String(d.daily.day || ''))) {
+    daily.day = d.daily.day;
+    const pick = (v, cap) =>
+      [...new Set((Array.isArray(v) ? v : []).filter((x) => typeof x === 'string' && x && x.length <= 96))].slice(0, cap);
+    daily.ids = pick(d.daily.ids, DAILY_IDS_MAX);
+    daily.visited = pick(d.daily.visited, DAILY_VISITED_MAX);
+  }
+
   const settings = { ...base.settings };
   if (d.settings && typeof d.settings === 'object') {
     if (typeof d.settings.music === 'string') settings.music = d.settings.music;
@@ -148,6 +379,10 @@ export function normalize(raw) {
     settings.promptMode = d.settings.promptMode === 'free' ? 'free' : 'guided';
     // Phase 17：效能監視器。舊存檔沒有這個欄位 → 預設關閉。
     settings.perfMonitor = d.settings.perfMonitor === true;
+    // v1.2 · P19：螢火指路。舊存檔沒有這個欄位 → 預設開啟；**只認得明寫的 false**。
+    settings.guides = d.settings.guides !== false;
+    // v1.2 · P23：今日三事。舊存檔沒有這個欄位 → 預設開啟；**只認得明寫的 false**。
+    settings.daily = d.settings.daily !== false;
   }
 
   // flags 一律存布林值；未知的旗標也保留（例如 finaleSeen、各區精通提示）
@@ -192,6 +427,8 @@ export function normalize(raw) {
     secretsFound: [...new Set(strArr(d.secretsFound) || [])],
     // Phase 25：舊存檔沒有 handlesUsed → 空陣列（純加法，不影響任何既有欄位）
     handlesUsed: [...new Set(strArr(d.handlesUsed) || [])],
+    // v1.2 · P07：舊存檔沒有 lettersFound → 空陣列（純加法）
+    lettersFound: [...new Set(strArr(d.lettersFound) || [])],
     // Phase 29：舊存檔沒有 skippedGates → 空陣列（純加法）
     skippedGates: [...new Set(strArr(d.skippedGates) || [])],
     // 課程 v2 Phase B：舊存檔沒有 skillsV2 → 空陣列（純加法，不影響任何既有欄位）
@@ -201,6 +438,22 @@ export function normalize(raw) {
     penlessSeals: [...new Set(strArr(d.penlessSeals) || [])],
     scribeSeals: [...new Set(strArr(d.scribeSeals) || [])],
     samplesSeen: [...new Set(strArr(d.samplesSeen) || [])],
+    // v1.2 · P10b：舊存檔沒有 leanSeals → 空陣列（純加法，不影響任何既有欄位）
+    leanSeals: [...new Set(strArr(d.leanSeals) || [])],
+    // v1.2 · P02：舊存檔沒有 murks → 空物件（純加法，不影響任何既有欄位）
+    murks,
+    watchmen,
+    struggles,
+    // v1.2 · P18：舊存檔沒有 guardians → 空物件（純加法，不影響任何既有欄位）
+    guardians,
+    // v1.2 · P19：舊存檔沒有 shortcuts → 空物件（純加法；一條都沒推開）
+    shortcuts,
+    // v1.2 · P23：舊存檔沒有 daily → 三格都是空的（純加法；今天還沒挑過三件事）
+    daily,
+    // v1.2 · P07：舊存檔沒有 firstPrompt → 空字串（純加法）。壞值一律落成空字串。
+    firstPrompt: firstPrompt(d.firstPrompt),
+    // v1.2 · P22：舊存檔沒有 motherStele → 空字串（純加法）＝ 碑面留白。壞值一律落成空字串。
+    motherStele: motherStele(d.motherStele),
     bestGrades,
     badges,
     settings,
@@ -273,4 +526,17 @@ export function reset() {
   return defaultSave();
 }
 
-export default { SAVE_KEY, LEGACY_SAVE_KEYS, SAVE_VERSION, defaultSave, normalize, load, save, reset };
+export default {
+  SAVE_KEY,
+  LEGACY_SAVE_KEYS,
+  SAVE_VERSION,
+  FIRST_PROMPT_MAX,
+  firstPrompt,
+  MOTHER_STELE_MAX,
+  motherStele,
+  defaultSave,
+  normalize,
+  load,
+  save,
+  reset,
+};

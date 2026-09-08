@@ -1064,6 +1064,64 @@ export function runPlaytestVerify({ ok, eq }) {
       ok(typeof c.sample === 'string' && c.sample.length > 20, `[${c.id}] playtest：仍然寫得出一份可以拿 S 的參考解答`);
     }
   }
+
+  /* --- v1.2 · P01：濁靈 —— 範例解 ≥ A、濁言原文不過（部分命中是允許的） --- */
+  {
+    const murkFile = readJson('src/data/murks.json');
+    const murks = murkFile.entries || [];
+    ok(murks.length === 20, `playtest：20 隻濁靈 —— 8 隻小的 ＋ 12 隻大的（實際 ${murks.length}）`);
+    for (const m of murks) {
+      const tag = `[${m.id}]`;
+      const sample = evaluate(m, m.sample);
+      ok(
+        sample.passed && GRADE_RANK[sample.grade] >= GRADE_RANK.A,
+        `${tag} playtest：範例解至少 A`,
+        `grade=${sample.grade} earned=${sample.earned}/${sample.total}`
+      );
+      const primary = (m.rubric || []).find((r) => r.primary);
+      const primaryResult = primary && sample.results.find((r) => r.check === primary.check);
+      ok(primaryResult && primaryResult.score === 1, `${tag} playtest：範例解真的做到主檢查 ${primary && primary.check}`);
+      const taint = evaluate(m, m.taint);
+      ok(!taint.passed, `${tag} playtest：濁言原文送進去必不過`, `earned=${taint.earned}/${taint.total} pass=${m.pass}`);
+      ok(!taint.tooShort, `${tag} playtest：濁言不是靠太短才不過`, String(m.taint.length));
+      const taintPrimary = primary && taint.results.find((r) => r.check === primary.check);
+      ok(taintPrimary && taintPrimary.score < 1, `${tag} playtest：濁言沒有剛好做到主檢查（不然沒有東西可以學）`);
+      // 濁靈的流程住在 murks.json 自己身上（flows.json 是 142 關的，一個位元組都不動）
+      ok(!flowFile.flows[m.id], `${tag} playtest：濁靈的流程沒有寫進 flows.json`);
+      ok(!Array.isArray(m.quickFills) || m.quickFills.length === 0, `${tag} playtest：濁靈沒有快速填入`);
+
+      /* --- v1.2 · P06b：選擇式作答 —— 全選正解 ≥ A、一段對一層殼 --- */
+      const flow = m.flow;
+      ok(Boolean(flow) && Array.isArray(flow.slots), `${tag} playtest：濁靈有選擇式作答的流程`);
+      if (flow && Array.isArray(flow.slots)) {
+        ok(flow.slots.length === m.rubric.length, `${tag} playtest：段數 ＝ rubric 條數（${flow.slots.length} / ${m.rubric.length}）`);
+        const rightOf = (s) => s.options.find((o) => o.correct);
+        const assembled = flow.slots.map((s) => rightOf(s).text).join('\n');
+        ok(assembled === m.sample, `${tag} playtest：全選正解組出來的就是 sample（逐值相同）`);
+        const all = evaluate(m, assembled);
+        ok(
+          all.passed && GRADE_RANK[all.grade] >= GRADE_RANK.A,
+          `${tag} playtest：全選正解至少 A`,
+          `grade=${all.grade} earned=${all.earned}/${all.total}`
+        );
+        all.results.forEach((r, i) => {
+          ok(r.passed, `${tag} playtest：全選正解 → 第 ${i + 1} 條檢查（${r.check}）亮著`, r.evidence);
+        });
+        flow.slots.forEach((slot, i) => {
+          for (const [j, wrong] of slot.options.entries()) {
+            if (wrong.correct) continue;
+            const text = flow.slots.map((s, k) => (k === i ? wrong.text : rightOf(s).text)).join('\n');
+            const e2 = evaluate(m, text);
+            ok(
+              !e2.results[i].passed,
+              `${tag} playtest：第 ${i + 1} 段選錯（${j + 1} 號）→ 第 ${i + 1} 條檢查不亮（一段對一層殼）`,
+              `score=${e2.results[i].score}`
+            );
+          }
+        });
+      }
+    }
+  }
 }
 
 /* --- 單獨執行時自己印報告 --- */

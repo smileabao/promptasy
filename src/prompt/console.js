@@ -142,6 +142,53 @@ function tickUp(node, ms = 900) {
 /** 連續幾次沒過之後解鎖「看看範例」（先自己試，試不出來才給答案）。 */
 export const SAMPLE_AFTER_FAILS = 2;
 
+/**
+ * v1.2 · P01：這一份「委託」是不是一隻濁靈（kind === 'murk'）。
+ * 濁靈走同一座主控台，但不是關卡：不記 guidanceSeen／samplesSeen、不走 recordResult。
+ */
+const isMurk = (c) => Boolean(c && c.kind === 'murk');
+
+/**
+ * v1.2 · P03：`onRubricHits` 回呼的資料（以 **rubric 陣列 index** 為穩定 ID）。
+ * 純函式，主控台在 recorder 回傳後、畫結果之前呼叫一次；rubric 測試也直接測它。
+ *
+ *   · 濁靈（`kind === 'murk'`）：直接用 recorder 的 `outcome.murk` ——
+ *     `passedIndices` ＝ 存檔累積 `hits`、`newlyPassedIndices` ＝ 相對於存檔的新增（重開面板不重播）。
+ *   · 關卡（給 P09）：`passedIndices` ＝ 這一次 `results[i].passed === true` 的 index；
+ *     `newlyPassedIndices` ＝ 相對於「本次開啟主控台 session 內已命中集合」（`sessionHits`，`open()` 清空）的新增。
+ *   · `total` ＝ rubric 條數（＝濁靈的殼數）。
+ *
+ * @param {object} challenge
+ * @param {object} evaluation   evaluate() 的結果
+ * @param {object} outcome      recorder 的回傳（濁靈才有 `murk` 子物件）
+ * @param {Set<number>} sessionHits  session 內已命中集合（會被就地更新）
+ * @returns {{challenge:object, passedIndices:number[], newlyPassedIndices:number[], total:number}}
+ */
+export function rubricHitsFor(challenge, evaluation, outcome, sessionHits) {
+  const rubric = (challenge && challenge.rubric) || [];
+  const total = rubric.length;
+  const mk = isMurk(challenge) && outcome && outcome.murk ? outcome.murk : null;
+  if (mk) {
+    const passedIndices = Array.isArray(mk.hits) ? mk.hits.slice() : [];
+    const newlyPassedIndices = Array.isArray(mk.newlyPassedIndices) ? mk.newlyPassedIndices.slice() : [];
+    // 濁靈多帶一份 recorder 的 murk 子物件（calmed／newlyCalmed），世界端不用自己猜「這一次才安撫」
+    return { challenge, passedIndices, newlyPassedIndices, total, murk: { ...mk } };
+  }
+  const results = (evaluation && evaluation.results) || [];
+  const passedIndices = [];
+  const newlyPassedIndices = [];
+  for (let i = 0; i < results.length; i += 1) {
+    if (results[i] && results[i].passed === true) {
+      passedIndices.push(i);
+      if (sessionHits && !sessionHits.has(i)) {
+        newlyPassedIndices.push(i);
+        sessionHits.add(i);
+      }
+    }
+  }
+  return { challenge, passedIndices, newlyPassedIndices, total };
+}
+
 /** 停手多久之後，漂浮提示球會自己「呼吸」一下提醒你它在那裡（毫秒）。 */
 export const ORB_IDLE_MS = 20000;
 
@@ -253,7 +300,17 @@ export function normalizeMode(value) {
 export function createPromptConsole({
   content,
   progression,
+  /**
+   * v1.2 · P10b：解法的**內建分布**（`createSolutionStats(solution-stats.json)`）。
+   * 沒給也照樣運作 —— 只是結果面少那一行（離線護欄：多的東西壞掉不能弄壞核心迴圈）。
+   */
+  solutionStats = null,
   onResult,
+  /**
+   * v1.2 · P03：`onRubricHits({ challenge, passedIndices, newlyPassedIndices, total })` ——
+   * recorder 回傳後、畫結果之前觸發一次（世界端拿它剝殼；P09 拿它演石座）。見 `rubricHitsFor`。
+   */
+  onRubricHits,
   onSubmit,
   onClose,
   onChime,
@@ -286,6 +343,11 @@ export function createPromptConsole({
   let rejects = 0;
   /** 上一次預檢時「已經亮起來」的檢查 id —— 用來偵測「這一項剛剛才亮」。 */
   let litBefore = new Set();
+  /**
+   * v1.2 · P03：本次開啟主控台 session 內已命中的 rubric index（非 murk 的 `onRubricHits` 差量基準）。
+   * `open()` 時清空；濁靈不用它（牠的差量看存檔）。
+   */
+  const sessionHits = new Set();
   /** 漂浮提示球目前指著哪一條檢查（在還沒做到的項目之間循環）。 */
   let coachIndex = 0;
   let coachOpen = false;
@@ -926,6 +988,13 @@ export function createPromptConsole({
     // 試煉沒有第二幕：任何想去第二幕的請求（含 Enter 推進）一律落到刻印
     const seq = actOrder();
     if (!seq.includes(n)) n = seq[Math.min(seq.indexOf(act) + 1, seq.length - 1)];
+    /*
+     * 重訪一隻已經安撫過的大濁靈：每一層都散掉了，石碑一開就是刻滿的 ——
+     * 第三幕沒有任何一段可以刻（問句區是空的），所以直接走到手掌印那一幕。
+     * 條件用「每一段都是存檔裡帶來的」，不是「刻滿了」：一般關卡自己刻滿之後
+     * 仍然回得去第三幕看那塊石碑。
+     */
+    if (n === 3 && isGuided() && board().allSettled === true) n = 4;
     if (!force && !canGoAct(n)) return act;
     const changed = n !== act;
     act = n;
@@ -936,7 +1005,8 @@ export function createPromptConsole({
       sec.hidden = !inActs.includes(String(n));
     }
     // 看過指引就記下來：下次重玩這一關可以直接跳到刻印
-    if (n === 2 && current) progression.markGuidanceSeen(current.id);
+    // （v1.2 · P01：濁靈不是關卡 —— 牠的 id 不進 guidanceSeen，這一個 phase 一個位元組都不落盤）
+    if (n === 2 && current && !isMurk(current)) progression.markGuidanceSeen(current.id);
     renderActNav();
     if (changed) overlay.resetScroll();
     if (focus) {
@@ -1305,7 +1375,8 @@ export function createPromptConsole({
     if (sampleBtn.disabled || !current || !current.sample) return;
     sampleShown = true;
     // 大師層的防作弊面：範例翻開過就**永久**記著（關掉重開再拿 S 也不算「沒看範例」）
-    progression.markSampleSeen?.(current.id);
+    // （v1.2 · P01：濁靈不是關卡 —— 不記）
+    if (!isMurk(current)) progression.markSampleSeen?.(current.id);
     textarea.value = current.sample;
     updateCount();
     runPreflight();
@@ -1706,17 +1777,46 @@ export function createPromptConsole({
      * 判定本身寫在 progression（`masterSealFor`），這裡只負責誠實回報
      * 「這一次到底用了什麼輔助」。
      */
-    const outcome = progression.recordResult(evaluation, {
+    const meta = {
       mode: isGuided() ? 'guided' : 'free',
       attempt: attempts,
       usedQuickFill,
       usedCoach,
       rejects,
       sampleShown,
-    });
+    };
+    /*
+     * v1.2 · P01／P02：濁靈走**另一個** recorder。`recordResult` 會進 bestGrades、給 XP、
+     * 收技巧、refreshUnlocks —— 那是 142 關的分子，濁靈不能污染它。
+     * `recordMurk(challenge, evaluation, meta)` 落盤到 `state.murks`（命中累積聯集、安撫、評價、XP 差額），
+     * 回傳與 recordResult 同形的 13 鍵 ＋ `murk` 子物件，所以下面的解參照一個都不用改。
+     */
+    const outcome = isMurk(challenge)
+      ? progression.recordMurk(challenge, evaluation, meta)
+      : progression.recordResult(evaluation, meta);
     lastEvaluation = evaluation;
+    /*
+     * v1.2 · P03：命中的檢查先讓世界看見（剝殼／清燈），再畫結果 ——
+     * 回呼在 recorder 回傳後、畫結果之前只觸發一次；回呼裡丟例外不能弄壞結果面。
+     */
+    if (onRubricHits) {
+      try {
+        onRubricHits(rubricHitsFor(challenge, evaluation, outcome, sessionHits));
+      } catch (err) {
+        console.warn('[console] onRubricHits 回呼失敗：', err);
+      }
+    }
     /** 試煉不教新技巧 —— 畫面上不放官方連結（curriculum-v2 §5.2）。 */
     const trial = isApplicationTrial(challenge);
+    /*
+     * v1.2 · P02：濁靈的結果面 —— 沒有「本關」、沒有分享（牠不是關卡）。
+     * 印章、分數條、逐列、提示球、範例解鎖：全部看**這一次**（evaluation），跟關卡一模一樣；
+     * 濁靈自己的**累積**狀態（`outcome.murk`：聯集、安撫、最佳評價）只佔分數條下面**一行**
+     * （`[data-murk-newly]`）—— 上次命中的列記在存檔裡、永不清零，這一次補上剩下的也算聽懂了，
+     * 所以會有「這一次沒過、但牠聽懂了」的誠實組合：印章是這一次的，那一行才是牠的。
+     */
+    const murkResult = isMurk(challenge);
+    const murkInfo = murkResult && outcome.murk ? outcome.murk : null;
 
     const rows = evaluation.results
       .map((r, i) => {
@@ -1751,14 +1851,94 @@ export function createPromptConsole({
       .join('');
 
     const next = nextGradeTarget(evaluation);
+    /** 過關那一行的收穫（+N XP · 升等 · 評價進步）—— 關卡與濁靈共用同一段標記。 */
+    const gainLine = (o) =>
+      `<span class="xp-tick" data-xptick data-to="${o.xpGain}">+${o.xpGain}</span> XP${
+        o.leveledUp ? ` · 升到 Lv.${o.levelAfter}！` : ''
+      }${o.improved && o.previousGrade ? ` · 評價 ${o.previousGrade} → ${o.bestGrade}` : ''}${
+        o.xpGain === 0 ? '（本關已拿過更高評價）' : ''
+      }`;
+    /** 濁靈的累積那一行：這一次才安撫 ＞ 早就安撫 ＞ 這一次有新命中 ＞ 沒有。 */
+    const murkLine = (() => {
+      if (!murkInfo) return '';
+      const cum = `累積 ${formatScore(murkInfo.score)} / ${formatScore(murkInfo.total)}`;
+      if (murkInfo.newlyCalmed) {
+        return `<p class="gain murk-newly" data-murk-newly>牠聽懂了。這一句話，你替牠說完了。${
+          outcome.xpGain > 0 ? ` ${gainLine(outcome)}` : ''
+        }${outcome.bestGrade && !outcome.previousGrade ? ` · 評價 ${outcome.bestGrade}` : ''}</p>`;
+      }
+      if (murkInfo.calmed) {
+        return `<p class="muted murk-newly" data-murk-newly>牠早就聽懂了 · ${cum}${
+          outcome.bestGrade ? ` · 最佳評價 ${outcome.bestGrade}` : ''
+        }${outcome.xpGain > 0 ? ` · ${gainLine(outcome)}` : ''}</p>`;
+      }
+      if (murkInfo.newlyPassedIndices.length) {
+        return `<p class="muted murk-newly" data-murk-newly>這一次替牠說清楚了 ${murkInfo.newlyPassedIndices.length} 處 · ${cum}</p>`;
+      }
+      return '';
+    })();
     const collected = outcome.newlyCollected
       .map((id) => content.technique(id))
       .filter(Boolean)
       .map((t) => `<li><b>${esc(t.title)}</b> <span class="muted">${esc(t.id)}</span></li>`)
       .join('');
 
-    // 揭示序列的節拍：評價印章 → 分數 → 一條條檢查 → 收穫 → 出處
+    // 揭示序列的節拍：評價印章 → 分數 → 一條條檢查 → 這一次站在哪裡 → 收穫 → 出處
     const tail = evaluation.results.length;
+
+    /*
+     * v1.2 · P10b：解法的位置感（Zachtronics 式的「你在分布的哪裡」，但**誠實標示是內建分布**）。
+     *
+     * 過關才說（分布講的是「解得開的人怎麼寫」）；濁靈沒有分布；試煉的 rubric 條數
+     * 對不上時 `standingFor()` 自己會回 null —— 寧可不說，也不說不準的話。
+     * 「最少技巧達成」在這裡順手入袋（純加法的 `leanSeals`，不給 XP、不動評價）。
+     */
+    let standing = null;
+    try {
+      // 這一層是「多的」：它壞掉不准弄壞結果面（同 onRubricHits 的守法）
+      standing = !murkResult && solutionStats ? solutionStats.standingFor?.(challenge, evaluation) || null : null;
+    } catch (err) {
+      console.warn('[console] 解法分布查不動：', err);
+      standing = null;
+    }
+    /*
+     * 徽章的防作弊面**與其他大師印記同一套**（`masterSealFor` 的規矩）：
+     * 翻開過範例（含這一次剛翻開的）、用了快速填入或提示球，就不算 ——
+     * 不然「按範例 → 貼上 → 送出」在 39 關可以直接拿到，那不叫精簡，叫抄。
+     */
+    const leanClean =
+      !progression.hasSeenSample?.(challenge.id) &&
+      sampleShown !== true &&
+      usedQuickFill !== true &&
+      usedCoach !== true;
+    const leanNew = Boolean(standing && standing.lean && leanClean && progression.awardLeanSeal?.(challenge.id));
+    /*
+     * 三軸的「好」方向不一樣：分數是**越高越好**，字數與技法數是**越少越精簡**。
+     * 全部都寫「第 N 百分位」的話，一個囉唆的答案會顯示「用了 5 種技法（第 100 百分位）」，
+     * 讀起來像贏了 —— 而它下面那一行徽章講的正好相反。所以後兩軸改成「比 N 成的內建解更精簡」。
+     */
+    const standingLine = standing
+      ? `<p class="standing reveal" style="--i:${tail}" data-standing>
+          <span class="standing__row"><b>這一次</b>：分數 ${formatScore(standing.score)}（贏過 ${
+            standing.scorePct
+          }% 的內建解）· 字數 ${standing.words}（比 ${100 - standing.wordsPct}% 的內建解更短）· 用了 ${
+            standing.techniques
+          } 種技法（比 ${100 - standing.techniquesPct}% 的內建解更精簡）</span>
+          <span class="standing__note">拿來比的是這一關 ${standing.n} 份<b>內建</b>範例解 —— 遊戲自己算出來的分布，不是其他玩家的成績。</span>
+        </p>`
+      : '';
+    /** 隱藏徽章：用不多於內建最精簡那一份的技法數通過（只在拿到的那一次說一句）。 */
+    /*
+     * 揭示節拍照**實際有出現的東西**往後排 —— 之前寫死 tail+2…tail+5，
+     * 沒有分布那一行時（沒過、濁靈、試煉）中間會空出 3–4 拍的靜止。
+     */
+    let beat = tail + (standing ? 1 : 0) + (leanNew ? 1 : 0);
+    const leanLine = leanNew
+      ? `<p class="gain lean-seal reveal" style="--i:${tail + (standing ? 1 : 0)}" data-lean-seal>✦ 最少技巧達成 —— 你用 ${
+          standing.techniques
+        } 種技法就把這件事講清楚了，跟這一關最精簡的內建解一樣少。</p>`
+      : '';
+
     resultEl.hidden = false;
     resultEl.innerHTML = `
       <div class="result__top ${evaluation.passed ? 'is-pass' : 'is-fail'} reveal" style="--i:0">
@@ -1778,27 +1958,26 @@ export function createPromptConsole({
             <u style="left:${Math.round((evaluation.pass / evaluation.total) * 100)}%"></u></div>
           ${
             evaluation.passed
-              ? `<p class="gain"><span class="xp-tick" data-xptick data-to="${outcome.xpGain}">+${outcome.xpGain}</span> XP${
-                  outcome.leveledUp ? ` · 升到 Lv.${outcome.levelAfter}！` : ''
-                }${
-                  outcome.improved && outcome.previousGrade
-                    ? ` · 評價 ${outcome.previousGrade} → ${outcome.bestGrade}`
-                    : ''
-                }${outcome.xpGain === 0 ? '（本關已拿過更高評價）' : ''}</p>`
+              ? murkResult
+                ? '' // 濁靈：這一次的收穫寫在下面牠那一行（XP 屬於安撫，不屬於單次過關）
+                : `<p class="gain">${gainLine(outcome)}</p>`
               : `<p class="gain gain--none">再修一次就好——下面列出你缺了什麼。</p>`
           }
+          ${murkLine}
           ${next ? `<p class="muted">距離 ${next.grade} 還差 ${formatScore(next.need)} 分。</p>` : ''}
         </div>
       </div>
       <ul class="rows">${rows}</ul>
+      ${standingLine}
+      ${leanLine}
       ${
         collected
-          ? `<div class="collected" style="--i:${tail}"><h4><span class="zh">✦ 順手收進圖鑑</span><span class="en">Collected</span></h4><ul>${collected}</ul></div>`
+          ? `<div class="collected" style="--i:${beat}"><h4><span class="zh">✦ 順手收進圖鑑</span><span class="en">Collected</span></h4><ul>${collected}</ul></div>`
           : ''
       }
       ${
         outcome.newlyUnlocked.length
-          ? `<div class="collected" style="--i:${tail + 1}"><h4><span class="zh">✦ 新解鎖區域</span><span class="en">Unlocked</span></h4><ul>${outcome.newlyUnlocked
+          ? `<div class="collected" style="--i:${beat + (collected ? 1 : 0)}"><h4><span class="zh">✦ 新解鎖區域</span><span class="en">Unlocked</span></h4><ul>${outcome.newlyUnlocked
               .map((id) => {
                 const g = content.group(id);
                 return `<li><b>${esc(g ? g.name : id)}</b> <span class="muted">${esc(
@@ -1811,17 +1990,17 @@ export function createPromptConsole({
       ${
         trial
           ? `<p class="result__source reveal" style="--i:${
-              tail + 2
+              beat + (collected ? 1 : 0) + (outcome.newlyUnlocked.length ? 1 : 0)
             }">這是試煉 —— 它不教新的技法，只把你在這片土地上學過的再用一次。</p>`
-          : `<p class="result__source reveal" style="--i:${tail + 2}">本關技巧的官方出處
+          : `<p class="result__source reveal" style="--i:${beat + (collected ? 1 : 0) + (outcome.newlyUnlocked.length ? 1 : 0)}">${murkResult ? '這一句話背後的技法，官方出處' : '本關技巧的官方出處'}
         <a class="src" href="${esc(challenge.source)}" target="_blank" rel="noopener">${esc(
           content.sourceName(challenge.source)
         )} ↗</a>
       </p>`
       }
       ${
-        evaluation.passed
-          ? `<div class="result__share reveal" style="--i:${tail + 3}">
+        evaluation.passed && !murkResult
+          ? `<div class="result__share reveal" style="--i:${beat + (collected ? 1 : 0) + (outcome.newlyUnlocked.length ? 1 : 0) + 1}">
               <button class="btn btn--ghost" type="button" data-share>分享這次的刻印<kbd>S</kbd></button>
             </div>`
           : ''
@@ -1861,7 +2040,14 @@ export function createPromptConsole({
     if (!current) return;
     attempts += 1;
     onSubmit?.(current);
-    const evaluation = evaluate(current, typeof textOverride === 'string' ? textOverride : currentText());
+    const text = typeof textOverride === 'string' ? textOverride : currentText();
+    /*
+     * v1.2 · P07：第一句就是第一句。序章（練習台）一送出就會寫進存檔；
+     * 跳過序章、或舊存檔還沒有那一欄的人，第一次**自由書寫**送出時補記一次。
+     * `captureFirstPrompt()` 只寫一次，所以這裡永遠不會蓋掉序章那一句。
+     */
+    if (mode === 'free') progression.captureFirstPrompt?.(text);
+    const evaluation = evaluate(current, text);
     if (!evaluation.passed) {
       fails += 1;
       // 一次沒過就讓提示球發光：這時候玩家最需要「有人告訴我下一步」
@@ -2004,7 +2190,11 @@ export function createPromptConsole({
        * （見 src/challenges/trial.js）。其餘關卡原樣傳進來，零行為變化。
        */
       current = effectiveChallenge(challenge, (id) => progression.knowsSkill?.(id) ?? true);
-      currentFlow = content.flow ? content.flow(challenge.id) : null;
+      /*
+       * v1.2 · P06b：委託自己帶著流程的優先（濁靈的 `flow` 住在 murks.json）；
+       * 142 座神廟仍然照 `flows.json` 查 —— 兩條路組出來的都是同一種 `choice` 資料。
+       */
+      currentFlow = challenge.flow || (content.flow ? content.flow(challenge.id) : null);
       lastEvaluation = null;
       fails = 0;
       sampleShown = false;
@@ -2012,17 +2202,32 @@ export function createPromptConsole({
       usedQuickFill = false;
       usedCoach = false;
       rejects = 0;
-      const best = progression.bestGrade(challenge.id);
+      // P03：新的一次 session —— 非 murk 的 onRubricHits 差量從零算
+      sessionHits.clear();
+      const murk = isMurk(challenge);
+      // v1.2 · P02：濁靈的最佳評價住在 `state.murks`（不是 bestGrades）
+      const best = murk ? (progression.murkState?.(challenge.id) || {}).grade || null : progression.bestGrade(challenge.id);
       const group = content.group(challenge.region);
-      const siblings = content.challengesOf(challenge.region);
-      const index = siblings.findIndex((c) => c.id === challenge.id) + 1;
-      overlay.setEyebrow(
-        `${group ? group.name : challenge.region} · 第 ${String(Math.max(index, 1)).padStart(2, '0')} 關 / 共 ${String(
-          siblings.length
-        ).padStart(2, '0')} 關`
-      );
+      if (murk) {
+        /*
+         * v1.2 · P01：濁靈不在 `content.challengesOf()` 裡，沒有「第 N 關／共 M 關」可以數；
+         * 用專用的 eyebrow「濁言」（不動全域 ACTS），第一幕的情境就是牠那段寫壞的請求。
+         */
+        overlay.setEyebrow(`${group ? group.name : challenge.region} · 濁言`);
+      } else {
+        const siblings = content.challengesOf(challenge.region);
+        const index = siblings.findIndex((c) => c.id === challenge.id) + 1;
+        overlay.setEyebrow(
+          `${group ? group.name : challenge.region} · 第 ${String(Math.max(index, 1)).padStart(2, '0')} 關 / 共 ${String(
+            siblings.length
+          ).padStart(2, '0')} 關`
+        );
+      }
       overlay.setTitle(challenge.title, `${challenge.npc}${best ? ` · 最佳評價 ${best}` : ''}`);
       scenarioEl.textContent = challenge.scenario;
+      // 濁言：那段寫壞的請求用引文樣式呈現（跟一般關卡的情境敘述分得開）
+      scenarioEl.classList.toggle('is-taint', murk);
+      consoleEl.classList.toggle('is-murk', murk);
       missionEl.textContent = challenge.mission || '';
       // 素材：NPC 真的遞給你的東西（模糊的原話、壞掉的指令、要依據的那一卷）
       const material = challenge.material;
@@ -2062,7 +2267,33 @@ export function createPromptConsole({
        * 最後一格）—— 所有石碑一律載入空的，`f` 這個安全取值讓這條路不會爆。
        */
       const f = currentFlow || {};
-      stele.load(k === 'choice' ? currentFlow : null);
+      mode = normalizeMode(progression.state.settings.promptMode);
+      if (!currentFlow) mode = 'free';
+      applyMode();
+      /**
+       * 導演的第一顆鏡頭永遠是第一幕：只有題目。
+       * 已經看過這一關指引的人（重玩）可以直接跳到刻印 —— 但不會自動幫他跳過，
+       * 選擇權在玩家手上（進度指示器上的 ③ 會是可按的）。
+       *
+       * 這一段要**排在每一塊石碑載入之前**：載入一塊已經刻滿的石碑會就地
+       * 通知「刻滿了」（重訪一隻安撫過的大濁靈），那一下記進來的幕次不能被蓋掉。
+       */
+      visited = new Set([1]);
+      if (!isApplicationTrial(current) && progression.hasSeenGuidance?.(challenge.id)) {
+        visited.add(2);
+        visited.add(3);
+      }
+      /*
+       * v1.2 · P17：大濁靈的**規則疊加**——每一段都寫著「這一層要什麼」，
+       * 走到才看得見下一層；而存檔裡**已經散掉的那幾層直接刻好、不再問一次**
+       * （`murkHits()` 是跨次聯集、永不清零 —— 這就是它在畫面上的樣子）。
+       * 小濁靈維持原樣（三段一次問完），避免動到既有關卡的節奏。
+       */
+      const greatMurk = challenge.kind === 'murk' && challenge.murkKind === 'great';
+      stele.load(k === 'choice' ? currentFlow : null, {
+        settled: greatMurk ? progression.murkHits?.(challenge.id) || [] : [],
+        layers: greatMurk,
+      });
       orderBoard.load(k === 'order' ? f.orderFlow : null);
       workshop.load(k === 'workshop' ? f.workshop : null);
       fixBoard.load(k === 'fix' ? f.fixFlow : null);
@@ -2073,19 +2304,6 @@ export function createPromptConsole({
       multiBoard.load(k === 'multi' ? f.multiFlow : null, f.slots);
       simBoard.load(k === 'sim' ? f.simFlow : null, f.slots);
       reverseBoard.load(k === 'reverse' ? f.reverseFlow : null, f.slots);
-      mode = normalizeMode(progression.state.settings.promptMode);
-      if (!currentFlow) mode = 'free';
-      applyMode();
-      /**
-       * 導演的第一顆鏡頭永遠是第一幕：只有題目。
-       * 已經看過這一關指引的人（重玩）可以直接跳到刻印 —— 但不會自動幫他跳過，
-       * 選擇權在玩家手上（進度指示器上的 ③ 會是可按的）。
-       */
-      visited = new Set([1]);
-      if (!isApplicationTrial(current) && progression.hasSeenGuidance?.(challenge.id)) {
-        visited.add(2);
-        visited.add(3);
-      }
       // 試煉沒有指引可以翻回去：側頁籤整個收起來（那裡本來就沒有東西）
       const trialNow = isApplicationTrial(current);
       if (guideTabEl) guideTabEl.hidden = trialNow;

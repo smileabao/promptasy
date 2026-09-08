@@ -3,9 +3,39 @@
  *
  * 這一層不碰 DOM、不 import JSON，資料由外部注入 → 可在 node 測試腳本直接跑。
  */
-import { betterGrade, xpForGrade } from '../challenges/rubric.js';
+import { betterGrade, gradeForRatio, xpForGrade } from '../challenges/rubric.js';
 import { createCatalog } from '../challenges/catalog.js';
+import { WATCH_TOPICS } from './watchtalk.js';
+import * as Daily from './daily.js';
+import { shrineOpen } from '../world/turning.js';
 import * as SaveIO from '../save/save.js';
+
+/**
+ * v1.2 · P23：一宿要幾顆星（＝隱藏成就每一部原典要幾個標記）。
+ *
+ * 這個數字在畫面那一層叫 `MANSION_TARGET`（`src/ui/starmap.js`）。這裡另寫一份
+ * 是因為**進程層不准 import 畫面層**；`test:rubric` 逐值比對兩邊，對不上就紅。
+ */
+export const BADGE_TARGET = 5;
+
+/**
+ * v1.2 · P23：「隱藏成就達成過了」的旗標。
+ *
+ * 它只往一個方向走：一旦記上就不會再被抹掉。**課程會長**（68 → 130 → …），
+ * 門檻跟著長；沒有這一格的話，今天達成的人明天會被新內容打回「還沒達成」。
+ * 這與 P22 那一課同源：殼散掉了就不准因為門檻變了又長回來。
+ */
+export const ACHIEVEMENT_FLAG = 'achievementDone';
+
+/**
+ * v1.2 · P23：門檻對齊那一次性遷移的憑證。
+ *
+ * 對齊之前，隱藏成就算的是「68 條舊技巧全收 ＋ 四廠徽章」；P22 的終局門檻算的是
+ * 「130 條技法全收 ＋ 四宿全亮」——兩個「全部完成」不是同一件事。這一格把成就
+ * 對齊到 P22 那一套，而**已經用舊尺達成過的存檔不准倒退**：開機時用舊尺量一次、
+ * 記成 `ACHIEVEMENT_FLAG`，然後把這個旗標插上 —— 插上之後就不再回頭用舊尺量。
+ */
+export const ALIGNED_FLAG = 'p23Aligned';
 
 /** 升到下一級所需 XP：100, 160, 220, 280 … */
 export function xpToNextLevel(level) {
@@ -161,7 +191,19 @@ export const REGION_GATES = Object.freeze({
  * @param {object} [opts.io]        存檔 IO（測試時可注入假的）
  * @param {Function} [opts.onChange] 狀態變動回呼
  */
-export function createProgression({ catalog = null, curriculum = null, challenges, io = SaveIO, onChange = null }) {
+export function createProgression({
+  catalog = null,
+  curriculum = null,
+  challenges,
+  /**
+   * v1.2 · P23：今日三事會提「去找一處還沒找到的線索」，所以要看得到那三份資料
+   * （祕境／殘頁／刻文）。每一筆只讀 `id` 與 `region`，一個字都不改。
+   * 不給就是沒有那一種提議 —— 舊呼叫端（測試腳本）行為完全不變。
+   */
+  clues = null,
+  io = SaveIO,
+  onChange = null,
+}) {
   /*
    * 課程 v2 · Phase B：技巧與區域的列舉統一從 catalog 來。
    * 只傳 curriculum 的舊呼叫端（測試腳本）行為完全不變 —— catalog 會就地
@@ -202,13 +244,127 @@ export function createProgression({ catalog = null, curriculum = null, challenge
     if (added > 0) io.save(state);
   }
 
+  /* ------------------------------------------------------------------ *
+   * v1.2 · P23：隱藏成就的門檻對齊 P22（130 條技法全收 ＋ 四宿全亮）
+   *
+   * **一次性**：舊尺（68 條舊技巧全收 ＋ 四廠徽章）只在這裡量最後一次。
+   * 量到就把「達成過了」記上，然後插上 `ALIGNED_FLAG` —— 下一次開機不再回頭量，
+   * 所以這一版之後才走到 68/68 的人吃的是新尺（那才是對齊）。
+   * 純加法、冪等：只加旗標，任何既有欄位一格都不動。
+   * ------------------------------------------------------------------ */
+  {
+    if (!state.flags || typeof state.flags !== 'object') state.flags = {};
+    if (!state.flags[ALIGNED_FLAG]) {
+      const legacyAll = cat.techniques;
+      const legacyDone = legacyAll.length > 0 && legacyAll.every((t) => state.collected.includes(t.id));
+      // 徽章就地重算（存檔裡那一份可能是舊版留下的），不動 `state.badges`
+      const badgeOf = (v) =>
+        state.collected.reduce((n, id) => {
+          const t = techniqueById.get(id);
+          return n + (t && (t.vendors || []).includes(v) ? 1 : 0);
+        }, 0);
+      const vendorsDone = vendorIds.length > 0 && vendorIds.every((v) => badgeOf(v) >= BADGE_TARGET);
+      if (state.flags.finaleSeen || (legacyDone && vendorsDone)) state.flags[ACHIEVEMENT_FLAG] = true;
+      state.flags[ALIGNED_FLAG] = true;
+      io.save(state);
+    }
+    /*
+     * 已經用**新尺**達成的存檔，開機也要把旗標補上 —— 不然「達成過了」這件事
+     * 要等到下一次落盤才成立，中間課程一長就會把人打回未達成。
+     */
+    if (markAchievement()) io.save(state);
+  }
+
   const emit = () => {
     if (typeof onChange === 'function') onChange(state);
   };
 
   function persist() {
+    // 落盤前先問一次「成就是不是剛剛達成」—— 達成過就永遠算達成（見 ACHIEVEMENT_FLAG）
+    markAchievement();
     io.save(state);
     emit();
+  }
+
+  /**
+   * v1.2 · P23：「全部收集」到底在算什麼。
+   *
+   * 正典是 **130 條技法**（`skillsV2`）—— 與 P22 終局的門檻同一把尺。
+   * 只有在 catalog 根本沒有 v2 技法時（測試腳本用 curriculum 就地建的 legacy catalog）
+   * 才退回舊的 68 條：那個世界裡「全部」本來就只有那 68 條。
+   */
+  function achievementTotals() {
+    const skills = cat.skills || [];
+    if (skills.length) {
+      return { total: skills.length, collected: skills.filter((sk) => state.skillsV2.includes(sk.id)).length };
+    }
+    const all = cat.techniques;
+    return { total: all.length, collected: all.filter((t) => state.collected.includes(t.id)).length };
+  }
+
+  /** 四宿現在亮了幾宿（一宿滿 `BADGE_TARGET` 顆就算亮）。 */
+  function mansionsLit(target = BADGE_TARGET) {
+    return vendorIds.filter((v) => (state.badges[v] || 0) >= target).length;
+  }
+
+  /**
+   * 現在這一刻，門檻過得了嗎（**不看旗標**，只看手上的東西）。
+   *
+   * 判定直接呼叫 P22 那一支 `shrineOpen()` —— 成就與終局用的是**同一個函式**，
+   * 不是兩份長得很像的條件（兩份就是等著哪一天只改到其中一份）。
+   */
+  function achievementReached() {
+    const { total, collected } = achievementTotals();
+    return shrineOpen({
+      skills: collected,
+      skillsTotal: total,
+      mansionsLit: mansionsLit(),
+      mansionsTotal: vendorIds.length,
+    });
+  }
+
+  /** 達成了就把旗標記上（只加不減、冪等）。回傳「這一次真的是第一次嗎」。 */
+  function markAchievement() {
+    if (state.flags && state.flags[ACHIEVEMENT_FLAG]) return false;
+    if (!achievementReached()) return false;
+    state.flags = { ...state.flags, [ACHIEVEMENT_FLAG]: true };
+    return true;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * v1.2 · P23：今日三事的三格（存檔驗形的最後一道保險）
+   * ------------------------------------------------------------------ */
+  function dailyBox() {
+    const d = state.daily;
+    if (!d || typeof d !== 'object' || Array.isArray(d)) {
+      state.daily = { day: '', ids: [], visited: [] };
+      return state.daily;
+    }
+    if (!Daily.isDayKey(d.day)) d.day = '';
+    if (!Array.isArray(d.ids)) d.ids = [];
+    if (!Array.isArray(d.visited)) d.visited = [];
+    return d;
+  }
+
+  /** 一條線索找到了嗎（三種各問它原本那一支）。 */
+  function clueFound(kind, id) {
+    if (kind === 'secret') return Array.isArray(state.secretsFound) && state.secretsFound.includes(id);
+    if (kind === 'letter') return Array.isArray(state.lettersFound) && state.lettersFound.includes(id);
+    if (kind === 'ins') return Array.isArray(state.inscriptionsFound) && state.inscriptionsFound.includes(id);
+    return false;
+  }
+
+  /** 今天有哪些做得到的提議（只從已經開了的土地挑、已經做完的不再提）。 */
+  function dailyPool(visited) {
+    return Daily.buildPool({
+      challenges: challenges || [],
+      regions: regionIds,
+      clues: clues || {},
+      isPlayable: (regionId) => api.isRegionPlayable(regionId),
+      bestGrade: (id) => state.bestGrades[id] || null,
+      found: clueFound,
+      visited: visited || [],
+    });
   }
 
   /** 徽章 = 已收集技巧中，標記了該廠的數量（可從 collected 完整重算 → 冪等）。 */
@@ -269,7 +425,11 @@ export function createProgression({ catalog = null, curriculum = null, challenge
     if (!k) return [];
     const gaps = [];
     for (const id of k.skills || []) {
-      if (!knowsSkill(id)) gaps.push({ kind: 'skill', skillId: id });
+      if (!knowsSkill(id)) {
+        // v1.2 · P06：順便帶技能的所在區（世界的閘門三態要知道這條件「指向」哪一片土地）
+        const s = cat.skill(id);
+        gaps.push(s && s.regionId ? { kind: 'skill', skillId: id, regionId: s.regionId } : { kind: 'skill', skillId: id });
+      }
     }
     for (const req of k.regionSkills || []) {
       const have = knownInRegion(req.regionId);
@@ -351,6 +511,43 @@ export function createProgression({ catalog = null, curriculum = null, challenge
       }
     }
     return newly;
+  }
+
+  /**
+   * v1.2 · P16c：把一次呈遞記進 `struggles`。
+   * 過了 → 整筆刪掉；沒過 → 次數 +1、命中的檢查器併進聯集。
+   * 只認 challenges.json 裡真的有的關卡（濁靈與序章練習不進這一欄）。
+   */
+  function recordStruggle(evaluation) {
+    const id = evaluation && evaluation.challengeId;
+    if (typeof id !== 'string' || !id || !challengeById.has(id)) return;
+    if (!state.struggles || typeof state.struggles !== 'object' || Array.isArray(state.struggles)) state.struggles = {};
+    if (evaluation.passed) {
+      delete state.struggles[id];
+      return;
+    }
+    const prev = state.struggles[id];
+    const hits = new Set(prev && Array.isArray(prev.hits) ? prev.hits : []);
+    /*
+     * `last` ＝ **這一次**命中的那幾條；`hits` ＝ 歷來的聯集。
+     *
+     * 兩個都要留，因為它們回答的是不同的問題：過關要的是**同一次**全部到齊，
+     * 所以「他現在還缺什麼」只能看 `last`。只留聯集的話，一個人第一次寫對 A、
+     * 第二次改寫對 B，聯集就湊齊了 —— 守夜人於是對**最卡的那個人**閉嘴
+     * （P16c 審查 · 第 2 條）。聯集留著是給「他到底會不會這一條」用的。
+     */
+    const last = [];
+    for (const r of Array.isArray(evaluation.results) ? evaluation.results : []) {
+      if (r && r.passed === true && typeof r.check === 'string') {
+        hits.add(r.check);
+        last.push(r.check);
+      }
+    }
+    state.struggles[id] = {
+      tries: (prev && Number.isFinite(prev.tries) ? prev.tries : 0) + 1,
+      hits: [...hits].sort(),
+      last: [...new Set(last)].sort(),
+    };
   }
 
   const api = {
@@ -517,20 +714,43 @@ export function createProgression({ catalog = null, curriculum = null, challenge
     },
 
     /**
-     * 隱藏成就：68 條技巧全收集 ＋ 四廠徽章都達標。
-     * @param {number} [badgeTarget] 每廠需要的技巧標記數（與圖鑑顯示一致）
+     * 隱藏成就（v1.2 · P23 起與 P22 的終局門檻**同一把尺**）：
+     * **130 條技法全收 ＋ 四宿全亮**。
+     *
+     * 對齊之前這裡算的是「68 條舊技巧全收 ＋ 四廠徽章」——兩個「全部完成」
+     * 不是同一件事，於是小祠開口與成就達成會在不同的時間點發生。現在兩邊都走
+     * `shrineOpen()`，所以它們不可能對不上。
+     *
+     * **達成過就永遠算達成**：`complete` 會 OR 上 `ACHIEVEMENT_FLAG`。
+     * 這一條擋兩件事 —— 對齊那一刻的舊存檔不倒退，以及日後課程再長時不倒退。
+     *
+     * @param {number} [badgeTarget] 一部原典要幾個標記（與圖鑑顯示一致）
      */
-    hiddenAchievement(badgeTarget = 5) {
-      const all = cat.techniques;
-      const collected = all.filter((t) => state.collected.includes(t.id)).length;
+    hiddenAchievement(badgeTarget = BADGE_TARGET) {
+      const { total, collected } = achievementTotals();
       const vendors = (cur.vendors || []).map((v) => ({
         id: v.id,
         name: v.name,
         count: state.badges[v.id] || 0,
         done: (state.badges[v.id] || 0) >= badgeTarget,
       }));
-      const complete = collected === all.length && all.length > 0 && vendors.every((v) => v.done);
-      return { complete, collected, total: all.length, vendors, badgeTarget };
+      const lit = vendors.filter((v) => v.done).length;
+      const reached = shrineOpen({
+        skills: collected,
+        skillsTotal: total,
+        mansionsLit: lit,
+        mansionsTotal: vendors.length,
+      });
+      return {
+        complete: reached || Boolean(state.flags && state.flags[ACHIEVEMENT_FLAG]),
+        reached,
+        collected,
+        total,
+        vendors,
+        badgeTarget,
+        mansionsLit: lit,
+        mansionsTotal: vendors.length,
+      };
     },
 
     /** 已精通（該區技巧全收集）的區域 id 清單。 */
@@ -597,8 +817,16 @@ export function createProgression({ catalog = null, curriculum = null, challenge
         newScribe: false,
       };
 
+      /*
+       * v1.2 · P16c：**沒過的那幾次也要留下痕跡** —— 守夜人的「卡關提示」讀的就是它。
+       * 記兩件事：試了幾次、跨次累積命中過哪幾條檢查器（聯集，永不清零 ——
+       * 同濁靈的規矩：進度只累積，不倒退）。過關那一刻整筆刪掉（過了就不是卡關）。
+       * 純加法：不給 XP、不寫 bestGrades、不影響解鎖。
+       */
+      recordStruggle(evaluation);
+
       if (!evaluation.passed) {
-        emit();
+        persist();
         return outcome;
       }
 
@@ -673,6 +901,258 @@ export function createProgression({ catalog = null, curriculum = null, challenge
     },
 
     /* ---------------------------------------------------------------- *
+     * v1.2 · P02：濁靈（murks.json）—— 安撫會被記住
+     *
+     * 濁靈走同一座主控台，但**不是關卡**：不進 `bestGrades`（142 關的分子）、
+     * 不收技巧（`collected` / `skillsV2` 仍只由神廟給）、不寫印記／徽章。
+     * 它有自己的一欄 `state.murks[id] = { hits, grade }`：
+     *   · hits   命中（`results[i].passed === true`）的 rubric 列 index，跨次**累積聯集、永不清零**
+     *            （威脅不懲罰、進度只累積）
+     *   · 安撫   **這一次**評分引擎判過（`evaluation.passed`，部分分數也算）**或**累積命中的權重和 ≥ pass
+     *            —— 單次沒過、累積過了也算
+     *   · grade  gradeForRatio(max(這一次的 ratio（過了才算）, 累積 score / total))，只升不降；全剝 ＝ S。
+     *            **存了 grade ＝ 安撫過**（`murkCount()` 就數它）
+     *   · XP     只補差額（xpForGrade(新, base) − xpForGrade(舊, base)），升等照 levelFromXp，
+     *            升等後照其他 XP 寫入者一樣跑 `refreshUnlocks()`（閘門不能因濁靈升等而過期）
+     * ---------------------------------------------------------------- */
+
+    /** 這一隻濁靈的存檔狀態（沒碰過 → null）。 */
+    murkState(id) {
+      const m = state.murks && typeof state.murks === 'object' ? state.murks[id] : null;
+      if (!m || !Array.isArray(m.hits)) return null;
+      return { hits: m.hits.slice(), grade: m.grade || null };
+    },
+    /** 這一隻濁靈已命中的 rubric 列 index（沒碰過 → []）。 */
+    murkHits(id) {
+      const m = state.murks && typeof state.murks === 'object' ? state.murks[id] : null;
+      return m && Array.isArray(m.hits) ? m.hits.slice() : [];
+    },
+    /**
+     * 安撫過（有評價）的濁靈數。
+     * @param {string[]|null} [ids] 已知的濁靈 id（murks.json）；給了就只數這些，存檔裡的孤兒 id 不算
+     */
+    murkCount(ids = null) {
+      const store = state.murks && typeof state.murks === 'object' && !Array.isArray(state.murks) ? state.murks : {};
+      const keys = Array.isArray(ids) ? ids : Object.keys(store);
+      return keys.filter((id) => {
+        const m = store[id];
+        return m && typeof m.grade === 'string' && m.grade;
+      }).length;
+    },
+
+    /* ---------------------------------------------------------------- *
+     * v1.2 · P16c：守夜人（watchmen.json）—— 聊過的人會被記住
+     *
+     * 這一欄**一格都不影響進度**：不給 XP、不寫 `bestGrades`、不收技巧、
+     * 不算徽章、不是任何東西的解鎖條件（`refreshUnlocks()` 沒讀過它）。
+     * 它只記「聊過了沒」與「問過哪幾種情報」。
+     * ---------------------------------------------------------------- */
+
+    /** 這一位守夜人的存檔狀態（沒聊過 → null）。 */
+    watchmanState(id) {
+      const w = state.watchmen && typeof state.watchmen === 'object' ? state.watchmen[id] : null;
+      if (!w || typeof w !== 'object') return null;
+      return {
+        met: Boolean(w.met),
+        seen: Array.isArray(w.seen) ? w.seen.slice() : [],
+        asks: Number.isFinite(w.asks) ? w.asks : 0,
+      };
+    },
+    /** 聊過了沒。 */
+    hasMetWatchman(id) {
+      const w = api.watchmanState(id);
+      return Boolean(w && w.met);
+    },
+    /** 聊過的守夜人數（給了 id 清單就只數清單裡的，存檔裡的孤兒 id 不算）。 */
+    watchmanCount(ids = null) {
+      const store = state.watchmen && typeof state.watchmen === 'object' && !Array.isArray(state.watchmen) ? state.watchmen : {};
+      const keys = Array.isArray(ids) ? ids : Object.keys(store);
+      return keys.filter((id) => store[id] && store[id].met).length;
+    },
+    /**
+     * 問過**幾次**（技巧小知識靠它輪到下一條）。
+     *
+     * 這裡數的是「問了幾次」不是「問過幾種」：`seen` 只放**不重複**的四種情報，
+     * 拿它當輪替的計次的話，四種問完之後就永遠停在同一條技巧上
+     * （P16c 審查 · 第 3 條）。所以另外記一個 `asks`。
+     */
+    watchTurn(id) {
+      const w = state.watchmen && typeof state.watchmen === 'object' ? state.watchmen[id] : null;
+      return w && Number.isFinite(w.asks) ? w.asks : 0;
+    },
+    /**
+     * 走近按 `E`：記下「聊過了」。
+     * @returns {{firstMeet:boolean}}
+     */
+    meetWatchman(id) {
+      if (typeof id !== 'string' || !id) return { firstMeet: false };
+      if (!state.watchmen || typeof state.watchmen !== 'object' || Array.isArray(state.watchmen)) state.watchmen = {};
+      const prev = state.watchmen[id];
+      const firstMeet = !(prev && prev.met);
+      state.watchmen[id] = {
+        met: true,
+        seen: prev && Array.isArray(prev.seen) ? prev.seen.slice() : [],
+        asks: prev && Number.isFinite(prev.asks) ? prev.asks : 0,
+      };
+      if (firstMeet) persist();
+      return { firstMeet };
+    },
+    /**
+     * 問了一種情報。
+     * @returns {{firstTime:boolean}}
+     */
+    seeWatchTopic(id, topic) {
+      if (typeof id !== 'string' || !id || !WATCH_TOPICS.includes(topic)) return { firstTime: false };
+      if (!state.watchmen || typeof state.watchmen !== 'object' || Array.isArray(state.watchmen)) state.watchmen = {};
+      const prev = state.watchmen[id];
+      const seen = prev && Array.isArray(prev.seen) ? prev.seen.slice() : [];
+      const firstTime = !seen.includes(topic);
+      if (firstTime) seen.push(topic);
+      const asks = (prev && Number.isFinite(prev.asks) ? prev.asks : 0) + 1;
+      state.watchmen[id] = { met: true, seen, asks };
+      persist();
+      return { firstTime };
+    },
+
+    /* ---------------------------------------------------------------- *
+     * v1.2 · P18：守門者（guardian.json）—— 說服過的那幾行會被記住
+     *
+     * 與守夜人同一種欄位：**一格都不影響進度**（不給 XP、不寫 `bestGrades`、
+     * 不收技巧、不算徽章、不是任何東西的解鎖條件）。
+     * 唯一的鐵則是**只累積**：`hits` 永遠是聯集，`convinced` 一旦為真就不再落回。
+     * ---------------------------------------------------------------- */
+
+    /** 這一位守門者的存檔狀態（沒說過話 → null）。 */
+    guardianState(id) {
+      const g = state.guardians && typeof state.guardians === 'object' ? state.guardians[id] : null;
+      if (!g || typeof g !== 'object' || !Array.isArray(g.hits)) return null;
+      return { hits: g.hits.slice(), turns: Number(g.turns) || 0, convinced: Boolean(g.convinced) };
+    },
+    /** 說服了沒。 */
+    hasConvincedGuardian(id) {
+      const g = api.guardianState(id);
+      return Boolean(g && g.convinced);
+    },
+    /**
+     * 記一次「跟守門者說了一句」。**聯集寫入**：傳進來的 `hits` 只會讓它變長。
+     * @param {string} id
+     * @param {{hits?:string[], convinced?:boolean}} next 判定回傳的 `after`
+     * @returns {{hits:string[], turns:number, convinced:boolean, firstConvinced:boolean}}
+     */
+    tellGuardian(id, next = {}) {
+      if (typeof id !== 'string' || !id) return { hits: [], turns: 0, convinced: false, firstConvinced: false };
+      if (!state.guardians || typeof state.guardians !== 'object' || Array.isArray(state.guardians)) state.guardians = {};
+      const prev = state.guardians[id];
+      const before = prev && Array.isArray(prev.hits) ? prev.hits : [];
+      const add = Array.isArray(next.hits) ? next.hits.filter((x) => typeof x === 'string' && x) : [];
+      const hits = [...new Set([...before, ...add])].sort();
+      const wasConvinced = Boolean(prev && prev.convinced);
+      const convinced = wasConvinced || Boolean(next.convinced);
+      const turns = (prev && Number.isFinite(prev.turns) ? prev.turns : 0) + 1;
+      state.guardians[id] = { hits, turns, convinced };
+      persist();
+      return { hits: hits.slice(), turns, convinced, firstConvinced: convinced && !wasConvinced };
+    },
+
+    /** v1.2 · P16c：這一關卡了幾次、命中過哪幾條（沒卡過 → null）。 */
+    struggleOf(challengeId) {
+      const st = state.struggles && typeof state.struggles === 'object' ? state.struggles[challengeId] : null;
+      if (!st || typeof st !== 'object') return null;
+      return { tries: Number(st.tries) || 0, hits: Array.isArray(st.hits) ? st.hits.slice() : [] };
+    },
+    /** v1.2 · P16c：整張「卡在哪幾關」的表（守夜人讀它）。 */
+    struggles() {
+      const store = state.struggles && typeof state.struggles === 'object' && !Array.isArray(state.struggles) ? state.struggles : {};
+      const out = {};
+      for (const [k, v] of Object.entries(store)) out[k] = { tries: Number(v.tries) || 0, hits: Array.isArray(v.hits) ? v.hits.slice() : [] };
+      return out;
+    },
+
+    /**
+     * 記錄一次對濁靈的呈遞。**原子**：先寫聯集、算安撫與評價、補 XP 差額，
+     * 再一次回傳「這一次多了什麼」——P03 的剝殼回呼吃的就是這個回傳值。
+     *
+     * @param {object} challenge   challenge 形物件（main.js `murkChallenge()`）：至少 { id, rubric, pass, xp?, kind:'murk' }
+     * @param {object} evaluation  評分引擎的結果（讀 `results[i].passed`）
+     * @param {object} [context]   主控台的作答脈絡（同 recordResult；濁靈目前不用）
+     * @returns {{
+     *   xpGain:number, levelBefore:number, levelAfter:number, leveledUp:boolean,
+     *   newlyCollected:string[], newlySkills:string[], newlyUnlocked:string[],
+     *   previousGrade:(string|null), bestGrade:(string|null), improved:boolean,
+     *   newSeal:null, newPenless:false, newScribe:false,
+     *   murk:{ newlyPassedIndices:number[], hits:number[], score:number, total:number, calmed:boolean, newlyCalmed:boolean }
+     * }}
+     */
+    recordMurk(challenge, evaluation, context = null) {
+      void context;
+      if (!challenge || typeof challenge !== 'object' || !Array.isArray(challenge.rubric) || !challenge.id) {
+        throw new Error('recordMurk(): 需要 challenge 形物件（{ id, rubric, pass }）');
+      }
+      const id = challenge.id;
+      const rubric = challenge.rubric;
+      const results = evaluation && Array.isArray(evaluation.results) ? evaluation.results : [];
+      const weightOf = (i) => (rubric[i] && Number.isFinite(rubric[i].weight) ? rubric[i].weight : 1);
+      const total = rubric.reduce((n, _r, i) => n + weightOf(i), 0);
+      const passMark = Number.isFinite(challenge.pass) ? challenge.pass : Math.ceil(total * 0.5);
+      // XP 來源與 recordResult 同一條：challenge.xp（main.js murkChallenge 帶 murks.json.xp）→ evaluation.baseXp
+      const baseXp = Number.isFinite(challenge.xp) ? challenge.xp : evaluation && Number.isFinite(evaluation.baseXp) ? evaluation.baseXp : 0;
+
+      if (!state.murks || typeof state.murks !== 'object' || Array.isArray(state.murks)) state.murks = {};
+      const prev = state.murks[id];
+      const oldHits = prev && Array.isArray(prev.hits) ? prev.hits.filter((n) => Number.isInteger(n) && n >= 0 && n < rubric.length) : [];
+      const previousGrade = prev && typeof prev.grade === 'string' && prev.grade ? prev.grade : null;
+      // 存了 grade ＝ 安撫過（grade 是安撫旗標本身）
+      const wasCalmed = previousGrade !== null;
+
+      const passedNow = [];
+      results.forEach((r, i) => {
+        if (r && r.passed === true && i < rubric.length) passedNow.push(i);
+      });
+      const oldSet = new Set(oldHits);
+      const newlyPassedIndices = passedNow.filter((i) => !oldSet.has(i));
+      const hits = [...new Set([...oldHits, ...passedNow])].sort((a, b) => a - b);
+      const score = hits.reduce((n, i) => n + weightOf(i), 0);
+      const attemptPassed = Boolean(evaluation && evaluation.passed === true);
+      // 安撫：這一次評分引擎判過（部分分數也算）**或**累積聯集 ≥ pass
+      const calmed = attemptPassed || score >= passMark;
+      const newlyCalmed = calmed && !wasCalmed;
+
+      const levelBefore = levelFromXp(state.xp).level;
+      const attemptRatio =
+        attemptPassed && evaluation && Number.isFinite(evaluation.total) && evaluation.total > 0 && Number.isFinite(evaluation.earned)
+          ? evaluation.earned / evaluation.total
+          : 0;
+      const cumulativeRatio = total > 0 ? score / total : 0;
+      const grade = calmed ? betterGrade(previousGrade, gradeForRatio(Math.max(attemptRatio, cumulativeRatio))) : previousGrade;
+      const xpGain = Math.max(0, xpForGrade(grade, baseXp) - xpForGrade(previousGrade, baseXp));
+
+      state.murks[id] = { hits, grade };
+      state.xp += xpGain;
+      const lv = levelFromXp(state.xp);
+      state.level = lv.level;
+      // 與其他 XP 寫入者一致：等級動了，閘門就要重算（否則濁靈升等後的門會過期）
+      const newlyUnlocked = refreshUnlocks();
+      persist();
+
+      return {
+        xpGain,
+        levelBefore,
+        levelAfter: lv.level,
+        leveledUp: lv.level > levelBefore,
+        newlyCollected: [],
+        newlySkills: [],
+        newlyUnlocked,
+        previousGrade,
+        bestGrade: grade,
+        improved: grade !== previousGrade,
+        newSeal: null,
+        newPenless: false,
+        newScribe: false,
+        murk: { newlyPassedIndices, hits: hits.slice(), score, total, calmed, newlyCalmed },
+      };
+    },
+
+    /* ---------------------------------------------------------------- *
      * 課程 v2 · Phase J2：土地印記與大師層印記
      * ---------------------------------------------------------------- */
 
@@ -697,6 +1177,37 @@ export function createProgression({ catalog = null, curriculum = null, challenge
       persist();
       return true;
     },
+    /* ---------------------------------------------------------------- *
+     * v1.2 · P10b：最少技巧達成（`leanSeals`）
+     *
+     * 「這一次通過用的技法數 ≤ 內建最精簡的那一份範例解」——**判定不在這一層**
+     * （這一層不 import 任何 JSON），分布與判定住在 `src/challenges/solution-stats.js`，
+     * 主控台算完之後才把 id 交過來。這裡只負責**記住它**：純加法、冪等、
+     * 不給 XP、不寫 `bestGrades`、不碰 `refreshUnlocks()`，不是任何東西的解鎖條件。
+     *
+     * 刻意沒有「最少字」那一枚 —— 短 ≠ 好 prompt（roadmap §0 鐵則）。
+     * ---------------------------------------------------------------- */
+
+    /** 這一關拿到「最少技巧達成」了嗎。 */
+    hasLeanSeal(challengeId) {
+      return Array.isArray(state.leanSeals) && state.leanSeals.includes(challengeId);
+    },
+    /** 已拿到的「最少技巧達成」（關卡 id）。 */
+    leanSeals: () => (Array.isArray(state.leanSeals) ? state.leanSeals.slice() : []),
+    /**
+     * 記下一枚「最少技巧達成」。
+     * @param {string} challengeId
+     * @returns {boolean} 這一次才拿到 → true（結果面只在 true 的時候說一次）
+     */
+    awardLeanSeal(challengeId) {
+      if (typeof challengeId !== 'string' || !challengeId) return false;
+      if (!Array.isArray(state.leanSeals)) state.leanSeals = [];
+      if (state.leanSeals.includes(challengeId)) return false;
+      state.leanSeals.push(challengeId);
+      persist();
+      return true;
+    },
+
     /**
      * 大師層的總表（圖鑑用）。
      * `pureRegions`＝那一區的**教學神廟**全部拿到無筆之印（一區純手，12 枚）。
@@ -721,6 +1232,8 @@ export function createProgression({ catalog = null, curriculum = null, challenge
         pureRegions,
         divergenceProof,
         seals: Array.isArray(state.seals) ? state.seals.slice() : [],
+        // v1.2 · P10b：最少技巧達成（同樣是選配、永不擋路）
+        lean: Array.isArray(state.leanSeals) ? state.leanSeals.slice() : [],
       };
     },
 
@@ -863,6 +1376,128 @@ export function createProgression({ catalog = null, curriculum = null, challenge
       };
     },
 
+    /* ---------------------------------------------------------------- *
+     * v1.2 · P07：抄寫人的殘頁
+     *
+     * 跟刻文小語同一層：不佔關卡評價、不算區域解鎖的通關數。
+     * 差別是這一層**一半有教學、一半純風味** —— 有掛 `techniqueId` 的那幾頁
+     * 會把那條技巧收進圖鑑（學到了就是學到了），純風味的什麼都不收。
+     * ---------------------------------------------------------------- */
+
+    /** 這一頁殘頁撿過了嗎。 */
+    hasFoundLetter(id) {
+      return Array.isArray(state.lettersFound) && state.lettersFound.includes(id);
+    },
+
+    /** 撿到幾頁殘頁。 */
+    letterCount() {
+      return Array.isArray(state.lettersFound) ? state.lettersFound.length : 0;
+    },
+
+    /**
+     * 撿起一頁殘頁。第一次給少量 XP；有教學的那幾頁順便把技巧收進圖鑑（重讀不再給）。
+     * @param {string} id
+     * @param {string|null} techniqueId 這一頁教的技巧（純風味的殘頁傳 null）
+     * @param {number} [xp]
+     */
+    readLetter(id, techniqueId = null, xp = 6) {
+      if (!Array.isArray(state.lettersFound)) state.lettersFound = [];
+      const levelBefore = levelFromXp(state.xp).level;
+      if (!id || state.lettersFound.includes(id)) {
+        return {
+          alreadyFound: true,
+          xpGain: 0,
+          newlyCollected: [],
+          levelBefore,
+          levelAfter: levelBefore,
+          leveledUp: false,
+          newlyUnlocked: [],
+        };
+      }
+      state.lettersFound.push(id);
+      const newlyCollected = [];
+      if (techniqueId && techniqueById.has(techniqueId) && !state.collected.includes(techniqueId)) {
+        state.collected.push(techniqueId);
+        newlyCollected.push(techniqueId);
+        recomputeBadges();
+      }
+      const gain = Math.max(0, Math.round(xp));
+      state.xp += gain;
+      const lv = levelFromXp(state.xp);
+      state.level = lv.level;
+      const newlyUnlocked = refreshUnlocks();
+      persist();
+      return {
+        alreadyFound: false,
+        xpGain: gain,
+        newlyCollected,
+        levelBefore,
+        levelAfter: lv.level,
+        leveledUp: lv.level > levelBefore,
+        newlyUnlocked,
+      };
+    },
+
+    /* ---------------------------------------------------------------- *
+     * v1.2 · P07：序章寫下的第一句
+     *
+     * 回聲說過「牠記得每個人的第一句話」。存檔從這一期開始真的記住它 ——
+     * **只寫一次**（第一句就是第一句），純文字、去頭尾空白、≤ 280 字，
+     * 只留在這台裝置上。終局（P22）會把它還給玩家；沒有的人用「你最好的一句」。
+     * ---------------------------------------------------------------- */
+
+    /** 序章的第一句（沒有就是空字串）。 */
+    firstPrompt() {
+      return typeof state.firstPrompt === 'string' ? state.firstPrompt : '';
+    },
+
+    /**
+     * 記住序章寫下的第一句。已經有了就什麼都不做（永不覆寫）。
+     * @param {string} text 玩家真的送出去的那一段原文
+     * @returns {{captured:boolean, text:string}}
+     */
+    captureFirstPrompt(text) {
+      const already = typeof state.firstPrompt === 'string' ? state.firstPrompt : '';
+      if (already) return { captured: false, text: already };
+      const clean = SaveIO.firstPrompt(text);
+      if (!clean) return { captured: false, text: '' };
+      state.firstPrompt = clean;
+      persist();
+      return { captured: true, text: clean };
+    },
+
+    /* ---------------------------------------------------------------- *
+     * v1.2 · P22：母碑上刻的那一行
+     *
+     * 玩家在終局重寫的那一句。**只有明確按下「刻上去」才會有東西**；
+     * 選了「不刻」＝ `setMotherStele('')`，那句話根本不會落盤（不存就不可能外流）。
+     *
+     * ⚠️ **這一欄不參與任何解鎖判定**：`gateSatisfied()` / `refreshUnlocks()` /
+     * `isRegionUnlocked()` 三支的函式體裡一個字都沒提它（`test:rubric` 逐支掃過，
+     * 外加零 XP 探針與逐項快照 —— 靜態掃描擋不住間接讀法，P21 的紅測證明過）。
+     * ---------------------------------------------------------------- */
+
+    /** 母碑上刻的那一行（空字串＝碑面留白）。 */
+    motherStele() {
+      return typeof state.motherStele === 'string' ? state.motherStele : '';
+    },
+
+    /**
+     * 刻上去 / 抹掉。
+     *
+     * 與 `captureFirstPrompt()`（只寫一次、永不覆寫）**刻意相反**：這一欄要改得動。
+     * 玩家隨時可以回小祠再說一次，也隨時可以選「不刻」把碑面清回留白 ——
+     * 那是玩家把自己的字收回去的路。
+     *
+     * @param {string} text 空字串／空白＝留白
+     * @returns {string} 真的留在碑上的那一行
+     */
+    setMotherStele(text) {
+      state.motherStele = SaveIO.motherStele(text);
+      persist();
+      return state.motherStele;
+    },
+
     /** 這個祕密找到了嗎。 */
     hasFoundSecret(id) {
       return Array.isArray(state.secretsFound) && state.secretsFound.includes(id);
@@ -955,6 +1590,40 @@ export function createProgression({ catalog = null, curriculum = null, challenge
       };
     },
 
+    /* ---------------------------------------------------------------- *
+     * v1.2 · P19：相鄰區捷徑（`world.js` 的 `SHORTCUTS`）
+     *
+     * 跟祕密、器物同一層護欄：**純加法**。不給 XP、不進圖鑑、不算徽章、
+     * 不寫 `bestGrades`、不算區域解鎖的通關數（`refreshUnlocks()` 沒讀過它）。
+     * 它只記一件事：那道門推開了沒有。
+     * ---------------------------------------------------------------- */
+
+    /** 這條捷徑推開了嗎。 */
+    isShortcutOpen(id) {
+      return Boolean(state.shortcuts && state.shortcuts[id] === true);
+    },
+
+    /** 推開了幾條捷徑。 */
+    shortcutCount() {
+      return state.shortcuts && typeof state.shortcuts === 'object' ? Object.keys(state.shortcuts).length : 0;
+    },
+
+    /**
+     * 推開一條捷徑。冪等 —— 已經開的再推一次什麼都不會發生（也不會關回去）。
+     * @param {string} id
+     * @returns {{opened:boolean, alreadyOpen:boolean}}
+     */
+    openShortcut(id) {
+      if (!state.shortcuts || typeof state.shortcuts !== 'object' || Array.isArray(state.shortcuts)) {
+        state.shortcuts = {};
+      }
+      if (typeof id !== 'string' || !id) return { opened: false, alreadyOpen: false };
+      if (state.shortcuts[id] === true) return { opened: false, alreadyOpen: true };
+      state.shortcuts[id] = true;
+      persist();
+      return { opened: true, alreadyOpen: false };
+    },
+
     /** 這塊世界觀石碑讀過了嗎。 */
     hasReadLore(id) {
       return Array.isArray(state.loreRead) && state.loreRead.includes(id);
@@ -1023,6 +1692,106 @@ export function createProgression({ catalog = null, curriculum = null, challenge
       return (cur.builder || [])
         .filter((b) => (map[b.id] || []).some((topic) => topics.has(topic)))
         .map((b) => b.id);
+    },
+
+    /* ---------------------------------------------------------------- *
+     * v1.2 · P23：今日三事（**提議，不是任務**）
+     *
+     * 規則全部住在 `daily.js`（純函式）；這一層只做三件事：
+     * 換日、落盤、把「做完了沒」問出來。
+     *
+     * **關掉之後這一層一個字都不寫**：`dailyEnabled()` 是 false 時，
+     * 底下每一支都在第一行就回去了 —— 存檔裡那三格永遠停在預設值，
+     * 與「從來沒有這個功能」逐值相同。
+     * ---------------------------------------------------------------- */
+
+    /** 今日三事開著嗎（設定；預設開）。 */
+    dailyEnabled() {
+      return state.settings.daily !== false;
+    },
+
+    /** 存檔裡那三格（唯讀複本）。 */
+    dailyState() {
+      const box = dailyBox();
+      return { day: box.day, ids: box.ids.slice(), visited: box.visited.slice() };
+    },
+
+    /**
+     * 今天那三個提議（id）。關掉時回 `null`。
+     *
+     * 換日就重挑一組 —— **不刪任何進度**：這一支碰得到的只有 `state.daily` 那三格。
+     * @param {Date} [now] 測試可以指定「今天是哪一天」
+     * @returns {string[]|null}
+     */
+    dailyOffers(now) {
+      if (state.settings.daily === false) return null;
+      const key = Daily.localDayKey(now);
+      const box = dailyBox();
+      let changed = false;
+      if (box.day !== key) {
+        box.day = key;
+        box.visited = [];
+        box.ids = [];
+        changed = true;
+      }
+      if (!box.ids.length) {
+        const picked = Daily.pickOffers(key, dailyPool(box.visited));
+        if (picked.length) {
+          box.ids = picked;
+          changed = true;
+        }
+      }
+      if (changed) persist();
+      return box.ids.slice();
+    },
+
+    /**
+     * 今天那三件事現在長什麼樣（給圖鑑那一頁畫）。關掉時回 `null`。
+     * @param {Date} [now]
+     * @returns {Array<object>|null}
+     */
+    dailyReport(now) {
+      const ids = api.dailyOffers(now);
+      if (!ids) return null;
+      const visited = dailyBox().visited;
+      return ids
+        .map((id) => {
+          const o = Daily.parseOffer(id);
+          if (!o) return null;
+          const done = Daily.offerDone(id, { bestGrade: api.bestGrade, found: clueFound, visited });
+          // 畫面要說「在哪一片土地」——這裡查出來，畫的那一支就不必再認得資料層
+          if (o.kind === 'find') {
+            const e = ((clues || {})[o.clueKind] || []).find((x) => x && x.id === o.clueId);
+            return { ...o, clueRegion: (e && e.region) || '', done };
+          }
+          if (o.kind === 'polish') {
+            const c = challengeById.get(o.challengeId);
+            return { ...o, challengeRegion: (c && c.region) || '', title: (c && c.title) || o.challengeId, done };
+          }
+          return { ...o, done };
+        })
+        .filter(Boolean);
+    },
+
+    /**
+     * 走進一片土地了。**只記今天走過哪幾片**，不給 XP、不碰任何既有欄位。
+     * @param {string} regionId
+     * @returns {boolean} 這一次真的記下了嗎
+     */
+    noteRegionVisit(regionId) {
+      if (state.settings.daily === false) return false;
+      if (typeof regionId !== 'string' || !regionId) return false;
+      const box = dailyBox();
+      const key = Daily.localDayKey();
+      if (box.day !== key) {
+        box.day = key;
+        box.ids = [];
+        box.visited = [];
+      }
+      if (box.visited.includes(regionId)) return false;
+      box.visited.push(regionId);
+      persist();
+      return true;
     },
 
     updateSettings(patch) {

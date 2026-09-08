@@ -159,6 +159,11 @@
   --star-dim: rgba(169, 201, 216, 0.16);
   --gold: #e6c79b;
   --gold-dim: rgba(230, 199, 155, 0.12);
+  /*
+   * 「可以先行前往／這裡有東西」那一類的提示色（v1.2 · P06 定的 PALETTE.invite）。
+   * **不准借用暖金** —— WORLD.md §2.2 明訂暖金只留給成就熱點。
+   */
+  --invite: #a8865c;
   --good: #7fd1a8;
   --warn: #e6b45f;
   --bad: #e0806e;
@@ -1021,26 +1026,61 @@ a.src:hover {
 }
 
 /* 互動提示：紙片，不是氣泡 */
+/*
+ * 互動提示卡 —— 走近可互動的東西時浮出來的那一塊石牌。
+ * 十二層共用（石座／濁靈／石碑／殘頁／守夜人／守門者／器物／絞盤／回聲／閘門／刻文／終局），
+ * 內容由 `main.js` 的仲裁鏈組字串餵進 `hud.setInteract()`。
+ *
+ * v1.2 · P22e：**從四行直排改成一橫排，並讓開視線中心。**
+ *
+ * 站長實玩回報「事件彈出會擋住畫面」，截圖裡那張卡在 766×567 的視窗下**佔掉畫面高度的 46%**，
+ * 而且正好蓋在他要看的那隻濁靈身上。
+ *
+ * 為什麼**不是**把字改小或改半透明：
+ *   · 字級是 Phase 14 依產品回饋整組放大 1.75 倍的結果（「說明文字太小」），
+ *     縮回去等於推翻站長自己提過的需求；而且那次就已經寫明「HUD 只放大 1.4 倍，
+ *     同樣倍率會蓋掉半個世界」——字級本身是被想過的。
+ *   · 半透明同時傷兩邊：字更難讀，**東西還是被蓋住**。它解決的是「擋掉多少光」，
+ *     但問題是「擋在哪裡」。
+ *
+ * 所以改的是**版面方向與位置**：四行直排（標題／副標／鍵帽／動詞）攤成一橫排，
+ * 高度從約 260px 掉到 **54px**（1280×720 下佔畫面高度 7.5%，原本 46%），**字級一個字都沒動**。
+ *
+ * `bottom: 76px` 是量出來的：底下那行操作說明（`.hud__controls`）實測 `top=670 高=26`，
+ * 76px 讓卡片下緣停在 644，留 26px 的縫；壓到 52px 只剩 2px，太貼。
+ * 1280×720 下卡片上緣在 y=590，離畫面中線（396）遠得很。
+ * （860px 以下那行操作說明整行 `display:none`，所以窄視窗根本不會撞到它。）
+ */
 .hud__interact {
   position: absolute;
   left: 50%;
-  bottom: 96px;
+  bottom: 76px;
   transform: translateX(-50%);
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 3px;
-  --cut: 11px;
-  padding: var(--s3) var(--s6);
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s4);
+  /* 關卡名 ＋「NPC · 最佳 S」是最長的一組；窄視窗時讓它換行而不是頂破畫面 */
+  max-width: min(92vw, 780px);
+  --cut: 9px;
+  padding: var(--s2) var(--s5);
   border: 0;
   border-radius: 0;
   clip-path: var(--seal-shape);
-  /* 邊 ＝ 一層由亮轉暗的漸層，跟介面上每一塊石牌同一套（Phase 15） */
+  /* 邊 ＝ ::before 蓋掉中間之後露出來的 1px 底色，跟介面上每一塊石牌同一套（Phase 15） */
   background-color: rgba(196, 220, 236, 0.26);
   backdrop-filter: blur(12px);
   text-align: center;
   animation: rise var(--d-slow) var(--e-out);
   filter: drop-shadow(0 18px 34px rgba(0, 0, 0, 0.7));
+  /*
+   * `.hud > * { pointer-events: auto }` 會讓這張卡吃滑鼠事件 —— 它蓋在畫面中央，
+   * 等於在正中間開一塊「拖曳轉不動鏡頭」的死區（`.nudge`／`.hud__aside` 都寫了這一條，
+   * 只有它漏掉）。它純粹是給人看的，不該攔任何輸入。
+   */
+  pointer-events: none;
 }
 .hud__interact::before {
   content: '';
@@ -1071,8 +1111,52 @@ a.src:hover {
   font-size: var(--t-micro);
   color: var(--paper-3);
 }
+/* 橫排之後鍵帽跟動詞在同一行，不再需要把它推下去 */
 .hud__interact kbd {
+  margin-top: 0;
+}
+
+/* v1.2 · P20b：檔案廊那一則小知識 —— 一張讀得到、按不到的紙片。
+   刻意擺在左側、字級小、不搶中央那張互動提示的位置（§3.3「一次只有一件事擁有畫面」）。 */
+.hud__aside {
+  position: absolute;
+  left: var(--s6);
+  bottom: 34%;
+  max-width: min(30ch, 34vw);
+  padding: var(--s3) var(--s4);
+  border-left: 2px solid var(--star);
+  background-color: rgba(9, 12, 18, 0.82);
+  backdrop-filter: blur(10px);
+  animation: aside-in var(--d-slow) var(--e-out);
+  pointer-events: none;
+}
+.hud__aside b {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-weight: 500;
+  letter-spacing: var(--tr-cjk);
+  color: var(--paper);
+}
+.hud__aside p {
+  margin: var(--s2) 0 0;
+  font-size: var(--t-micro);
+  line-height: 1.75;
+  color: var(--paper-3);
+}
+.hud__aside i {
+  display: block;
   margin-top: var(--s2);
+  font-style: normal;
+  font-size: var(--t-meta);
+  letter-spacing: 0.08em;
+  color: rgba(120, 137, 161, 0.9);
+}
+@keyframes aside-in {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
 }
 
 @keyframes rise {
@@ -1533,6 +1617,38 @@ a.src:hover {
   margin-right: 0.16em;
   color: var(--gold);
   font-weight: 500;
+}
+
+/* v1.2 · P01 · 濁言：濁靈那段寫壞的請求，用引文樣式呈現 —— 它是「牠說的話」，不是敘述。 */
+.console__scenario.is-taint {
+  position: relative;
+  margin: 0 0 var(--s5);
+  padding: var(--s3) var(--s4) var(--s3) var(--s5);
+  border-left: 2px solid rgba(160, 172, 190, 0.45);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: rgba(8, 10, 16, 0.55);
+  font-style: italic;
+  color: #b9c6d4;
+}
+.console__scenario.is-taint::first-letter {
+  -webkit-initial-letter: 1;
+  initial-letter: 1;
+  margin-right: 0;
+  color: inherit;
+  font-weight: inherit;
+}
+.console__scenario.is-taint::before {
+  content: '「';
+  position: absolute;
+  left: 0.55em;
+  top: 0.35em;
+  font-style: normal;
+  color: rgba(160, 172, 190, 0.6);
+}
+.console__scenario.is-taint::after {
+  content: '」';
+  font-style: normal;
+  color: rgba(160, 172, 190, 0.6);
 }
 
 /* 你的任務：整個練習室最重要的一塊。左邊的情境是氛圍，這裡是「要做什麼」。 */
@@ -2202,6 +2318,45 @@ a.src:hover {
   font-size: var(--t-meta);
 }
 
+/* ------------------------------------------------------------------ *
+ * v1.2 · P10b：這一次站在哪裡（內建分布的百分位）＋ 最少技巧達成
+ *
+ * 它是**次要資訊**：排在一條條檢查之後、出處之前，字級與顏色都比收穫那一行輕，
+ * 不准搶走「你缺了什麼」的注意力。第二行明寫那是內建的分布，不是其他玩家。
+ * ------------------------------------------------------------------ */
+.standing {
+  margin: var(--s4) 0 0;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+  font-family: var(--font-ui);
+  font-size: var(--t-meta);
+  letter-spacing: var(--tr-cjk);
+  color: var(--paper-3);
+}
+.standing__row {
+  display: block;
+  font-variant-numeric: tabular-nums;
+}
+.standing__row b {
+  color: var(--paper-2);
+  font-weight: 500;
+}
+.standing__note {
+  display: block;
+  margin-top: var(--s2);
+  font-size: var(--t-micro);
+  color: var(--paper-4);
+}
+.standing__note b {
+  color: var(--paper-3);
+  font-weight: 500;
+}
+.lean-seal {
+  margin: var(--s3) 0 0;
+  font-family: var(--font-ui);
+  font-size: var(--t-meta);
+}
+
 .result__source {
   margin: var(--s5) 0 0;
   padding-top: var(--s4);
@@ -2282,46 +2437,62 @@ a.src:hover {
 .badges h4 {
   margin: 0;
 }
-.badges__list {
-  list-style: none;
+/*
+ * v1.2 · P08：四宿星圖（取代原本的廠家徽章條）。
+ *
+ * 四叢程序化星點釘在四角：未滿是冷星光、集滿 5 顆整宿轉暖金並連成線。
+ * **沒有任何標誌、沒有任何品牌色**（各家品牌指引），畫的東西全部是
+ * <circle> 與 <polyline>，零外部圖檔。
+ */
+.starmap {
   margin: 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s5);
 }
-.badge {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  padding: 0 0 var(--s2);
-  border-bottom: 1px solid var(--rule);
+.starmap__sky {
+  display: block;
+  width: 100%;
+  max-width: 460px;
+  height: auto;
+  margin: 0 auto;
+}
+.starmap__stars circle {
+  fill: var(--star);
   opacity: 0.4;
-  font-size: var(--t-small);
-  min-width: 128px;
-  transition: opacity var(--d-mid) var(--e-out), border-color var(--d-mid) var(--e-out);
+  transition: opacity var(--d-mid) var(--e-out), fill var(--d-mid) var(--e-out);
 }
-.badge.is-on {
+.starmap__mansion.is-lit .starmap__stars circle {
+  fill: var(--gold);
   opacity: 1;
-  border-bottom-color: color-mix(in srgb, var(--c) 55%, transparent);
 }
-.badge b {
-  font-weight: 500;
-  letter-spacing: 0.02em;
+.starmap__link {
+  fill: none;
+  stroke: var(--rule-gold);
+  stroke-width: 0.8;
+  stroke-linejoin: round;
+  stroke-linecap: round;
 }
-.badge__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--c);
-  flex: none;
+.starmap__label {
+  fill: var(--paper-4);
+  font-size: 11px;
+  letter-spacing: var(--tr-cjk);
 }
-.badge__n {
-  margin-left: auto;
-  font-family: var(--font-display);
-  font-size: 1.7rem;
-  font-weight: 500;
-  color: var(--paper-2);
+.starmap__mansion.is-lit .starmap__label {
+  fill: var(--gold);
+}
+/* 星圖底下那一行：四家的真名 ＋「原典是什麼」＋ 免責句（唯一准出現公司名的地方之一）。 */
+.starmap__note {
+  margin: var(--s4) 0 0;
+  font-size: var(--t-micro);
+  line-height: 1.75;
+  color: var(--paper-4);
+}
+.starmap__note--legal {
+  margin-top: var(--s2);
+  color: var(--paper-4);
+  opacity: 0.78;
+}
+/* 成就頁的星圖前後要留白（那一頁只有幾段話，星圖是它的插圖）。 */
+.finale .starmap {
+  margin: var(--s5) 0;
 }
 .badges__hidden {
   margin: var(--s4) 0 0;
@@ -3486,6 +3657,23 @@ select option:disabled {
 .lore__line:last-of-type {
   margin-bottom: var(--s6);
 }
+/* v1.2 · P07 · 回信碑：一塊碑上不只一種筆跡。
+   first  原句 —— 最早刻上去的那一手（＝ .lore__line 的預設字級）
+   later  後人補寫 —— 小一號、偏暖，像擠在旁邊補上去的
+   struck 被劃掉的 —— 更小、更暗、加一道刪除線（字還讀得到，這是重點） */
+.lore__line--later {
+  font-size: 1.42rem;
+  color: #d8c9a8;
+  padding-left: var(--s4);
+  border-left: 2px solid rgba(198, 160, 92, 0.35);
+}
+.lore__line--struck {
+  font-size: 1.24rem;
+  color: rgba(190, 200, 212, 0.62);
+  text-decoration: line-through;
+  text-decoration-color: rgba(198, 160, 92, 0.7);
+  text-decoration-thickness: 1px;
+}
 .lore__note {
   margin: 0 0 var(--s1);
   font-family: var(--font-ui);
@@ -3564,6 +3752,33 @@ select option:disabled {
 /* ---------------------------------------------------------------- 走出來的收集
    圖鑑底下那兩行小字：刻文小語與藏起來的地方。
    刻意安靜 —— 它不是主線進度，是「順手撿到的」。 */
+/* v1.2 · P20b：圖鑑的三分法（世界觀／濁言／小知識）與檔案廊那一章 */
+.division {
+  margin: var(--s7) 0 var(--s4);
+}
+.meta-rule--division h4 .zh {
+  font-size: 1.24rem;
+}
+.division__sub {
+  margin: var(--s2) 0 0;
+  font-size: var(--t-micro);
+}
+.archive {
+  margin: 0 0 var(--s6);
+}
+.archive__body {
+  padding: var(--s3) var(--s4) var(--s4);
+}
+.archive__why {
+  margin: 0;
+  font-size: var(--t-body);
+  line-height: 1.9;
+  color: var(--paper-2);
+}
+.archive__srcs {
+  margin: var(--s3) 0 0;
+}
+
 .finds {
   margin: var(--s6) 0 0;
 }
@@ -3597,12 +3812,191 @@ select option:disabled {
   color: var(--paper-4);
 }
 
+/* v1.2 · P23 · 今日三事：圖鑑最上面那三個**提議**。
+   刻意跟「走出來的收集」（.finds）長得一樣安靜 —— 它不是待辦清單，
+   所以沒有勾選框、沒有進度條、沒有任何在倒數的東西。
+   做過了的那一件只是把記號換成 ✓ 並且退到背景，不會被強調。 */
+.daily {
+  margin: var(--s6) 0 0;
+}
+.daily__lead {
+  margin: 0 0 var(--s2);
+  font-size: var(--t-micro);
+}
+.daily__list i {
+  color: var(--gold);
+}
+.daily__list span {
+  font-family: inherit;
+  color: var(--paper-4);
+}
+.daily__item.is-done b,
+.daily__item.is-done i {
+  color: var(--paper-4);
+}
+
+/* v1.2 · P02 · 濁言與正言：圖鑑第四列下面可展開的清單。
+   安撫過的：濁言（弱、灰、斜體）→ 最佳評價 → 範例（強、金邊）→ 技法 → 官方出處；
+   還沒安撫的：只留名字＋「還沒聽懂」。跟上面「走出來的收集」同一個字級，一樣安靜。 */
+.murkbook {
+  margin: var(--s3) 0 0;
+}
+.murkbook__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--s2);
+}
+.murkbook__item {
+  font-size: var(--t-micro);
+  border-bottom: 1px dashed var(--rule);
+  padding-bottom: var(--s2);
+}
+.murkbook__item--quiet {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  color: var(--paper-4);
+}
+.murkbook__item summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s3);
+  cursor: pointer;
+  list-style: none;
+}
+.murkbook__item summary::-webkit-details-marker {
+  display: none;
+}
+.murkbook__title {
+  color: var(--paper-2);
+  letter-spacing: var(--tr-cjk);
+}
+.murkbook__state {
+  color: var(--paper-4);
+  font-style: italic;
+}
+.murkbook__grade {
+  font-family: var(--font-ui);
+  color: var(--gold);
+  white-space: nowrap;
+}
+.murkbook__body {
+  padding: var(--s3) 0 var(--s2);
+  display: grid;
+  gap: var(--s2);
+}
+.murkbook__label {
+  margin: 0;
+  color: var(--paper-4);
+  letter-spacing: var(--tr-cjk);
+}
+.murkbook__taint,
+.murkbook__sample {
+  margin: 0;
+  padding: var(--s2) var(--s3) var(--s2) var(--s4);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.murkbook__taint {
+  border-left: 2px solid rgba(160, 172, 190, 0.45);
+  background: rgba(8, 10, 16, 0.55);
+  color: #b9c6d4;
+  font-style: italic;
+}
+.murkbook__sample {
+  border-left: 2px solid var(--gold);
+  background: linear-gradient(90deg, rgba(198, 160, 92, 0.09), rgba(198, 160, 92, 0));
+  color: var(--paper-2);
+}
+.murkbook__skill {
+  margin: 0;
+  color: var(--paper-3);
+}
+.murkbook__skill b {
+  color: var(--paper-2);
+}
+/* v1.2 · P17：大濁靈的條目分三層 —— 眉批（A）、來歷（S）；沒到那一層只給剪影。 */
+.murkbook__layer {
+  margin: var(--s3) 0 0;
+  padding-top: var(--s2);
+  border-top: 1px solid rgba(214, 232, 244, 0.08);
+}
+.murkbook__note {
+  margin: 0;
+  color: var(--paper-3);
+  line-height: 1.8;
+}
+.murkbook__need {
+  margin-left: 0.6em;
+  color: var(--paper-4);
+  letter-spacing: var(--tr-meta-tight);
+}
+.murkbook__layer--locked .murkbook__silhouette {
+  margin: 0;
+  color: rgba(185, 203, 219, 0.16);
+  letter-spacing: 0.12em;
+  user-select: none;
+}
+
+/* v1.2 · P17：規則疊加 —— 一層一層，只看得見走到的那一層。 */
+.layers {
+  margin: 0 0 var(--s3);
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 2px;
+}
+.layers__row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5em;
+  font-family: var(--font-meta);
+  font-size: var(--t-meta);
+  letter-spacing: var(--tr-meta-tight);
+  color: var(--paper-4);
+}
+.layers__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(185, 203, 219, 0.2);
+  flex: 0 0 auto;
+}
+.layers__row.is-done {
+  color: var(--paper-3);
+}
+.layers__row.is-done .layers__dot {
+  background: rgba(230, 199, 155, 0.55);
+}
+.layers__row.is-done .layers__text {
+  text-decoration: line-through;
+  text-decoration-color: rgba(185, 203, 219, 0.35);
+}
+.layers__row.is-now {
+  color: var(--paper-1);
+}
+.layers__row.is-now .layers__dot {
+  background: var(--paper-1);
+  box-shadow: 0 0 8px rgba(230, 199, 155, 0.5);
+}
+.layers__row.is-hidden .layers__text {
+  color: rgba(185, 203, 219, 0.22);
+}
+/* 存檔裡已經散掉的那幾層：刻好了，但不是這一次刻的 —— 顏色比新刻的暗一階。 */
+.carved.is-settled {
+  color: rgba(185, 203, 219, 0.55);
+}
+
 /* ================================================================ 刻文小語
    Phase 22：介於「世界觀石碑」與「關卡」之間的第三層 ——
    兩句世界的話，一段真的教學（含可點的官方出處），然後就收起來。
    版面刻意比石碑再小一號：它是路過看一眼的東西，不是一個場景。
    ================================================================ */
-.overlay--inscribe .overlay__panel {
+.overlay--inscribe .panel {
   max-width: 46rem;
 }
 .inscribe {
@@ -3662,6 +4056,397 @@ select option:disabled {
   margin: var(--s5) 0 0;
   font-size: var(--t-meta);
   color: var(--paper-4);
+}
+
+/* ============================================================ 抄寫人的殘頁
+   v1.2 · P07：掉在路邊的一頁紙（工單／信／筆記）。
+   跟刻文小語同一個尺度，但紙比石頭軟：字級小半號、左邊一道紙緣的淡線。
+   一半的殘頁有教學（技巧名＋既有中文說法＋可點的官方出處），一半純風味。
+   ============================================================ */
+.overlay--letter .panel {
+  max-width: 46rem;
+}
+.letter {
+  position: relative;
+  padding: var(--s2) 0;
+}
+.letter__mark {
+  width: 2.4rem;
+  height: 1px;
+  margin: 0 0 var(--s4);
+  background: linear-gradient(90deg, var(--gold), rgba(198, 160, 92, 0));
+}
+.letter__line {
+  margin: 0 0 var(--s4);
+  font-family: var(--font-prose);
+  font-size: 1.36rem;
+  line-height: var(--lh-prose);
+  letter-spacing: 0.04em;
+  color: #e7ece2;
+  text-wrap: pretty;
+}
+.letter__glyph {
+  margin: var(--s6) 0 var(--s5);
+  padding: var(--s5) var(--s5) var(--s4);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--gold);
+  background: rgba(255, 255, 255, 0.02);
+}
+.letter__tech {
+  margin: var(--s2) 0 var(--s3);
+  font-family: var(--font-display);
+  font-size: var(--t-h3);
+  color: var(--paper);
+}
+.letter__tip {
+  margin: 0 0 var(--s3);
+  font-family: var(--font-prose);
+  font-size: var(--t-body);
+  line-height: var(--lh-prose);
+  color: var(--paper-2);
+}
+.letter__how {
+  margin: 0 0 var(--s4);
+  font-size: var(--t-small);
+  line-height: var(--lh-body);
+  color: var(--gold);
+}
+.letter__note {
+  margin: 0 0 var(--s1);
+  font-family: var(--font-ui);
+  font-size: var(--t-micro);
+  letter-spacing: var(--tr-cjk);
+  color: var(--gold);
+}
+.letter__note--seen {
+  color: var(--paper-4);
+}
+.letter__got {
+  margin-left: var(--s3);
+  color: var(--star);
+}
+.letter__hint {
+  margin: var(--s5) 0 0;
+  font-size: var(--t-meta);
+  color: var(--paper-4);
+}
+
+/* ============================================================ 守夜人
+   v1.2 · P16c：世界裡第一場對話。跟殘頁同一個尺度（一張小窗、幾行字），
+   但底下多一組**用選的**問句 —— 玩家不必打字，也不必記任何新的鍵。
+   ============================================================ */
+.overlay--watchman .panel {
+  max-width: 44rem;
+}
+.watch {
+  position: relative;
+  padding: var(--s2) 0;
+}
+.watch__mark {
+  width: 2.4rem;
+  height: 1px;
+  margin: 0 0 var(--s4);
+  background: linear-gradient(90deg, var(--gold), rgba(198, 160, 92, 0));
+}
+.watch__eyebrow {
+  margin: 0 0 var(--s3);
+  font-family: var(--font-ui);
+  font-size: var(--t-micro);
+  letter-spacing: var(--tr-cjk);
+  color: var(--paper-4);
+}
+.watch__line {
+  margin: 0 0 var(--s4);
+  font-family: var(--font-prose);
+  font-size: 1.36rem;
+  line-height: var(--lh-prose);
+  letter-spacing: 0.04em;
+  color: #e7ece2;
+  text-wrap: pretty;
+  animation: reveal-in var(--d-reveal) var(--e-out) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+.watch__opts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin: var(--s5) 0 0;
+}
+.watch__opt {
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--rule);
+  border-left: 2px solid rgba(198, 160, 92, 0.45);
+  background: rgba(255, 255, 255, 0.02);
+  font-family: var(--font-prose);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  letter-spacing: 0.03em;
+  color: var(--paper-2);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--d-fast) var(--e-out), color var(--d-fast) var(--e-out), border-color var(--d-fast) var(--e-out);
+  animation: reveal-in var(--d-reveal) var(--e-out) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+.watch__opt:hover,
+.watch__opt:focus-visible {
+  border-left-color: var(--gold);
+  background: rgba(230, 199, 155, 0.08);
+  color: var(--paper);
+}
+.watch__glyph {
+  margin: var(--s5) 0 var(--s4);
+  padding: var(--s5) var(--s5) var(--s4);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--gold);
+  background: rgba(255, 255, 255, 0.02);
+}
+.watch__tech {
+  margin: var(--s2) 0 var(--s3);
+  font-family: var(--font-display);
+  font-size: var(--t-h3);
+  color: var(--paper);
+}
+.watch__tip {
+  margin: 0 0 var(--s3);
+  font-family: var(--font-prose);
+  font-size: var(--t-body);
+  line-height: var(--lh-prose);
+  color: var(--paper-2);
+}
+.watch__acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin: var(--s5) 0 0;
+}
+.watch__hint {
+  margin: var(--s5) 0 0;
+  font-size: var(--t-meta);
+  color: var(--paper-4);
+}
+
+/* ============================================================ 守門者
+   v1.2 · P18：一個帶著 system prompt 站在門邊的人。跟守夜人同一個尺度，
+   多的是最上面那一塊 —— **他身上那份交辦**（玩家看得見的那份指令）。
+   對上的行亮起來、永不暗回去；沒對上的寫的是「還在等什麼」，不是「你錯了」。
+   ============================================================ */
+.overlay--guardian .panel {
+  max-width: 46rem;
+}
+.guard {
+  position: relative;
+  padding: var(--s2) 0;
+}
+.guard__rule {
+  width: 2.4rem;
+  height: 1px;
+  margin: 0 0 var(--s4);
+  background: linear-gradient(90deg, var(--gold), rgba(198, 160, 92, 0));
+}
+.guard__eyebrow {
+  margin: 0 0 var(--s3);
+  font-family: var(--font-ui);
+  font-size: var(--t-micro);
+  letter-spacing: var(--tr-cjk);
+  color: var(--paper-4);
+}
+.guard__line {
+  margin: 0 0 var(--s4);
+  font-family: var(--font-prose);
+  font-size: 1.36rem;
+  line-height: var(--lh-prose);
+  letter-spacing: 0.04em;
+  color: #e7ece2;
+  text-wrap: pretty;
+  animation: reveal-in var(--d-reveal) var(--e-out) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+.guard__charge {
+  margin: var(--s5) 0 var(--s4);
+  padding: var(--s5) var(--s5) var(--s4);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--gold);
+  background: rgba(255, 255, 255, 0.02);
+}
+.guard__intro {
+  margin: var(--s2) 0 var(--s4);
+  font-family: var(--font-prose);
+  font-size: var(--t-body);
+  line-height: var(--lh-prose);
+  color: var(--paper-3);
+}
+.guard__clauses {
+  margin: 0;
+  padding: 0 0 0 var(--s4);
+  list-style: decimal;
+}
+.guard__clause {
+  margin: 0 0 var(--s3);
+  font-family: var(--font-prose);
+  font-size: var(--t-body);
+  line-height: var(--lh-prose);
+  color: var(--paper-3);
+  animation: reveal-in var(--d-reveal) var(--e-out) both;
+  animation-delay: calc(var(--i, 0) * 60ms);
+}
+.guard__clause.is-open {
+  color: var(--paper);
+}
+.guard__seal {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin: 0 var(--s2) 0 0;
+  border: 1px solid var(--rule);
+  vertical-align: 0.05em;
+}
+.guard__clause.is-open .guard__seal {
+  border-color: var(--gold);
+  background: var(--gold);
+}
+.guard__state {
+  margin: 0 0 0 var(--s2);
+  font-family: var(--font-ui);
+  font-size: var(--t-micro);
+  letter-spacing: var(--tr-cjk);
+  color: var(--paper-4);
+}
+.guard__clause.is-open .guard__state {
+  color: var(--gold);
+}
+.guard__closing,
+.guard__tally {
+  margin: var(--s4) 0 0;
+  font-size: var(--t-meta);
+  color: var(--paper-4);
+}
+.guard__said {
+  margin: 0 0 var(--s4);
+  padding: var(--s4);
+  border: 1px solid var(--rule);
+  border-left: 2px solid rgba(198, 160, 92, 0.45);
+  background: rgba(0, 0, 0, 0.22);
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  line-height: var(--lh-body);
+  color: var(--paper-2);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+.guard__opened {
+  margin: 0 0 var(--s4);
+  font-size: var(--t-meta);
+  color: var(--gold);
+}
+.guard__opts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin: var(--s5) 0 0;
+}
+.guard__opt {
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--rule);
+  border-left: 2px solid rgba(198, 160, 92, 0.45);
+  background: rgba(255, 255, 255, 0.02);
+  font-family: var(--font-prose);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  letter-spacing: 0.03em;
+  color: var(--paper-2);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--d-fast) var(--e-out), color var(--d-fast) var(--e-out), border-color var(--d-fast) var(--e-out);
+  animation: reveal-in var(--d-reveal) var(--e-out) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+.guard__opt:hover,
+.guard__opt:focus-visible {
+  border-left-color: var(--gold);
+  background: rgba(230, 199, 155, 0.08);
+  color: var(--paper);
+}
+.guard__acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin: var(--s5) 0 0;
+}
+.guard__done {
+  margin: var(--s5) 0 0;
+  padding: var(--s4) 0 0;
+  border-top: 1px solid var(--rule);
+}
+.guard__hint {
+  margin: var(--s5) 0 0;
+  font-size: var(--t-meta);
+  color: var(--paper-4);
+}
+
+/* v1.2 · P07 · 圖鑑第五列下面可展開的清單：撿到的看得到內容，沒撿到的只留「還沒找到」。 */
+.letterbook {
+  margin: var(--s3) 0 0;
+}
+.letterbook__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--s2);
+}
+.letterbook__item {
+  font-size: var(--t-micro);
+  border-bottom: 1px dashed var(--rule);
+  padding-bottom: var(--s2);
+}
+.letterbook__item--quiet {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  color: var(--paper-4);
+}
+.letterbook__item summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s3);
+  cursor: pointer;
+  list-style: none;
+}
+.letterbook__item summary::-webkit-details-marker {
+  display: none;
+}
+.letterbook__title {
+  color: var(--paper-2);
+  letter-spacing: var(--tr-cjk);
+}
+.letterbook__state,
+.letterbook__kind {
+  color: var(--paper-4);
+  font-style: italic;
+  white-space: nowrap;
+}
+.letterbook__body {
+  padding: var(--s3) 0 var(--s2);
+  display: grid;
+  gap: var(--s2);
+}
+.letterbook__line {
+  margin: 0;
+  line-height: 1.7;
+  color: var(--paper-3);
+}
+.letterbook__skill {
+  margin: 0;
+  color: var(--paper-3);
+}
+.letterbook__skill b {
+  color: var(--paper-2);
+}
+.letterbook__how {
+  margin: 0;
+  color: var(--gold);
 }
 
 /* --- Phase 25：指路石的四個方向（一塊牌子一行，方位在左、內容在右） --- */
@@ -3847,9 +4632,6 @@ select option:disabled {
   .result__top {
     flex-wrap: wrap;
     gap: var(--s5);
-  }
-  .badges__list {
-    gap: var(--s4);
   }
   /* Phase 18：積木是一片片的小石籤，窄畫面自己換行就好（不再撐滿整行） */
   .console__blocks {
@@ -6978,6 +7760,13 @@ select option:disabled {
 .reveal.d4 {
   --i: 4;
 }
+/* v1.2 · P07 審查後補：殘頁的「收進圖鑑」與 Esc 提示排在內文之後（沒有這一條就會搶在前面亮） */
+.reveal.d5 {
+  --i: 5;
+}
+.reveal.d6 {
+  --i: 6;
+}
 
 @media (max-width: 720px) {
   .acts__item {
@@ -8187,8 +8976,7 @@ select option:disabled {
     margin-left: var(--s2);
   }
   /* 圖鑑的兩欄在這個寬度一定要收成一欄 */
-  .codex__grid,
-  .badges__list {
+  .codex__grid {
     grid-template-columns: 1fr;
   }
   /*
@@ -8220,8 +9008,7 @@ select option:disabled {
     min-width: 0;
   }
   .rank,
-  .rankbar,
-  .badge {
+  .rankbar {
     min-width: 0;
     overflow-wrap: anywhere;
   }
@@ -8608,4 +9395,249 @@ select option:disabled {
   .notch:hover {
     translate: none;
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * 傳聞（v1.2 · P20a）—— 圖鑑上把找到的線索接起來的那一頁
+ *
+ * 一條線 ＝ 左右兩顆 chip ＋ 中間一根線。**實線＝兩端都找到；虛線＝還差一頭**，
+ * 而虛線那一端連名字都不給（HTML 那邊就沒有那個字，不是靠 CSS 藏起來）。
+ * ------------------------------------------------------------------ */
+.rumors__group {
+  margin: 0 0 var(--s4);
+}
+.rumors__region {
+  margin: 0 0 var(--s2);
+  font-size: var(--t-micro);
+  font-weight: 400;
+  color: var(--paper-4);
+  letter-spacing: var(--tr-cjk);
+}
+.rumors__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--s3);
+}
+.rumor {
+  border-bottom: 1px dashed var(--rule);
+  padding-bottom: var(--s2);
+}
+.rumor__wire {
+  display: grid;
+  grid-template-columns: 1fr minmax(24px, 56px) 1fr;
+  align-items: center;
+  gap: var(--s2);
+}
+.rumor__end {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  font-size: var(--t-micro);
+  min-width: 0;
+}
+.rumor__end--b {
+  justify-content: flex-end;
+  text-align: right;
+}
+.rumor__kind {
+  font-family: var(--font-ui);
+  font-size: 0.82em;
+  color: var(--star);
+  border: 1px solid var(--rule-2);
+  border-radius: 2px;
+  padding: 0 4px;
+  flex: none;
+}
+.rumor__name {
+  font-weight: 400;
+  color: var(--paper-2);
+  letter-spacing: var(--tr-cjk);
+  overflow-wrap: anywhere;
+}
+.rumor__end.is-unknown .rumor__kind {
+  color: var(--paper-4);
+  border-style: dashed;
+}
+.rumor__end.is-unknown .rumor__name {
+  color: var(--paper-4);
+  font-style: italic;
+}
+.rumor__thread {
+  height: 1px;
+  align-self: center;
+  background: var(--rule-gold);
+}
+.rumor.is-half .rumor__thread {
+  background: none;
+  border-top: 1px dashed var(--rule-2);
+}
+.rumor__say {
+  margin: var(--s2) 0 0;
+  font-size: var(--t-micro);
+  line-height: 1.8;
+  color: var(--paper-3);
+}
+.rumor.is-half .rumor__say {
+  color: var(--paper-4);
+  font-style: italic;
+}
+@media (max-width: 560px) {
+  .rumor__wire {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .rumor__end--b {
+    justify-content: flex-start;
+    text-align: left;
+  }
+  .rumor__thread {
+    width: 24px;
+    margin-inline-start: 6px;
+  }
+}
+
+/* ================================================================ 回聲的小祠 ＋ 母碑
+   v1.2 · P22：整趟旅程的最後一個畫面。刻意**不是主控台**——
+   沒有評價印章、沒有分數條、沒有一條條列出你缺了什麼。
+   版面跟守夜人／守門者同一個尺度（一張小窗、幾行字、底下幾顆用選的），
+   多的是中間那塊「你自己寫的那一句」與底下那個重寫的地方。
+   ================================================================ */
+.overlay--rite .panel {
+  max-width: 46rem;
+}
+.rite {
+  position: relative;
+  padding: var(--s2) 0;
+}
+.rite__mark {
+  width: 2.4rem;
+  height: 1px;
+  margin: 0 0 var(--s4);
+  background: linear-gradient(90deg, var(--gold), rgba(198, 160, 92, 0));
+}
+.rite__line,
+.rite__lead {
+  margin: 0 0 var(--s4);
+  font-family: var(--font-prose);
+  font-size: 1.36rem;
+  line-height: var(--lh-prose);
+  letter-spacing: 0.04em;
+  color: #e7ece2;
+  text-wrap: pretty;
+  animation: reveal-in var(--d-reveal) var(--e-out) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+.rite__lead {
+  color: var(--gold);
+}
+/* 玩家自己打的字：系統字型（子集缺字也不會破圖），一律 escape 過才進來 */
+.rite__said {
+  margin: 0 0 var(--s3);
+  padding: var(--s4);
+  border: 1px solid var(--rule);
+  border-left: 2px solid rgba(198, 160, 92, 0.45);
+  background: rgba(0, 0, 0, 0.22);
+  font-family: var(--font-input);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  color: var(--paper-2);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+.rite__caption,
+.rite__note {
+  margin: 0 0 var(--s4);
+  font-family: var(--font-ui);
+  font-size: var(--t-meta);
+  line-height: var(--lh-body);
+  color: var(--paper-4);
+  animation: reveal-in var(--d-reveal) var(--e-out) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+.rite__ask {
+  margin: var(--s5) 0 var(--s3);
+  font-family: var(--font-prose);
+  font-size: 1.2rem;
+  line-height: var(--lh-prose);
+  letter-spacing: 0.03em;
+  color: var(--paper);
+  animation: reveal-in var(--d-reveal) var(--e-out) both;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+.rite__label {
+  display: block;
+  margin: 0 0 var(--s2);
+  font-family: var(--font-ui);
+  font-size: var(--t-micro);
+  letter-spacing: var(--tr-cjk);
+  color: var(--paper-4);
+}
+.rite__input {
+  display: block;
+  width: 100%;
+  min-height: 8rem;
+  padding: var(--s4);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.24);
+  color: #dfe9f3;
+  /* 使用者輸入 → 系統字型（子集缺字也安全） */
+  font-family: var(--font-input);
+  font-size: 1.18rem;
+  line-height: 1.75;
+  letter-spacing: 0.01em;
+  resize: vertical;
+  outline: none;
+}
+.rite__input:focus-visible {
+  border-color: rgba(198, 160, 92, 0.55);
+}
+.rite__input::placeholder {
+  color: var(--paper-4);
+  font-style: italic;
+}
+/* 「回聲聽見了」——一律是加法。一條都沒聽見時這一整塊不會出現。 */
+.rite__heard {
+  margin: var(--s4) 0;
+  padding: var(--s4) var(--s5) var(--s3);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--gold);
+  background: rgba(255, 255, 255, 0.02);
+}
+.rite__heardlist {
+  margin: var(--s3) 0 0;
+  padding: 0 0 0 var(--s4);
+  list-style: none;
+}
+.rite__heardlist li {
+  position: relative;
+  margin: 0 0 var(--s3);
+  font-family: var(--font-prose);
+  font-size: var(--t-body);
+  line-height: var(--lh-prose);
+  color: var(--paper-2);
+  animation: reveal-in var(--d-reveal) var(--e-out) both;
+  animation-delay: calc(var(--i, 0) * 60ms);
+}
+.rite__heardlist li::before {
+  content: '✦';
+  position: absolute;
+  left: calc(var(--s4) * -1);
+  color: var(--gold);
+}
+.rite__acts,
+.rite__choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin: var(--s5) 0 0;
+}
+.rite__hint {
+  margin: var(--s5) 0 0;
+  font-family: var(--font-ui);
+  font-size: var(--t-micro);
+  letter-spacing: var(--tr-cjk);
+  color: var(--paper-4);
 }

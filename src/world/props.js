@@ -18,6 +18,10 @@
  */
 import * as THREE from 'three';
 import { PALETTE } from '../engine/engine.js';
+// v1.2 · P11：路要繞過中觀的遮擋帶。screens.js 刻意**不** import props.js（不會有循環相依）。
+import { corridorPolyline } from './screens.js';
+// v1.2 · P21：碑上「那一層字」的門只有一份（`turning.js` 不 import 任何東西，沒有循環相依）。
+import { TABLET_GATES } from './turning.js';
 
 /* ------------------------------------------------------------------ *
  * 幾何體 / 材質快取
@@ -971,7 +975,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'carve-yard',
     region: 'foundations',
     name: '刻到一半的碑林',
-    at: [-16, -38],
+    at: [-20.8, -49.4],
     rot: 0.4,
     parts: [
       ['stele', [-2.6, 0, 0.4], 0.1, { h: 3.4, seed: 1 }],
@@ -986,7 +990,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'tea-circle',
     region: 'foundations',
     name: '沒說完的那場話',
-    at: [22, 44],
+    at: [28.6, 57.2],
     rot: -0.7,
     parts: [
       ['seat', [0, 0, 1.9], Math.PI, {}],
@@ -1000,7 +1004,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'first-words-pool',
     region: 'foundations',
     name: '初語之池',
-    at: [-40, 12],
+    at: [-52, 15.6],
     rot: 0.9,
     parts: [
       ['pool', [0, 0, 0], 0, { r: 3.4 }],
@@ -1014,7 +1018,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'watch-camp',
     region: 'foundations',
     name: '守望者的營地',
-    at: [44, 8],
+    at: [57.2, 10.4],
     rot: 2.1,
     parts: [
       ['firepit', [0, 0, 0], 0, {}],
@@ -1030,7 +1034,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'unfinished-thinker',
     region: 'reasoning',
     name: '沒刻完的思考者',
-    at: [-108, -113],
+    at: [-140.4, -146.9],
     rot: 0.8,
     parts: [
       ['thinker', [0, 0, 0], 0, {}],
@@ -1044,7 +1048,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'stair-to-nowhere',
     region: 'reasoning',
     name: '走不到盡頭的階梯',
-    at: [-78, -88],
+    at: [-101.4, -114.4],
     rot: -0.5,
     parts: [
       ['stair', [0, 0, -2.4], 0, { steps: 8 }],
@@ -1058,7 +1062,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'example-pair',
     region: 'reasoning',
     name: '示範的兩張牌',
-    at: [-112, -88],
+    at: [-145.6, -114.4],
     rot: 1.4,
     parts: [
       ['examples', [0, 0, 0], 0, {}],
@@ -1074,7 +1078,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'reading-nook',
     region: 'grounding',
     name: '沒收的閱讀角',
-    at: [105, -110],
+    at: [136.5, -143],
     rot: -0.9,
     parts: [
       ['desk', [0, 0, 0], 0, {}],
@@ -1088,7 +1092,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'well-of-questions',
     region: 'grounding',
     name: '問題之井旁',
-    at: [84, -110],
+    at: [109.2, -143],
     rot: 0.6,
     parts: [
       ['pool', [0, 0, 0], 0, { r: 2.6 }],
@@ -1102,7 +1106,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'ink-desk',
     region: 'grounding',
     name: '抄書人的桌子',
-    at: [95, -77],
+    at: [123.5, -100.1],
     rot: 2.4,
     parts: [
       ['desk', [0, 0, 0], 0.2, {}],
@@ -1118,7 +1122,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'half-built-engine',
     region: 'orchestration',
     name: '拆到一半的機器',
-    at: [-110, 105],
+    at: [-143, 136.5],
     rot: 0.5,
     parts: [
       ['machine', [0, 0, 0], 0, {}],
@@ -1133,7 +1137,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'tool-yard',
     region: 'orchestration',
     name: '交接到一半的工地',
-    at: [-80, 105],
+    at: [-104, 136.5],
     rot: -1.1,
     parts: [
       ['crane', [0, 0, 0], 0, { h: 7.0, reach: 4.6 }],
@@ -1147,7 +1151,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'draft-yard',
     region: 'orchestration',
     name: '不可逆的那扇門前',
-    at: [-95, 128],
+    at: [-123.5, 166.4],
     rot: Math.PI,
     parts: [
       ['drafttable', [0, 0, 0], 0, {}],
@@ -1163,7 +1167,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'dressing-corner',
     region: 'config',
     name: '後台的更衣角',
-    at: [80, 106],
+    at: [104, 137.8],
     rot: 1.2,
     parts: [
       ['costumes', [0, 0, 0], 0, {}],
@@ -1178,7 +1182,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'mirror-walk',
     region: 'config',
     name: '照見自己的一排鏡',
-    at: [110, 105],
+    at: [143, 136.5],
     rot: -0.6,
     parts: [
       ['mirror', [-2.4, 0, 0], 0.3, { h: 3.2 }],
@@ -1193,7 +1197,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'half-poured-mould',
     region: 'forms',
     name: '倒到一半的那一模',
-    at: [-24, 112],
+    at: [-31.2, 145.6],
     rot: 0.5,
     parts: [
       ['anvil', [0, 0, 0], 0, {}],
@@ -1207,7 +1211,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'measure-bench',
     region: 'forms',
     name: '量過就沒再量的桌',
-    at: [26, 116],
+    at: [33.8, 150.8],
     rot: -0.9,
     parts: [
       ['desk', [0, 0, 0], 0, { light: false }],
@@ -1221,7 +1225,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'overflow-trough',
     region: 'forms',
     name: '溢出來的那一槽',
-    at: [4, 152],
+    at: [5.2, 197.6],
     rot: 1.4,
     parts: [
       ['pool', [0, 0, 0], 0, { r: 3.0 }],
@@ -1237,7 +1241,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'nameless-tools',
     region: 'toolcraft',
     name: '沒有人替它取名字的那一把',
-    at: [-108, -22],
+    at: [-140.4, -28.6],
     rot: 0.6,
     parts: [
       ['anvil', [0, 0, 0], 0, {}],
@@ -1251,7 +1255,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'crowded-bench',
     region: 'toolcraft',
     name: '擺到放不下的那張檯',
-    at: [-140, 20],
+    at: [-182, 26],
     rot: -1.1,
     parts: [
       ['drafttable', [0, 0, 0], 0, {}],
@@ -1265,7 +1269,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'untouched-machine',
     region: 'toolcraft',
     name: '沒有人敢動的那一台',
-    at: [-124, 32],
+    at: [-161.2, 41.6],
     rot: 2.3,
     parts: [
       ['machine', [0, 0, 0], 0, {}],
@@ -1280,7 +1284,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'opened-letters',
     region: 'wards',
     name: '被拆開讀過的那幾封',
-    at: [106.9, -129.3],
+    at: [138.97, -168.09],
     rot: 0.8,
     parts: [
       ['desk', [0, 0, 0], 0, { light: false }],
@@ -1294,7 +1298,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'unwatched-post',
     region: 'wards',
     name: '沒有人在的那個崗',
-    at: [90.3, -133],
+    at: [117.39, -172.9],
     rot: -0.7,
     parts: [
       ['signpost', [0, 0, 0], 0, {}],
@@ -1310,7 +1314,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'ten-drafts',
     region: 'refinery',
     name: '改到第十版的那一疊',
-    at: [-121.2, 142.4],
+    at: [-157.56, 185.12],
     rot: 0.5,
     parts: [
       ['desk', [0, 0, 0], 0, { light: false }],
@@ -1324,7 +1328,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'facing-mirrors',
     region: 'refinery',
     name: '照著照著就沒有人看的兩面',
-    at: [-144.4, 127.6],
+    at: [-187.72, 165.88],
     rot: -0.9,
     parts: [
       ['mirror', [-2.4, 0, 0], 0.25, { h: 3.2 }],
@@ -1337,7 +1341,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'unread-checklist',
     region: 'refinery',
     name: '只蓋了章的那張檢查表',
-    at: [-142.6, 103.3],
+    at: [-185.38, 134.29],
     rot: 1.8,
     parts: [
       ['drafttable', [0, 0, 0], 0, {}],
@@ -1352,7 +1356,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'moved-out',
     region: 'frugality',
     name: '搬走之後留下的那一格',
-    at: [-12.8, -77.3],
+    at: [-16.64, -100.49],
     rot: 0.6,
     parts: [
       ['crates', [0, 0, 0], 0, {}],
@@ -1365,7 +1369,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'said-three-times',
     region: 'frugality',
     name: '同一句話寫了三遍的那一卷',
-    at: [-4.7, -94.8],
+    at: [-6.11, -123.24],
     rot: -0.8,
     parts: [
       ['desk', [0, 0, 0], 0, { light: false }],
@@ -1378,7 +1382,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'stale-tray',
     region: 'frugality',
     name: '沒有人再看的那一疊托盤',
-    at: [12.8, -86.7],
+    at: [16.64, -112.71],
     rot: 2.1,
     parts: [
       ['drafttable', [0, 0, 0], 0, {}],
@@ -1393,7 +1397,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'unpointed-view',
     region: 'sight',
     name: '沒有指名要看哪裡的那一面',
-    at: [110.5, -26.6],
+    at: [143.65, -34.58],
     rot: 0.9,
     parts: [
       ['mirror', [0, 0, 0], 0, { h: 3.4 }],
@@ -1406,7 +1410,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'five-edits-at-once',
     region: 'sight',
     name: '一次改了五處的那一張',
-    at: [142.6, 5.5],
+    at: [185.38, 7.15],
     rot: -1.7,
     parts: [
       ['drafttable', [0, 0, 0], 0, {}],
@@ -1419,7 +1423,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'breathless-line',
     region: 'sight',
     name: '沒有留下呼吸的那一段話',
-    at: [120.0, -40.0],
+    at: [156, -52],
     rot: 2.4,
     parts: [
       ['pool', [0, 0, 0], 0, { r: 2.6 }],
@@ -1433,7 +1437,7 @@ export const STORY_VIGNETTES = Object.freeze([
     id: 'little-stage',
     region: 'config',
     name: '只演給自己看的小舞台',
-    at: [95, 128],
+    at: [123.5, 166.4],
     rot: Math.PI,
     parts: [
       ['stage', [0, 0, 0], 0, { w: 5.4 }],
@@ -1445,29 +1449,50 @@ export const STORY_VIGNETTES = Object.freeze([
   },
 ]);
 
+/**
+ * v1.2 · P20a：一場回聲重演的**舞台** —— 那一處小景（或那一片土地的地標）
+ * 的中心與朝向。座標只有一份：這裡現查，不在別的資料檔裡重抄一次。
+ *
+ * 為什麼會有 `landmark` 這一種：**分歧之廳是十二片土地裡唯一沒有小景的一片**
+ * （`STORY_VIGNETTES` 33 組分在其餘十一片），所以它那一處回聲掛在自己的地標
+ * 「兩面的柱」腳下。理由與量出來的數字寫在 WORLD.md §4.17。
+ *
+ * @param {string} id
+ * @param {'vignette'|'landmark'} [kind]
+ * @returns {{at:number[], rot:number}|null}
+ */
+export function stageAnchor(id, kind = 'vignette') {
+  if (kind === 'landmark') {
+    const lm = LANDMARKS.find((l) => l.id === id);
+    return lm ? { at: lm.at, rot: 0 } : null;
+  }
+  const v = STORY_VIGNETTES.find((s) => s.id === id);
+  return v ? { at: v.at, rot: Number.isFinite(v.rot) ? v.rot : 0 } : null;
+}
+
 /* ------------------------------------------------------------------ *
  * 地標（landmark / weenie）：每區一個從中央高原就看得到的大剪影
  * ------------------------------------------------------------------ */
 export const LANDMARKS = Object.freeze([
-  { id: 'broken-ring', region: 'foundations', name: '斷環', at: [34, -30], height: 21, clear: 15 },
-  { id: 'endless-stair', region: 'reasoning', name: '無盡階梯塔', at: [-95, -95], height: 26, clear: 16 },
-  { id: 'great-tree', region: 'grounding', name: '藏書之樹', at: [95, -95], height: 25, clear: 16 },
-  { id: 'great-crane', region: 'orchestration', name: '巨臂吊車', at: [-95, 95], height: 27, clear: 16 },
-  { id: 'mask-arch', region: 'config', name: '面具拱門', at: [95, 95], height: 22, clear: 16 },
+  { id: 'broken-ring', region: 'foundations', name: '斷環', at: [44.2, -39], height: 21, clear: 15 },
+  { id: 'endless-stair', region: 'reasoning', name: '無盡階梯塔', at: [-123.5, -123.5], height: 26, clear: 16 },
+  { id: 'great-tree', region: 'grounding', name: '藏書之樹', at: [123.5, -123.5], height: 25, clear: 16 },
+  { id: 'great-crane', region: 'orchestration', name: '巨臂吊車', at: [-123.5, 123.5], height: 27, clear: 16 },
+  { id: 'mask-arch', region: 'config', name: '面具拱門', at: [123.5, 123.5], height: 22, clear: 16 },
   // 課程 v2 · Phase E：量器坊的地標（curriculum-v2 §二：「一根被刻滿量度的斷柱，柱頂懸著一把不動的尺」）
-  { id: 'gauge-column', region: 'forms', name: '刻度之柱', at: [0, 124], height: 24, clear: 15 },
+  { id: 'gauge-column', region: 'forms', name: '刻度之柱', at: [0, 161.2], height: 24, clear: 15 },
   // 課程 v2 · Phase F：契約鍛冶場（§二：「半空中一圈懸浮的鑰匙，每一把都沒有刻名字」）
-  { id: 'nameless-keys', region: 'toolcraft', name: '未命名的工具', at: [-124, 0], height: 23, clear: 15 },
+  { id: 'nameless-keys', region: 'toolcraft', name: '未命名的工具', at: [-161.2, 0], height: 23, clear: 15 },
   // 課程 v2 · Phase F：護欄崗（§二：「一道永遠留一條縫的雙層門」）
-  { id: 'ajar-doors', region: 'wards', name: '不會關上的門', at: [92.5, -153.5], height: 19, clear: 13 },
+  { id: 'ajar-doors', region: 'wards', name: '不會關上的門', at: [120.25, -199.55], height: 19, clear: 13 },
   // 課程 v2 · Phase G：校驗場（§二：「兩面互相對照的鏡」）
-  { id: 'facing-glass', region: 'refinery', name: '會回頭照自己的鏡', at: [-129, 129], height: 20, clear: 14 },
+  { id: 'facing-glass', region: 'refinery', name: '會回頭照自己的鏡', at: [-167.7, 167.7], height: 20, clear: 14 },
   // 課程 v2 · Phase H：減法之庭（§二：「一座什麼都沒放的基座，銘文寫著被拿走的東西」）
-  { id: 'empty-plinth', region: 'frugality', name: '空的基座', at: [0, -82], height: 18, clear: 13 },
+  { id: 'empty-plinth', region: 'frugality', name: '空的基座', at: [0, -106.6], height: 18, clear: 13 },
   // 課程 v2 · Phase I：觀象臺（§二：「一面朝天的鏡（斜插在坡上、映著整片星空的巨鏡）」）
-  { id: 'sky-mirror', region: 'sight', name: '朝天的鏡', at: [149, -31], height: 21, clear: 14 },
+  { id: 'sky-mirror', region: 'sight', name: '朝天的鏡', at: [193.7, -40.3], height: 21, clear: 14 },
   // 課程 v2 · Phase J：分歧之廳（§二：「五根兩面刻著相反神諭的柱」）
-  { id: 'twin-pillars', region: 'divergence', name: '兩面的柱', at: [90, 31], height: 22, clear: 14 },
+  { id: 'twin-pillars', region: 'divergence', name: '兩面的柱', at: [117, 40.3], height: 22, clear: 14 },
 ]);
 
 /** 斷環：一圈立起來的巨石環，缺了一角 —— 「有人試著把話說圓，還差一塊」。 */
@@ -1986,93 +2011,214 @@ const LANDMARK_BUILDERS = {
  */
 export const LORE_XP = 8;
 
+/**
+ * v1.2 · P07 · 回信碑：一塊碑上不只一種筆跡。
+ *
+ *   first   原句      —— 最早刻上去的那一手
+ *   later   後人補寫  —— 走到這裡的下一個人在旁邊補的一句
+ *   struck  被劃掉的  —— 再後面的人劃掉的一句（字還讀得到，這就是重點）
+ *
+ * `lines` 可以是純字串（＝ `first`，舊格式，永遠有效），也可以是 `{ text, hand }`。
+ */
+export const TABLET_HANDS = Object.freeze(['first', 'later', 'struck']);
+
+/**
+ * v1.2 · P21 · 還沒亮的那一層：一行字可以多一個 `when`（`TABLET_GATES` 之一）。
+ *
+ * 門沒到的時候，那一行**不交出來**——碑還立在原地、還走得過去、還按得到 `E`，
+ * 只是那一層還沒有字（不是鎖住、不是消失、不擋任何路線）。
+ * 沒有 `when` 的行永遠亮著，舊格式（純字串）完全不受影響。
+ */
+export { TABLET_GATES };
+
+/**
+ * 把一塊碑的 `lines` 正規化成 `{ text, hand, when }[]`（新舊格式都吃）。
+ *
+ * @param {object} tablet
+ * @param {string[]|Set<string>|null} [lit] 現在亮著的門（`turning.js` 的 `litTabletGates()`）。
+ *   缺省＝**一層門都沒亮**（碑上只有沒掛門的那幾行）。
+ *   要拿「這塊碑一共寫了幾行」就傳 `TABLET_GATES`（測試與內容稽核用）。
+ */
+export function tabletLines(tablet, lit = null) {
+  const raw = (tablet && tablet.lines) || [];
+  const on = lit instanceof Set ? lit : new Set(Array.isArray(lit) ? lit : []);
+  const out = [];
+  for (const l of raw) {
+    if (typeof l === 'string') {
+      out.push({ text: l, hand: 'first', when: null });
+      continue;
+    }
+    const text = l && typeof l.text === 'string' ? l.text : '';
+    const hand = l && TABLET_HANDS.includes(l.hand) ? l.hand : 'first';
+    const when = l && TABLET_GATES.includes(l.when) ? l.when : null;
+    // 門沒亮 → 這一層還沒有字
+    if (when && !on.has(when)) continue;
+    out.push({ text, hand, when });
+  }
+  return out;
+}
+
 export const LORE_TABLETS = Object.freeze([
   {
     id: 'hearth',
     region: 'foundations',
-    at: [7, 14],
+    at: [9.1, 18.2],
     title: '旅人的火塘',
     lines: ['我們在這裡生火，練習把話說完整。', '神諭不會猜；牠只回答你真的問出口的那件事。'],
   },
   {
     id: 'clarity-gate',
     region: 'foundations',
-    at: [-7, -13],
+    at: [-9.1, -16.9],
     title: '門前的舊牌',
-    lines: ['門口曾經立過一塊牌：「說得清楚的人請進。」', '後來牌子被搬走了——走到這裡的人都已經懂了。'],
+    // v1.2 · P07：回信碑（原句／後人補寫／被劃掉的）
+    lines: [
+      { text: '門口曾經立過一塊牌：「說得清楚的人請進。」', hand: 'first' },
+      { text: '後來牌子被搬走了——走到這裡的人都已經懂了。', hand: 'later' },
+      { text: '說不清楚的，就別進來了。', hand: 'struck' },
+    ],
   },
   {
     id: 'stone-circle',
     region: 'foundations',
-    at: [-42, -22],
+    at: [-54.6, -28.6],
     title: '立石環',
-    lines: ['這圈石頭是最早的人立的。', '他們還不會發問，只把想到的全刻上去——所以你看，字又長又亂。'],
+    lines: [
+      { text: '這圈石頭是最早的人立的。', hand: 'first' },
+      { text: '他們還不會發問，只把想到的全刻上去——所以你看，字又長又亂。', hand: 'later' },
+      { text: '刻得越多，神諭懂得越多。', hand: 'struck' },
+    ],
   },
   {
     id: 'mother-stele',
     region: 'foundations',
-    at: [18, -46],
+    at: [23.4, -59.8],
     title: '母碑殘片',
     lines: ['母碑倒下那年，有人抄下最後一行：', '「把你要的樣子先說出來，牠就照著做。」'],
   },
   {
     id: 'west-bridge',
     region: 'foundations',
-    at: [-32.9, -40.7],
+    at: [-42.77, -52.91],
     title: '西橋碑',
     lines: ['往西的路要走得慢。', '他們說，凡是想一步跨過去的，都掉進霧裡了。'],
   },
   {
     id: 'east-bridge',
     region: 'foundations',
-    // Phase 20：原本站在「斷環」臺座的邊上（相距 7.3 公尺，臺座本身就有 6.4 公尺寬）。
-    // 臺座補上碰撞體之後那半邊就繞不過去了 —— 沿著同一條半徑挪開，離地標 11.9 公尺，
-    // 與另外三塊橋碑一樣落在半徑 52.3 的圈上。
-    at: [45.3, -26.2],
+    // Phase 20：原本站在「斷環」臺座的邊上（臺座本身就有 6.4 公尺寬，繞不過去）。
+    // 臺座補上碰撞體之後那半邊就繞不過去了 —— 沿著同一條半徑挪開，離地標 15.50 公尺，
+    // 與另外三塊橋碑一樣落在半徑 68.03 的圈上。
+    // （v1.2 · P22c：圈與距離跟著世界 ×1.3；臺座 6.4 公尺是道具尺寸，一寸沒動 ——
+    //  所以「繞得過去」這件事比放大前更寬鬆，不是更緊。）
+    at: [58.89, -34.06],
     title: '東橋碑',
     lines: ['東邊的人不背誦。', '他們攤開手上的卷宗再開口；沒有卷宗的那天，就老實說「我不知道」。'],
   },
   {
     id: 'southwest-bridge',
     region: 'foundations',
-    at: [-32.9, 40.7],
+    at: [-42.77, 52.91],
     title: '西南橋碑',
     lines: ['工坊的規矩：大的活兒要拆成小的活兒，一件一件交出去。', '想一次做完的人，機器從來沒轉起來過。'],
   },
   {
     id: 'southeast-bridge',
     region: 'foundations',
-    at: [40.7, 32.9],
+    at: [52.91, 42.77],
     title: '東南橋碑',
     lines: ['戲班的第一課是換上面具。', '第二課是記得自己不是面具。'],
   },
   {
     id: 'demonstration',
     region: 'reasoning',
-    at: [-95, -108],
+    at: [-123.5, -140.4],
     title: '示範碑',
     lines: ['老師傅不解釋。', '他做兩遍給你看，第三遍就換你了。'],
   },
   {
     id: 'archive-door',
     region: 'grounding',
-    at: [95, -108],
+    at: [123.5, -140.4],
     title: '檔案庫門碑',
-    lines: ['這裡的規矩：先讀，再答。', '答完，要說得出你讀的是哪一頁。'],
+    lines: [
+      { text: '這裡的規矩：先讀，再答。', hand: 'first' },
+      { text: '答完，要說得出你讀的是哪一頁。', hand: 'later' },
+      { text: '讀不完就先猜一頁，反正沒人會去對。', hand: 'struck' },
+    ],
   },
   {
     id: 'workshop-yard',
     region: 'orchestration',
-    at: [-95, 108],
+    at: [-123.5, 140.4],
     title: '工坊庭碑',
     lines: ['有些門推開就關不上。', '工匠們在那種門上都刻了同一句：「先問過人。」'],
   },
   {
     id: 'backstage',
     region: 'config',
-    at: [95, 108],
+    at: [123.5, 140.4],
     title: '後台碑',
-    lines: ['旋鈕轉緊一點，戲每晚都一樣。', '轉鬆一點，偶爾會冒出連編劇都沒想過的台詞。'],
+    lines: [
+      { text: '旋鈕轉緊一點，戲每晚都一樣。', hand: 'first' },
+      { text: '轉鬆一點，偶爾會冒出連編劇都沒想過的台詞。', hand: 'later' },
+      { text: '全部轉到底最好，反正戲總會演完。', hand: 'struck' },
+    ],
+  },
+  /*
+   * v1.2 · P21 · 中點揭示：柱腳的碑（分歧之廳）。
+   *
+   * 立在廳的南側、不在必經路線上（離路網 9.30 公尺 —— 石碑本來就是「找到才有意義」，
+   * WORLD §4.2）；抬頭往東北就是那五根柱子（離柱心 27.0，柱子的留白是 14）。
+   * 這一片土地被 10 座石座 ＋ 一隻大濁靈 ＋ 兩道石脊填滿了，柱腳那一圈擺不下碑；
+   * 這裡是全區四周 16/16 都走得到、而且按得到它的方向最多（8/24）的那一格
+   * （量法與數字寫在 WORLD.md §4.19）。
+   * 前兩層一走到就讀得到；第三層掛 `when: 'midpoint'` —— 走進這片土地那一刻才亮。
+   *
+   * 它把前半段所有「三種筆跡」的碑重讀一遍：門前的舊牌、立石環、檔案庫門碑、
+   * 後台碑上那些被劃掉的句子，玩家一路以為是「後人在改前人的字」。
+   * 不是。是同一雙手，隔了很久回來，劃掉自己說過的話。
+   * ——連帶地，濁靈就是他們**沒能回來說完**的那幾句。
+   */
+  {
+    id: 'twin-pillars-foot',
+    region: 'divergence',
+    at: [83.53, 51.03],
+    title: '柱腳的碑',
+    lines: [
+      { text: '一面刻著要，另一面刻著不要，刻得一樣整齊。', hand: 'first' },
+      { text: '哪一面才算數，吵到最後也沒吵出來。', hand: 'struck' },
+      {
+        text: '兩面是同一雙手刻的——先刻了一面，很久以後才回來刻另一面。',
+        hand: 'later',
+        when: 'midpoint',
+      },
+    ],
+  },
+  /*
+   * v1.2 · P21 · 鏡碑第二層：鏡碑（校驗場）。
+   *
+   * 立在地標「會回頭照自己的鏡」前方 27.60 公尺。第二層掛 `when: 'scribe'`，
+   * 綁稱號鏈第三階（`ranks.json` 的 `scribe` · 抄寫人）——**沒到只是那一層還沒亮**，
+   * 碑照樣立在那裡、照樣讀得到前兩層。
+   *
+   * 被劃掉的那一句與「第二道裂痕」那處祕密是同一件事的兩面：
+   * 這裡的人不換鏡子，把裂痕留著當校準的起點。
+   */
+  {
+    id: 'mirror-stele',
+    region: 'refinery',
+    at: [-173.55, 140.73],
+    title: '鏡碑',
+    lines: [
+      { text: '這面鏡照的不是你的臉，是你剛剛寫下的那一句。', hand: 'first' },
+      { text: '照久了會裂，裂了就換一面新的。', hand: 'struck' },
+      {
+        text: '凡學會說話的人都是抄寫人。這一面照的是你。',
+        hand: 'later',
+        when: 'scribe',
+      },
+    ],
   },
 ]);
 
@@ -2127,11 +2273,12 @@ export function buildTablet(tablet, kit, terrainHeight) {
       this.read = Boolean(v);
       if (this.read) spark.material = glow(PALETTE.accent, 0.7);
     },
-    update(dt, t) {
+    // v1.2 · P25a：`kinetic` 0 ＝ reduce —— 光環不轉、火星不上下浮；亮度全部照舊（那是回應）
+    update(dt, t, kinetic = 1) {
       const wanted = (this.near ? 0.36 : this.read ? 0.06 : 0.14) + Math.sin(t * 1.6 + x * 0.2) * 0.03;
       halo.material.opacity += (wanted - halo.material.opacity) * Math.min(1, dt * 5);
-      halo.rotation.z += dt * (this.near ? 0.5 : 0.1);
-      spark.position.y = 2.05 + Math.sin(t * 1.3 + z * 0.2) * 0.08;
+      halo.rotation.z += dt * (this.near ? 0.5 : 0.1) * kinetic;
+      spark.position.y = 2.05 + Math.sin(t * 1.3 + z * 0.2) * 0.08 * kinetic;
     },
   };
 }
@@ -2142,11 +2289,27 @@ export function buildTablet(tablet, kit, terrainHeight) {
 /**
  * 主要動線：中央 ↔ 各區（橋），以及各區中心 ↔ 該區每一座石座。
  * 只用來染地面顏色，不動高度場 —— 不會影響可行走性判定。
+ *
+ * @param {object[]} sites
+ * @param {object[]} corridors
+ * @param {object[]} challenges
+ * @param {Record<string, number[][]>} [bendTable] 遮擋帶的折點表；省略 ＝ 出貨的那一份
+ *   （`screens.js` 的 `PATH_BENDS`）。只有 `scripts/screen-fit.mjs` 會換掉它。
  */
-export function buildPathNetwork(sites, corridors, challenges) {
+export function buildPathNetwork(sites, corridors, challenges, bendTable) {
   const segs = [];
-  // 1. 橋：中央 ↔ 各區
-  for (const c of corridors) segs.push([c.from.x, c.from.z, c.to.x, c.to.z]);
+  /*
+   * 1. 橋：中央 ↔ 各區。
+   *
+   * v1.2 · P11：路是被**走出來**的，所以遇到遮擋帶時它會繞過去 ——
+   * `corridorPolyline()` 把該區登記的折點（`screens.js` 的 `PATH_BENDS`）串進來，
+   * 沒有登記的區回傳的還是「中心 → 中心」那一條直線，逐點與 P10 之前完全相同。
+   * `scripts/sightline-audit.mjs` 量的就是這一條折線 —— 畫在地上的路與稽核量的路是同一條。
+   */
+  for (const c of corridors) {
+    const poly = corridorPolyline(c, bendTable);
+    for (let i = 0; i + 1 < poly.length; i += 1) segs.push([poly[i][0], poly[i][1], poly[i + 1][0], poly[i + 1][1]]);
+  }
 
   for (const site of sites) {
     const pins = (challenges || [])
@@ -2242,15 +2405,29 @@ export function buildVignettes(regionId, kit, terrainHeight, quality) {
     if (v.region !== regionId) continue;
     const holder = new THREE.Group();
     holder.name = `vignette:${v.id}`;
-    holder.position.set(v.at[0], terrainHeight(v.at[0], v.at[1]), v.at[1]);
-    holder.rotation.y = v.rot || 0;
+    const baseY = terrainHeight(v.at[0], v.at[1]);
+    holder.position.set(v.at[0], baseY, v.at[1]);
+    const rot = v.rot || 0;
+    holder.rotation.y = rot;
+    const cos = Math.cos(rot);
+    const sin = Math.sin(rot);
 
     for (const [kind, offset, rotY, opts] of v.parts) {
       const make = PROPS[kind];
       if (!make) continue;
       // 低畫質：道具一律不帶實體光源（發光材質仍在，只是不參與著色）
       const prop = make(kit, quality === 'high' ? opts || {} : { ...(opts || {}), light: false });
-      prop.position.set(offset[0], offset[1] || 0, offset[2]);
+      /*
+       * v1.2 · P25b0：每一件貼**自己腳下的地**，不是組中心那一點的地。
+       * 地會起伏，離組中心越遠的零件浮空或埋地就越明顯（最糟的一件超過一公尺）。
+       * `offset[1]` 是「刻意的垂直位移」（放在桌上的墨、懸在階梯上方的浮階）——
+       * 那一種擺的是相對關係，一貼地就會從它靠著的東西上掉下來，所以原樣不動。
+       * 稽核在 `scripts/vignette-fit.mjs`，兩種擺法各有一條斷言守著。
+       */
+      const lift = offset[1] || 0;
+      const wx = v.at[0] + offset[0] * cos + offset[2] * sin;
+      const wz = v.at[1] - offset[0] * sin + offset[2] * cos;
+      prop.position.set(offset[0], lift || terrainHeight(wx, wz) - baseY, offset[2]);
       prop.rotation.y = rotY || 0;
       if (quality === 'high') {
         prop.traverse((o) => {
@@ -2298,9 +2475,13 @@ export function buildLandmark(regionId, kit, terrainHeight, quality) {
 
 export default {
   LORE_TABLETS,
+  TABLET_HANDS,
+  TABLET_GATES,
+  tabletLines,
   LORE_XP,
   STORY_VIGNETTES,
   LANDMARKS,
+  stageAnchor,
   PROP_KINDS,
   kitFor,
   buildVignettes,
