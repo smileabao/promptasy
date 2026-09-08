@@ -2403,3 +2403,47 @@ Exit criteria：
 **誠實留給下一輪**：面板開著時背景（HUD ＋ 3D 畫布）**沒有 `inert`／`aria-hidden`** ——
 Tab 鎖得住，但螢幕閱讀器的瀏覽游標仍讀得到背後的東西。乾淨作法是開啟時對 `.ui` 加 `inert`，
 但 `inert` 同時擋 pointer events，會動到 scrim 點擊關閉與 3D 畫布，風險超出這一格。
+
+---
+
+## v1.2 · P25b — 效能回歸 ＋ 測試收斂 ＋ v1.2 發版（里程碑 E 最後一格）
+
+### ① e2e flaky 清零（這一格最有價值的一件）
+
+已知的 flaky 全部是**固定 sleep 對齊牆鐘時間**：這台機器在忙的時候一幀要 372–481 ms，
+`sleep(800)` 連兩幀都不到。本輪已經被咬過三次（祕密偵測連鎖 8 條、拖曳 3 條、焦點 500ms）。
+**根治方式是輪詢到條件成立，不是重跑。**
+
+做法：掃出 `scripts/headless-check.mjs` 裡**所有**固定 sleep，逐一判斷：
+- 等「某個狀態變成 X」→ 改輪詢（**而且要能真的失敗**：不能被前一個值滿足、要有超時）
+- 等「動畫播完看最終樣子」→ 輪詢到穩定（連續 N 次取樣不變）
+- 真的只是節流／讓出一拍的 → 留著並註明為什麼不能改
+
+**驗收：連跑三輪 e2e 全綠**（不是跑一輪綠就算）。
+
+### ② 低階機 low quality 30fps
+
+先量再說。這台是 SwiftShader 軟體渲染，**幀時量不準**（findings 記過），所以
+**不要用這台的幀時當結論**。改用可以確定性量的代理：低畫質的 draw call／透明片／三角
+與高畫質的比值（P22b 已經立了契約）。若要真的量幀時，明說是在什麼機器上量的。
+
+### ③ 對外數字同步（發版前的最後一步）
+
+- `WORLD.md` §6.1 預算表 → 跑一次 `npm run audit:perf` 核對（P25b0 已發現有一處歷史值 1,053 是舊的，
+  但**歷史敘述裡的數字不要改**，只改「現況」那張表）
+- `CLAUDE.md` 的「狀態」段落（現在寫 v1.1 已上線）→ 補 v1.2
+- `README.md` 對外數字核對（關卡數／區數／技能數 v1.2 沒變，但要親自確認過再說沒變）
+- `docs/history/prompts.html` 補 v1.2 的 goal 與達成效果
+
+### ④ 發版
+
+`CHANGELOG.md` 由 orchestrator 寫；合 main、打 tag `v1.2`。
+
+**禁區**：`curriculum.json`（紅線）、`src/data/*.json`、`vite.config.js`、
+`gameplay-roadmap.md`、三件組、dev server 5173／5174／5175。
+`CLAUDE.md`／`README.md`／`WORLD.md` 這一格可以改，但**只准改對外數字與狀態**，不准動護欄或設計主張。
+
+Exit criteria：
+- [ ] e2e 連跑三輪全綠、console error 0。
+- [ ] 對外數字全部核對過（親自量，不引用舊值）。
+- [ ] rubric／playtest／build 全綠；預算在框內。
