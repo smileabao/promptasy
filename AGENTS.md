@@ -7,7 +7,7 @@
 
 Promptasy（前名 PromptArcade）：在瀏覽器裡「邊玩邊學 prompt engineering」的 three.js 探索遊戲。
 離線評分、130 條技能全附官方出處、142 個關卡（130 教學＋12 應用）、12 個區域、11 種題型。
-純靜態、無後端、localStorage 存檔。v1.1 已上線 garyhsieh.com/promptasy。
+純靜態、無後端、localStorage 存檔。v1.1 已上線 garyhsieh.com/promptasy；v1.2「濁靈之夜」開發完成、待發版（規模未變）。
 
 ## 每個 Phase 的節奏
 
@@ -21,19 +21,21 @@ Promptasy（前名 PromptArcade）：在瀏覽器裡「邊玩邊學 prompt engin
 
 | 指令 | 內容 | 耗時 | 什麼時候跑 |
 |---|---|---|---|
-| `npm run test:rubric` | 8 萬+ 斷言：評分引擎、資料完整性、出處健檢、碰撞審計、中文掃描、字型語料指紋、存檔遷移 | ~1 分 | **每次改動都跑** |
-| `npm run test:playtest` | 每關「照提示一定過得了」：範例解 ≥A、快速填入必過、弱起手必不過、誤判迴歸 | ~10 秒 | 動到關卡資料 / 檢查器時 |
+| `npm run test:rubric` | 22 萬+ 斷言：評分引擎、資料完整性、出處健檢、碰撞審計、中文掃描、字型語料指紋、存檔遷移 | ~42 秒 | **每次改動都跑** |
+| `npm run test:playtest` | 每關「照提示一定過得了」：範例解 ≥A、快速填入必過、弱起手必不過、誤判迴歸 | < 1 秒 | 動到關卡資料 / 檢查器時 |
 | `npm run build` | Vite 建置 | ~2 秒 | 每次改動都跑 |
-| `npm run test:e2e` | 3,300+ 項無頭瀏覽器實玩（走路、序章、刻碑、過關、分享…） | **15–20 分鐘**（軟體渲染機器） | 大改動、動到互動流程時 |
+| `npm run test:e2e` | 4,900+ 項無頭瀏覽器實玩（走路、序章、刻碑、過關、分享…） | **20–30 分鐘**（軟體渲染機器，閒著時實測 174 ms/幀） | 大改動、動到互動流程時 |
 
 ## 測試策略（成本控制的核心）
 
 - **先問再跑**：改動**項目不多**時（純文案、單一元件樣式、資料微調…），先詢問使用者要
-  「全跑 / 只跑快的（rubric＋build）/ 不跑」，不要預設把 15–20 分鐘的 e2e 跑下去。
+  「全跑 / 只跑快的（rubric＋build）/ 不跑」，不要預設把 20–30 分鐘的 e2e 跑下去。
   使用者明說「不用跑測試」就照辦（rubric＋build 十幾秒的快檢通常仍值得，除非連這個也被排除）。
 - **不重複驗證**：subagent 跑過全綠的 e2e，orchestrator 只做快速驗證（rubric ＋ build ＋ curl dev server 200）。
-- **已知 flaky**：e2e 有少數「動畫時序類」斷言（拖曳、火盆亮度、風鈴擺動）在軟體渲染下偶發失敗——
-  失敗清單**只有**這幾條時重跑一次即可；要根治就改成輪詢式斷言（poll until），不要用固定 sleep。
+- **動畫時序類斷言不准等牆鐘**（v1.2 · P25b 掃過整支 e2e）：等的是**條件成立**（poll until，有超時、
+  而且不能被前一個值滿足）；真的只是「讓畫面跑一拍」用 `settle(ms)`／`window.__paSettle(ms)`
+  （牆鐘與 N 個真的畫出來的影格一起等）。留著固定 sleep 的地方要寫明理由。
+  以前那批「拖曳／火盆亮度／風鈴擺動」的偶發紅燈就是等牆鐘等出來的，**別再用「重跑一次」當解法**。
 - **防空泛通過**：幾何/版面斷言先確認元素真的可量測（曾在錯誤幕次量到 0×0 而全部空過）；
   新功能的斷言先讓它失敗一次再讓它通過。
 
@@ -44,7 +46,7 @@ Promptasy（前名 PromptArcade）：在瀏覽器裡「邊玩邊學 prompt engin
   官方文件過時用「時代註記」層（`src/data/dated-notes.json`）標注，不改原文。
 - **中文字串 → `npm run fonts`**：CJK 子集掃描全部 `src/**` 與 `src/data/*.json` 切出來；漏跑會被指紋測試攔下。
 - **鍵盤優先**（WORLD.md §3）：加任何互動前先回答「純鍵盤怎麼做」。
-- **音檔後製**：BGM 統一 -20 LUFS、SFX 峰值 -6 dBFS、AAC(m4a) 進 `public/audio/`，
+- **音檔後製**：配樂床 -20 LUFS、音效 -19 LUFS、套上 gain 之後的峰值上限 -3 dBFS、AAC(m4a) 進 `public/audio/`，
   授權逐檔登記 `public/LICENSE.md`（配樂標示：Gary Hsieh，由 SUNO.ai 輔助生成）；檔案缺席時合成音自動後備。
 - **存檔**：`promptasy.v1.save`（自動從舊的 `promptarcade.v1.save` 遷移）；新欄位一律 additive ＋ `normalize()` 給預設值。
 - **e2e 的埠**：harness 用自己的 port（5198/5199/9333…），跑完殺掉整個 process group；

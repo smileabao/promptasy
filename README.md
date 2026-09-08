@@ -84,15 +84,15 @@ someone who has never written a prompt can still finish a challenge and learn *w
 - **Jargon that explains itself** — hovering (or focusing) a technical term anywhere in the UI opens a small glossary
   card; 24 terms, written in plain Chinese.
 - **A world worth walking** — a central plateau with bridges and an annex leading to 12 lands, each with its own
-  palette, fog, aurora drift and generative lighting; 12 landmarks visible from far away, 12 lore steles,
-  13 inscription whispers, 22 interactable objects across 8 kinds, 22 proximity reactions and 4 map secrets.
-  All procedural — zero model files.
+  palette, fog, aurora drift and generative lighting; 12 landmarks visible from far away, 14 lore steles,
+  13 inscription whispers, 44 interactable objects, 44 proximity reactions, 24 scribe pages, 12 archive halls,
+  20 murks, 11 jumpable platforms and 12 map secrets. All procedural — zero model files.
 - **Real soundtrack** — **13 original tracks** (title + one per region, cross-faded when you cross a bridge) and
   **24 SFX**. If the audio files are missing or blocked, a **Web Audio synth fallback** takes over and the game still
   sounds alive.
 - **Keyboard-first** — the whole journey is playable without a mouse; focus traps, restored focus, visible focus rings,
   `prefers-reduced-motion`, and a `?` key that shows every binding at any time.
-- **Self-hosted OFL fonts** — 6 families subset to **~1.44 MB** from the project's actual corpus. **Zero CDN, zero
+- **Self-hosted OFL fonts** — 6 families subset to **~1.50 MB** from the project's actual corpus. **Zero CDN, zero
   external requests at runtime.**
 - **Progress in localStorage** — no account, no server. Settings page has a one-click "reset and relearn" (with
   confirmation).
@@ -218,10 +218,10 @@ promptasy/
 
 | Command | What it covers | Time | Latest run |
 | --- | --- | --- | --- |
-| `npm run test:rubric` | Scoring engine, data integrity, source health, collision audit, Chinese-only scan, font-corpus fingerprint, save migration | ~40 s | **80,453 assertions passing** |
-| `npm run test:playtest` | Every challenge is beatable by following the on-screen help: sample answer ≥ A, quick-fills always pass, weak starters always fail, misjudgement regressions | ~15 s | **2,372 assertions passing** |
+| `npm run test:rubric` | Scoring engine, data integrity, source health, collision audit, Chinese-only scan, font-corpus fingerprint, save migration | ~42 s | **227,274 assertions passing** |
+| `npm run test:playtest` | Every challenge is beatable by following the on-screen help: sample answer ≥ A, quick-fills always pass, weak starters always fail, misjudgement regressions | ~0.2 s | **2,824 assertions passing** |
 | `npm run build` | Vite build | ~2 s | passing |
-| `npm run test:e2e` | Headless Chrome playthrough over CDP (walking, prologue, all eleven board types, passing, sharing) — no puppeteer/playwright, just Node + system Chrome; a second browser instance replays the entry gate under the default autoplay policy | 25–40 min on software rendering | **3,357 checks passing, zero console errors** (latest full run, first try, no reruns) |
+| `npm run test:e2e` | Headless Chrome playthrough over CDP (walking, prologue, all eleven board types, passing, sharing) — no puppeteer/playwright, just Node + system Chrome; a second browser instance replays the entry gate under the default autoplay policy | ~23 min on this software-rendering box | **4,930 checks passing, zero console errors** (three consecutive full runs, no reruns) |
 
 ---
 
@@ -405,11 +405,12 @@ npm run build    # 靜態輸出 dist/
 ### 規模
 
 142 個關卡（130 座教學神廟 ＋ 12 座應用試煉）· 12 片土地 · 130 條技能（底下仍逐字保留 68 條原技巧）·
-81 個離線檢查器 · 11 種題型 ＋ 自由書寫 · 520 段刻印題（1,233 個選項）· 12 座地標 · 12 塊世界觀石碑 ·
-13 則刻文小語 · 44 件動得了的器物 · 44 處會回應的東西 · 24 頁抄寫人的殘頁 · 8 隻濁靈 ·
-12 個藏起來的地方 · 5 座跳得上去的高台 · 12 枚土地印記 · 8 個稱號 ·
-13 首原創配樂 ＋ 24 支音效 · 1.47 MB 自架 OFL 字型 · **零 CDN、零外部請求、零後端**。
+81 個離線檢查器 · 11 種題型 ＋ 自由書寫 · 520 段刻印題（1,233 個選項）· 12 座地標 · 14 塊世界觀石碑 ·
+13 則刻文小語 · 44 件動得了的器物 · 44 處會回應的東西 · 24 頁抄寫人的殘頁 · 20 隻濁靈（其中 12 隻大濁靈）·
+12 個藏起來的地方 · 11 座跳得上去的高台 · 12 位守夜人 ＋ 1 位守門者 · 12 座檔案廊（24 則小知識）·
+24 張術語小卡 · 12 枚土地印記 · 8 個稱號 ·
+13 首原創配樂 ＋ 24 支音效 · 1.50 MB 自架 OFL 字型 · **零 CDN、零外部請求、零後端**。
 
-測試現況：`test:rubric` 128,650 · `test:playtest` 2,533 · `test:e2e` 4,200（零 console error）。
+測試現況：`test:rubric` 227,274 · `test:playtest` 2,824 · `test:e2e` 4,930（零 console error）。
 
 > 更長期的目標、開發護欄與逐 phase 變更紀錄都在 [`CLAUDE.md`](./CLAUDE.md)。

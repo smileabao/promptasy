@@ -89,6 +89,32 @@ function eq(actual, expected, name, extra = '') {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/*
+ * v1.2 · P25b — 頁面裡的 settle（`window.__paSettle`）。
+ *
+ * 頁面裡也有一大批「動作 → 等 N 毫秒 → 讀狀態」。在軟體渲染的機器上
+ * 那 N 毫秒可能連一幀都排不到，讀到的就是上一拍 —— 和 node 這一側
+ * 同一個病。`__paSettle(ms)` 同時等「牆鐘 ms」和「n 個真的畫出來的影格」，
+ * 取兩者較久的那個：快的機器上和原本的 setTimeout 完全一樣，
+ * 慢的機器上才多等。只會變寬、不會變鬆。
+ *
+ * 用 prelude 的方式塞進每一次 Runtime.evaluate，換頁之後也一定在。
+ */
+const PAGE_PRELUDE = `
+  if (!window.__paSettle) {
+    window.__paSettle = (ms, n = 2) => Promise.all([
+      new Promise((r) => setTimeout(r, ms)),
+      new Promise((res) => {
+        let i = 0;
+        const step = () => { if (++i >= n) res(); else requestAnimationFrame(step); };
+        requestAnimationFrame(step);
+        // rAF 整個不跑的環境（頁籤被遮住）要有逃生索，不然會吊死整支測試
+        setTimeout(res, 8000);
+      }),
+    ]);
+  }
+`;
+
 /* ------------------------------------------------------------------ */
 /* CDP 客戶端                                                          */
 /* ------------------------------------------------------------------ */
@@ -302,13 +328,108 @@ async function main() {
   async function evaluate(expression) {
     const r = await cdp.send(
       'Runtime.evaluate',
-      { expression: `(async () => { ${expression} })()`, awaitPromise: true, returnByValue: true },
+      { expression: `(async () => { ${PAGE_PRELUDE} ${expression} })()`, awaitPromise: true, returnByValue: true },
       sessionId
     );
     if (r.exceptionDetails) {
       throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
     }
     return r.result.value;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * v1.2 · P25b — 不看牆鐘的等待（固定 sleep 的替代品）
+   *
+   * 這台 e2e 機器是 SwiftShader 軟體渲染：忙起來一幀要 372–481 ms，
+   * 於是 `sleep(800)` 連兩幀都排不到 ——「等畫面追上來」的固定 sleep
+   * 就變成一整族時好時壞的斷言（P22c 三輪的失敗集合互不重疊
+   * ＝沒有一條是真迴歸，全是在等牆鐘）。根治的方式是**等條件成立**，
+   * 不是等時間過去，也不是重跑：
+   *
+   *   until(expr)        等到頁面裡的 expr 成真；等不到就超時 → 真壞掉照樣紅。
+   *   untilChanged(expr) 先把舊值讀下來，再等它**真的翻面**——
+   *                      擋得住「前一個值就滿足了」的空泛通過。
+   *   untilStable(expr)  等到連續 N 次取樣一模一樣（動畫播完看最終樣子）。
+   *   settle(ms)         真的只是「讓畫面跑一拍」時用：牆鐘 ms **和**
+   *                      N 個真的畫出來的影格，兩個同時開始等。
+   *                      快的機器上等同於原本的 sleep(ms)；慢的機器上才會多等 ——
+   *                      也就是說它只會變寬、不會變鬆，不可能讓斷言更容易過。
+   * ------------------------------------------------------------------ */
+
+  /** settle 一次至少要等過幾個真的影格（環境很慢時可調大，不改斷言內容）。 */
+  const SETTLE_FRAMES = Number(process.env.PA_SETTLE_FRAMES || 2);
+
+  /** 讓出 n 個「真的畫出來的」影格（rAF）；換頁中拿不到就安靜跳過。 */
+  async function framesRendered(n = SETTLE_FRAMES) {
+    try {
+      await evaluate(`
+        await new Promise((res) => {
+          let i = 0;
+          const step = () => { if (++i >= ${n}) res(); else requestAnimationFrame(step); };
+          requestAnimationFrame(step);
+          setTimeout(res, 8000);   // rAF 不跑的環境的逃生索
+        });
+        return 1;
+      `);
+    } catch {
+      /* 換頁 / execution context 沒了 —— 那就只靠牆鐘那一半 */
+    }
+  }
+
+  /** 牆鐘 ms 與 N 個影格一起等（取兩者的較久者）。 */
+  async function settle(ms, n = SETTLE_FRAMES) {
+    await Promise.all([sleep(ms), framesRendered(n)]);
+  }
+
+  /**
+   * 等到頁面裡的 expr 回真值為止。
+   *
+   * `soft: true` ＝ 等不到就回 null 而不是丟例外 —— 用在「等的東西正是
+   * 下一條斷言要判的」那種場合：讓那一條斷言自己去紅，而不是把整支測試炸掉。
+   */
+  async function until(expr, { timeout = 25000, every = 80, label = '', soft = false } = {}) {
+    const run = waitFor(() => evaluate(`return (${expr}) ? 1 : 0;`).catch(() => 0), {
+      timeout,
+      every,
+      label: label || expr,
+    });
+    return soft ? run.catch(() => null) : run;
+  }
+
+  /** 先讀舊值再等它翻面；回傳新值（已 JSON 還原）。 */
+  async function untilChanged(expr, { timeout = 25000, every = 80, label = '', soft = false } = {}) {
+    const read = () => evaluate(`return JSON.stringify(${expr} ?? null);`).catch(() => null);
+    const before = await read();
+    const run = waitFor(
+      async () => {
+        const v = await read();
+        return v != null && v !== before ? v : false;
+      },
+      { timeout, every, label: label || `${expr} 翻面（原本 ${before}）` }
+    );
+    const now = soft ? await run.catch(() => null) : await run;
+    return now == null ? null : JSON.parse(now);
+  }
+
+  /** 等到連續 samples 次取樣一樣（＝動畫收斂了）；回傳那個穩定值。 */
+  async function untilStable(expr, { samples = 3, every = 120, timeout = 25000, label = '', soft = false } = {}) {
+    const read = () => evaluate(`return JSON.stringify(${expr} ?? null);`).catch(() => null);
+    let last = null;
+    let same = 0;
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const v = await read();
+      if (v != null && v === last) {
+        same += 1;
+        if (same >= samples - 1) return JSON.parse(v);
+      } else {
+        same = 0;
+      }
+      last = v;
+      await sleep(every);
+    }
+    if (soft) return last == null ? null : JSON.parse(last);
+    throw new Error(`等不到穩定：${label || expr}`);
   }
   /**
    * 找一個「離目標夠遠、但仍站得住」的落腳點（v1.2 · P06c 審查後修）。
@@ -516,14 +637,14 @@ async function main() {
       () => evaluate('return document.readyState === "complete" && !!window.__promptasy;').catch(() => false),
       { label: `${label}（等頁面穩定）` }
     );
-    await sleep(900);
+    await settle(900);
   }
 
   /* ================================================================ */
   console.log('▸ 開機與標題卡');
   await cdp.send('Page.navigate', { url: APP_URL }, sessionId);
   await waitFor(() => evaluate('return !!window.__promptasy;'), { label: '遊戲載入' });
-  await sleep(900);
+  await settle(900);
 
   const boot = await evaluate(`
     const g = window.__promptasy;
@@ -875,7 +996,7 @@ async function main() {
 
   // 按任意鍵開始
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(400);
+  await settle(400);
   const afterTitle = await evaluate(`
     const g = window.__promptasy;
     const el = document.querySelector('.title');
@@ -937,7 +1058,7 @@ async function main() {
         if (cta && !cta.hidden) cta.click();
         return 1;
       `);
-      await sleep(200);
+      await settle(200);
     }
   }
 
@@ -988,7 +1109,7 @@ async function main() {
     const until = performance.now() + 6000;
     while (!g.prologue.gatePassed && performance.now() < until) await new Promise((r) => setTimeout(r, 60));
     window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     return { before, after: g.prologue.gatePassed, line: document.querySelector('.echo__line').textContent, done: document.querySelector('.echo__objective').classList.contains('is-done') };
   `);
   eq(moveGate.before, false, '沒走之前門檻不會自己過');
@@ -1016,7 +1137,7 @@ async function main() {
     const until = performance.now() + 6000;
     while (!g.prologue.gatePassed && performance.now() < until) await new Promise((r) => setTimeout(r, 60));
     window.dispatchEvent(new KeyboardEvent('keyup', { code: 'ArrowLeft' }));
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     return {
       before,
       after: g.prologue.gatePassed,
@@ -1036,7 +1157,7 @@ async function main() {
   const runGate = await evaluate(`
     const g = window.__promptasy;
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     const walkingPassed = g.prologue.gatePassed;
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'ShiftLeft' }));
     const until = performance.now() + 8000;
@@ -1086,7 +1207,7 @@ async function main() {
   ok(/石碑/.test(lessonLead.cta), '按鈕是走進世界的說法，不是「開始練習」', lessonLead.cta);
 
   await echoAdvance(1);
-  await sleep(400);
+  await settle(400);
 
   // --- 第一幕 · 委託：先看見那句「弱」的請求 ---
   const pAct1 = await evaluate(`
@@ -1118,7 +1239,7 @@ async function main() {
 
   // --- 第二幕 · 神諭刻文：一課一條刻文 ＋ 永遠看得見的神諭原典 ---
   await evaluate(`document.querySelector('#practice [data-act-next="2"]').click(); return 1;`);
-  await sleep(320);
+  await settle(320);
   const pAct2 = await evaluate(`
     const g = window.__promptasy;
     const glyphs = document.querySelectorAll('#practice .glyphs .glyph');
@@ -1185,7 +1306,7 @@ async function main() {
      * 那正是「ⓘ 自己彈出來」的根因。
      */
     btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const onStillPointer = getComputedStyle(bubble).visibility;
     // 游標真的動到它上面 → 才打開
     btn.dispatchEvent(new MouseEvent('mousemove', {
@@ -1193,17 +1314,17 @@ async function main() {
       clientX: Math.round(box.x + box.width / 2),
       clientY: Math.round(box.y + box.height / 2),
     }));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const onHover = getComputedStyle(bubble).visibility;
     btn.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const afterOut = getComputedStyle(bubble).visibility;
     btn.focus();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const onFocus = getComputedStyle(bubble).visibility;
     const describes = btn.getAttribute('aria-describedby') === bubble.id;
     btn.blur();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return { onStillPointer, onHover, afterOut, onFocus, describes, afterBlur: getComputedStyle(bubble).visibility };
   `);
   eq(tipHover.onStillPointer, 'hidden', '游標沒動、只是內容換到它底下 → 小卡不自己彈出來');
@@ -1217,7 +1338,7 @@ async function main() {
 
   // --- 第三幕 · 刻印：選錯不失敗、選對就亮一盞燈（與正式關卡同一支石碑） ---
   await evaluate(`document.querySelector('#practice [data-act-next="3"]').click(); return 1;`);
-  await sleep(320);
+  await settle(320);
   const pAct3 = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -1243,7 +1364,7 @@ async function main() {
     const idx = slot.options.findIndex((o) => !o.correct);
     const before = g.practice.stele.progress.carved;
     g.practice.pick(idx);
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const btn = document.querySelectorAll('#practice .opt')[idx];
     return {
       before,
@@ -1268,7 +1389,7 @@ async function main() {
     while (!g.practice.stele.done) {
       const i = g.practice.step.flow.slots[g.practice.stele.progress.carved].options.findIndex((o) => o.correct);
       g.practice.pick(i);
-      await new Promise((r) => setTimeout(r, 180));
+      await window.__paSettle(180);
       lit.push(document.querySelectorAll('#practice .checklist .is-pass').length);
     }
     return {
@@ -1298,7 +1419,7 @@ async function main() {
   const verdict = await evaluate(`
     const g = window.__promptasy;
     g.practice.press();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const links = Array.from(document.querySelectorAll('#practice .result a.src')).map((a) => a.href);
     return {
       grade: document.querySelector('#practice .grade__mark')?.textContent,
@@ -1365,7 +1486,7 @@ async function main() {
   const bridge = await evaluate(`
     const g = window.__promptasy;
     document.querySelector('#practice [data-next]').click();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     return {
       practiceOpen: g.practice.isOpen,
       phase: g.prologue.phase,
@@ -1386,34 +1507,50 @@ async function main() {
     return evaluate(`
       const g = window.__promptasy;
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      /*
+       * v1.2 · P25b：這一整堂課原本是「點一下 → sleep(N) → 讀」。軟體渲染時
+       * 那幾百毫秒常常連一幀都排不到，讀到的就是上一拍的狀態（＝ flaky 的來源）。
+       * 改成每一步都等它**真的翻面**：每一個條件在點下去之前都是假的
+       * （過場 phase 是 bridge、石碑沒開、act 是 1、沒有 .is-wrong、沒有評價章），
+       * 所以不會被前一個值滿足；等不到就丟例外 → 斷言照樣紅。
+       */
+      const till = async (fn, what) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < 20000) {
+          try { if (fn()) return true; } catch (err) { /* 還沒建好，再等 */ }
+          await sleep(40);
+        }
+        throw new Error('等不到：' + what);
+      };
       document.querySelector('.echo [data-cta]').click();   // 過場 → 下一拍
-      await sleep(320);
+      await till(() => g.prologue.phase !== 'bridge', '過場那一句走掉');
       const announced = { kind: g.prologue.beat?.kind, phase: g.prologue.phase };
       document.querySelector('.echo [data-cta]').click();   // 宣布 → 打開石碑
-      await sleep(420);
+      await till(() => g.practice.isOpen, '石碑真的打開');
       const opened = { id: g.practice.step?.id, act: g.practice.act, scaffold: g.practice.step?.scaffold };
       document.querySelector('#practice [data-act-next="2"]').click();
-      await sleep(220);
+      await till(() => g.practice.act === 2, '走到第二幕');
       const glyphs = document.querySelectorAll('#practice .glyphs .glyph').length;
       const srcs = document.querySelectorAll('#practice .glyphs a.bookicon').length;
       document.querySelector('#practice [data-act-next="3"]').click();
-      await sleep(220);
+      await till(() => g.practice.act === 3, '走到第三幕');
       // 先故意選錯一次 —— 石碑不收，但不會失敗
       const wrongIdx = g.practice.step.flow.slots[0].options.findIndex((o) => !o.correct);
       g.practice.pick(wrongIdx);
-      await sleep(160);
+      await till(() => !!document.querySelector('#practice .opt.is-wrong'), '選錯的那一顆被標成錯的');
       const rejected = g.practice.stele.progress.carved === 0;
       while (!g.practice.stele.done) {
-        const i = g.practice.step.flow.slots[g.practice.stele.progress.carved].options.findIndex((o) => o.correct);
+        const carvedBefore = g.practice.stele.progress.carved;
+        const i = g.practice.step.flow.slots[carvedBefore].options.findIndex((o) => o.correct);
         g.practice.pick(i);
-        await sleep(140);
+        await till(() => g.practice.stele.progress.carved > carvedBefore, '第 ' + (carvedBefore + 1) + ' 段刻上去');
       }
       const litAll = document.querySelectorAll('#practice .checklist .is-pass').length;
       g.practice.press();
-      await sleep(420);
+      await till(() => !!document.querySelector('#practice .grade__mark'), '評價章蓋出來');
       const grade = document.querySelector('#practice .grade__mark')?.textContent;
       document.querySelector('#practice [data-next]').click();
-      await sleep(420);
+      await till(() => g.prologue.phase === 'bridge' && !g.practice.isOpen, '回到回聲的過場');
       return {
         ...announced, ...opened, glyphs, srcs, rejected, litAll, grade,
         phase: g.prologue.phase,
@@ -1462,7 +1599,7 @@ async function main() {
   const graduation = await evaluate(`
     const g = window.__promptasy;
     document.querySelector('.echo [data-cta]').click();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const marker = g.world.markers.find((m) => m.id === 'gate-of-clarity-01');
     const note = document.querySelector('.echo__note');
     return {
@@ -1499,9 +1636,9 @@ async function main() {
       if (!cta || cta.hidden) break;
       cta.click();
       clicks += 1;
-      await new Promise((r) => setTimeout(r, 160));
+      await window.__paSettle(160);
     }
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     // 交還操作權：能走路了
     const before = { x: g.player.position.x, z: g.player.position.z };
     const moved = () => Math.hypot(g.player.position.x - before.x, g.player.position.z - before.z);
@@ -1510,7 +1647,7 @@ async function main() {
     const until = performance.now() + 8000;
     while (moved() < 3 && performance.now() < until) await new Promise((r) => setTimeout(r, 80));
     window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     return {
       active: g.prologue.isActive,
       echoHidden: document.querySelector('.echo').hidden,
@@ -1540,7 +1677,7 @@ async function main() {
   eq(veteran, 1, '寫入一份舊版存檔');
   await reloadPage('重新載入（舊存檔）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
   const veteranBoot = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -1556,7 +1693,7 @@ async function main() {
   eq(veteranBoot.xp, 320, '舊存檔的進度完整保留');
 
   await evaluate(`document.querySelector('.intro [data-start]').click(); return 1;`);
-  await sleep(300);
+  await settle(300);
   eq(await evaluate('return window.__promptasy.intro.isOpen;'), false, '教學可關閉');
 
   // 回到乾淨狀態：後面的檢查（XP / 圖鑑 / 通關數）都以新存檔為前提
@@ -1568,7 +1705,7 @@ async function main() {
   `);
   await reloadPage('重新載入（乾淨存檔）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(400);
+  await settle(400);
   const cleanBoot = await evaluate(`
     const g = window.__promptasy;
     return { xp: g.progression.state.xp, collected: g.progression.state.collected.length, prologueActive: g.prologue.isActive, introOpen: g.intro.isOpen };
@@ -2315,9 +2452,9 @@ async function main() {
     const g = window.__promptasy;
     const wasOpen = g.gateAsk.isOpen;
     if (wasOpen) g.gateAsk.close({ silent: true });
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     g.player.teleport(0, 6);
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return { wasOpen, inputEnabled: g.player.inputEnabled };
   `);
   ok(askedOnWalk.inputEnabled, '把門的詢問收起來之後，操控權回到玩家手上');
@@ -2352,8 +2489,15 @@ async function main() {
     await waitGame(0.5);
     const canvas = g.engine.renderer.domElement;
     canvas.dispatchEvent(new PointerEvent('pointerdown', { clientX: 400, clientY: 500, bubbles: true }));
+    /*
+     * v1.2 · P25b：一次一幀送一步。原本 12 個 pointermove 全部擠在同一個 tick 裡，
+     * 而鏡頭是在遊戲迴圈裡吃這些位移的 —— 機器一慢，整串位移就只被當成
+     * 「一幀之內的一次抖動」，拖曳抬頭那三條於是時好時壞。真的滑鼠本來
+     * 就是一幀一步，照它送。
+     */
     for (let i = 0; i < 12; i += 1) {
       window.dispatchEvent(new PointerEvent('pointermove', { clientX: 400, clientY: 500 - i * 12, bubbles: true }));
+      await new Promise((r) => requestAnimationFrame(r));
     }
     window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
     await waitGame(0.9);
@@ -2581,7 +2725,7 @@ async function main() {
       peak = Math.min(peak, j.shoulderL.rotation.x);
       await new Promise((r) => setTimeout(r, 40));
     }
-    await new Promise((r) => setTimeout(r, 160));
+    await window.__paSettle(160);
     return { before, during: peak, celebratingMid, stillCelebrating: ch.celebrating, after: j.shoulderL.rotation.x };
   `);
   ok(cheer.during < cheer.before - 0.8, '過關慶祝時雙手真的舉起來', `${cheer.before.toFixed(2)} → ${cheer.during.toFixed(2)}`);
@@ -2595,7 +2739,7 @@ async function main() {
     const g = window.__promptasy;
     const m = g.world.markers.find((x) => x.id === 'gate-of-clarity-01');
     g.player.teleport(m.position.x + 2, m.position.z + 2);
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return {
       interact: document.querySelector('[data-interact]')?.textContent || '',
       hidden: document.querySelector('[data-interact]')?.hidden,
@@ -2608,7 +2752,7 @@ async function main() {
   eq(near.markerNear, true, '石座進入「走近」狀態（M4）');
 
   await key('KeyE', 'e', { vk: 69 });
-  await sleep(420);
+  await settle(420);
 
   /* ================================================================ */
   /* Phase 12 · 四幕分鏡：①委託 → ②指引 → ③刻印 → ④手印              */
@@ -2665,7 +2809,7 @@ async function main() {
   /* --- 第二幕：神諭刻文（教學內容換皮成世界觀，但出處照樣可點） --- */
   console.log('  · 第二幕 · 指引（神諭刻文）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(460);
+  await settle(460);
   const act2 = await evaluate(`
     const g = window.__promptasy;
     ${VIS}
@@ -2830,14 +2974,14 @@ async function main() {
     const g = window.__promptasy;
     ${VIS}
     document.querySelector('#prompt-console .act--guide [data-act-go="1"]').click();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const backAct = g.promptConsole.act;
     const backBrief = vis('#prompt-console .act--brief');
     const canForward = g.promptConsole.canGoAct(2);
     const canSkipPalm = g.promptConsole.canGoAct(4);
     // 用指示器直接跳回②（走過了，所以按得下去）
     document.querySelector('#prompt-console .acts__item[data-act-go="2"]').click();
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     return { backAct, backBrief, canForward, canSkipPalm, act: g.promptConsole.act, visited: g.promptConsole.visitedActs };
   `);
   eq(actBack.backAct, 1, '按「回顧委託」真的回到第一幕');
@@ -2851,7 +2995,7 @@ async function main() {
   console.log('  · 第三幕 · 刻印');
   await evaluate(`
     document.querySelector('#prompt-console [data-act-next="3"]').click();
-    await new Promise((r) => setTimeout(r, 360));
+    await window.__paSettle(360);
     return 1;
   `);
   const consoleOpen = await evaluate(`
@@ -2947,7 +3091,7 @@ async function main() {
   const toFree = await evaluate(`
     const g = window.__promptasy;
     document.querySelector('#prompt-console [data-mode]').click();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     document.querySelector('#prompt-console .prompt-input').focus();
     return {
       mode: g.promptConsole.mode,
@@ -2978,19 +3122,19 @@ async function main() {
     const on = box.checked;
     ta.value = 'Summarize the notice below in exactly 3 bullet points for first-time visitors.';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const litOn = lit();
     box.checked = false;
     box.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     const litOff = lit();
     const savedOff = g.progression.state.settings.preflight;
     box.checked = true;
     box.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     ta.value = '';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     return { on, litOn, litOff, savedOff, xp: g.progression.state.xp, cleared: lit() };
   `);
   eq(preflight.on, true, '預檢預設開啟（Phase 9：所有人都預設看得到亮燈）');
@@ -3009,7 +3153,7 @@ async function main() {
     const type = async (v) => {
       ta.value = v;
       ta.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise((r) => setTimeout(r, 380));
+      await window.__paSettle(380);
     };
     await type('');
     const empty = {
@@ -3077,12 +3221,12 @@ async function main() {
     const box = () => document.querySelector('#prompt-console [data-coach]');
     ta.value = '';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const visible = !orbBtn.hidden && getComputedStyle(orbBtn).display !== 'none';
     const closedAtFirst = box().hidden;
     // 點開
     orbBtn.click();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     const opened = box().hidden === false;
     const styles = getComputedStyle(box());
     const head = box().querySelector('.coach__head b')?.textContent || '';
@@ -3093,25 +3237,25 @@ async function main() {
     // 「幫我填」把中文句子插到游標處
     const before = ta.value;
     fills[0].click();
-    await new Promise((r) => setTimeout(r, 380));
+    await window.__paSettle(380);
     const afterFill = ta.value;
     const litAfterFill = document.querySelectorAll('#prompt-console .checklist li.is-pass').length;
     // 換下一個提示
     const nextBtn = box().querySelector('[data-coach-next]');
     if (nextBtn) nextBtn.click();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const secondTarget = g.promptConsole.coach.target;
     // 注意力脈衝（不是 modal，只是球在發光）
     g.promptConsole.toggleCoach(false);
-    await new Promise((r) => setTimeout(r, 160));
+    await window.__paSettle(160);
     g.promptConsole.nudge();
-    await new Promise((r) => setTimeout(r, 160));
+    await window.__paSettle(160);
     const nudging = orbBtn.classList.contains('is-nudging');
     const stillNotModal = box().hidden;
     const overlayBlocked = document.querySelectorAll('#prompt-console .coach[aria-modal="true"]').length;
     ta.value = '';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return {
       visible, closedAtFirst, opened, head, what, how,
       fillCount: fills.length,
@@ -3156,7 +3300,7 @@ async function main() {
   `);
   eq(trap, true, '面板內可用鍵盤移動焦點');
   await key('Tab', 'Tab', { vk: 9 });
-  await sleep(120);
+  await settle(120);
   eq(
     await evaluate(`return document.querySelector('#prompt-console .panel').contains(document.activeElement);`),
     true,
@@ -3167,7 +3311,7 @@ async function main() {
     const ta = document.querySelector('.prompt-input');
     ta.value = '幫我寫一下';
     document.querySelector('#prompt-console [data-submit]').click();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     return {
       hidden: document.querySelector('#prompt-console [data-result]').hidden,
       fail: !!document.querySelector('#prompt-console .result__top.is-fail'),
@@ -3186,7 +3330,7 @@ async function main() {
     ta.value = 'Summarize the town notice below for first-time visitors who have never been here.\\n' +
       'Output format: 3 bullet points, each under 20 words.';
     document.querySelector('#prompt-console [data-submit]').click();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const grade = document.querySelector('#prompt-console .grade__mark')?.textContent;
     return {
       grade,
@@ -3232,7 +3376,7 @@ async function main() {
   ok(celebrated.html.includes('S'), 'S 評價觸發螢幕級慶祝（M5）', celebrated.html.slice(0, 80));
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(300);
+  await settle(300);
   eq(await evaluate('return window.__promptasy.promptConsole.isOpen;'), false, 'Esc 關閉主控台');
 
   /* ================================================================ */
@@ -3244,14 +3388,14 @@ async function main() {
     const c = g.content.challenge('gate-of-clarity-01');
     // 先把面板捲到底，確認下一次開啟會自己回到頂端
     g.promptConsole.open(c);
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const body = document.querySelector('#prompt-console .panel__body');
     body.scrollTop = body.scrollHeight;
     const scrolledTo = body.scrollTop;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.promptConsole.open(g.content.challenge('lost-automaton-03'));
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const ta = document.querySelector('#prompt-console .prompt-input');
     return {
       scrolledTo,
@@ -3285,14 +3429,14 @@ async function main() {
   const placeholderFlow = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('mimic-mirror-04'));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const ta = document.querySelector('#prompt-console .prompt-input');
     const emptyValue = ta.value;
     const shown = ta.placeholder;
     const styled = getComputedStyle(ta, '::placeholder').color;
     ta.value = '請照著範例整理';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return {
       emptyValue,
       shown,
@@ -3314,17 +3458,17 @@ async function main() {
     const ta = document.querySelector('#prompt-console .prompt-input');
     ta.value = '';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const litBefore = document.querySelectorAll('#prompt-console .checklist li.is-pass').length;
     const xpBefore = g.progression.state.xp;
     const chip = document.querySelector('#prompt-console [data-fill="0"]');
     const label = chip.textContent.trim();
     chip.click();
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const value = ta.value;
     const chips = Array.from(document.querySelectorAll('#prompt-console [data-fill]'));
     for (const c of chips.slice(1)) { c.click(); await new Promise((r) => setTimeout(r, 120)); }
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     return {
       label,
       litBefore,
@@ -3348,26 +3492,26 @@ async function main() {
     const g = window.__promptasy;
     const c = g.content.challenge('postbox-sprite-02');
     g.promptConsole.open(c);
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const ta = document.querySelector('#prompt-console .prompt-input');
     const btn = () => document.querySelector('#prompt-console [data-sample]');
     const lockedAtOpen = btn().disabled;
     const submit = async (text) => {
       ta.value = text;
       ta.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       document.querySelector('#prompt-console [data-submit]').click();
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
     };
     await submit('幫我看看這封信');
     const afterOne = btn().disabled;
     await submit('幫我改一下這封信的語氣');
     const afterTwo = btn().disabled;
     btn().click();
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const filled = ta.value;
     document.querySelector('#prompt-console [data-submit]').click();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     return {
       lockedAtOpen,
       afterOne,
@@ -3391,14 +3535,14 @@ async function main() {
   const blockZh = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     // 走到第三幕（刻印／書寫檯）才量得到版面 —— 前兩幕整個 act 是 display:none
     const n2 = document.querySelector('#prompt-console [data-act-next="2"]');
     if (n2) n2.click();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const n3 = document.querySelector('#prompt-console [data-act-next="3"]');
     if (n3) n3.click();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const wrap = document.querySelector('#prompt-console [data-blocks-wrap]');
     if (wrap.hidden) return { hidden: true };
     const blocks = Array.from(document.querySelectorAll('#prompt-console .blocks .block'));
@@ -3413,9 +3557,9 @@ async function main() {
     const tr = ta.getBoundingClientRect();
     ta.value = '';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     block.click();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return {
       hidden: false,
       fragment,
@@ -3485,20 +3629,29 @@ async function main() {
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: w, height: h, deviceScaleFactor: 1, mobile: false,
     }, sessionId);
-    await sleep(360);
+    /*
+     * v1.2 · P25b：改視窗尺寸是「動畫播完看最終樣子」那一類 —— 等版面
+     * 連續三次取樣一模一樣（視窗實際尺寸 ＋ 頁面高度）再量，不要等一個
+     * 猜出來的毫秒數。soft ＝ 真的一直抖也照樣往下量，讓斷言自己講話。
+     */
+    await untilStable(
+      '[document.documentElement.clientWidth, document.documentElement.clientHeight, document.body.scrollHeight]',
+      { soft: true, label: `視窗 ${w}×${h} 的版面停下來` }
+    );
+    await settle(360);
     const bar = await evaluate(`
       const g = window.__promptasy;
       g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
-      await new Promise((r) => setTimeout(r, 360));
+      await window.__paSettle(360);
       // 走到第三幕才量得到版面
       const n2 = document.querySelector('#prompt-console [data-act-next="2"]');
       if (n2) n2.click();
-      await new Promise((r) => setTimeout(r, 300));
+      await window.__paSettle(300);
       const n3 = document.querySelector('#prompt-console [data-act-next="3"]');
       if (n3) n3.click();
-      await new Promise((r) => setTimeout(r, 420));
+      await window.__paSettle(420);
       const wrap = document.querySelector('#prompt-console [data-blocks-wrap]');
       const blocks = Array.from(document.querySelectorAll('#prompt-console .blocks .block'));
       const ta = document.querySelector('#prompt-console .prompt-input');
@@ -3537,24 +3690,24 @@ async function main() {
     eq(bar.docOverflow, 0, `${w}×${h}：頁面沒有水平捲動（自由書寫）`);
   }
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(300);
+  await settle(300);
 
   /* --- Phase 9：只靠畫面上的教練提示，一般人也能過「正面表述」那一關 --- */
   const coachOnly = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     g.promptConsole.open(g.content.challenge('lost-automaton-03'));
-    await new Promise((r) => setTimeout(r, 340));
+    await window.__paSettle(340);
     const ta = document.querySelector('#prompt-console .prompt-input');
     const orbBtn = document.querySelector('#prompt-console [data-orb]');
     const box = () => document.querySelector('#prompt-console [data-coach]');
     // 玩家做的事：清掉壞掉的起手寫法，然後照著提示球一路「幫我填」
     ta.value = '';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     orbBtn.click();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     const seen = [];
     let submits = 0;
     for (let round = 0; round < 6; round += 1) {
@@ -3564,18 +3717,18 @@ async function main() {
       const fill = box().querySelector('[data-coach-fill]');
       if (fill) {
         fill.click();
-        await new Promise((r) => setTimeout(r, 330));
+        await window.__paSettle(330);
       }
       const next = box().querySelector('[data-coach-next]');
       if (next) {
         next.click();
-        await new Promise((r) => setTimeout(r, 180));
+        await window.__paSettle(180);
       }
     }
     const readyBefore = document.querySelector('#prompt-console [data-submit]').classList.contains('is-ready');
     document.querySelector('#prompt-console [data-submit]').click();
     submits += 1;
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     return {
       seen,
       readyBefore,
@@ -3593,7 +3746,7 @@ async function main() {
   ok(Boolean(coachOnly.best), '過關紀錄寫進存檔', String(coachOnly.best));
 
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-  await sleep(260);
+  await settle(260);
 
   /* ================================================================ */
   console.log('\n▸ 石碑刻印（Phase 11）');
@@ -3602,16 +3755,16 @@ async function main() {
   const modeSetting = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const sel = document.querySelector('#settings #set-mode');
     const label = document.querySelector('#settings label[for="set-mode"]')?.textContent.trim() || '';
     const options = Array.from(sel.options).map((o) => o.textContent.trim());
     const before = sel.value;
     sel.value = 'guided';
     sel.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.settings.close();
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     return {
       label,
       options,
@@ -3637,11 +3790,11 @@ async function main() {
   const carveOpen = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('four-elements-mirror-44'));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     // Phase 12：石碑住在第三幕 —— 先讓導演把鏡頭推到那裡
     const actAtOpen = g.promptConsole.act;
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const flow = g.content.flow('four-elements-mirror-44');
     return {
       mode: g.promptConsole.mode,
@@ -3679,9 +3832,9 @@ async function main() {
     const g = window.__promptasy;
     const btn = document.querySelector('#prompt-console [data-opt="${wrongIdx}"]');
     btn.click();
-    await new Promise((r) => setTimeout(r, 120));
+    await window.__paSettle(120);
     const rejecting = document.querySelector('#prompt-console .stele').classList.contains('is-reject');
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const fb = btn.querySelector('[data-opt-fb]');
     return {
       rejecting,
@@ -3733,7 +3886,7 @@ async function main() {
       await new Promise((r) => setTimeout(r, 80));
       const stamping = document.querySelector('#prompt-console .stele').classList.contains('is-stamp');
       const dust = document.querySelectorAll('#prompt-console .dust').length;
-      await new Promise((r) => setTimeout(r, 340));
+      await window.__paSettle(340);
       steps.push({
         focusedOnOption,
         stamping,
@@ -3804,7 +3957,7 @@ async function main() {
 
   // --- 手掌印：按一下就放不算，要按住 ---
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(260);
+  await settle(260);
   const shortPress = await evaluate(`
     const palm = document.querySelector('#prompt-console [data-palm]');
     return {
@@ -3822,7 +3975,7 @@ async function main() {
   // 真的按住 900ms（> PALM_HOLD_MS 600ms）
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'Enter', key: 'Enter', windowsVirtualKeyCode: 13 }, sessionId);
   const holdMid = await (async () => {
-    await sleep(300);
+    await settle(300);
     return evaluate(`
       const palm = document.querySelector('#prompt-console [data-palm]');
       const ring = palm.querySelector('.palm__ring');
@@ -3836,9 +3989,9 @@ async function main() {
       };
     `);
   })();
-  await sleep(600);
+  await settle(600);
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'Enter', key: 'Enter', windowsVirtualKeyCode: 13 }, sessionId);
-  await sleep(700);
+  await settle(700);
   ok(holdMid.holding, '按住的時候手掌印進入蓄力狀態');
   eq(holdMid.slipped, false, '按住時「手滑」的提示會收掉');
   ok(/conic-gradient/.test(holdMid.ring), '蓄力環是一圈會填滿的環', holdMid.ring);
@@ -3884,23 +4037,23 @@ async function main() {
   const replayActs = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     const seenBefore = g.progression.hasSeenGuidance('gate-of-clarity-01');
     g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
-    await new Promise((r) => setTimeout(r, 340));
+    await window.__paSettle(340);
     const atOpen = g.promptConsole.act;
     const visited = g.promptConsole.visitedActs.join(',');
     const skipBtn = document.querySelector('#prompt-console .acts__item[data-act-go="3"]');
     const skipEnabled = !skipBtn.disabled;
     skipBtn.click();
-    await new Promise((r) => setTimeout(r, 340));
+    await window.__paSettle(340);
     const afterSkip = g.promptConsole.act;
     const carveVisible = (() => { const n = document.querySelector('#prompt-console .act--carve'); return !!n && !n.hidden && n.offsetParent !== null; })();
     // 沒看過指引的關卡：③ 按不下去（不能跳過教學）
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.promptConsole.open(g.content.challenge('long-scroll-tower-23'));
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const fresh = {
       seen: g.progression.hasSeenGuidance('long-scroll-tower-23'),
       act: g.promptConsole.act,
@@ -3908,7 +4061,7 @@ async function main() {
       disabled: document.querySelector('#prompt-console .acts__item[data-act-go="3"]').disabled,
     };
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 180));
+    await window.__paSettle(180);
     return { seenBefore, atOpen, visited, skipEnabled, afterSkip, carveVisible, fresh };
   `);
   eq(replayActs.seenBefore, true, '（測試前提）這一關的指引看過了');
@@ -3926,9 +4079,9 @@ async function main() {
   const jargon = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     // 掃整份 DOM 的文字（含收起來的部分）＋ 所有會顯示出來的屬性
     const text = document.body.textContent || '';
     const attrs = Array.from(document.querySelectorAll('[title], [placeholder], [aria-label]'))
@@ -3936,7 +4089,7 @@ async function main() {
       .join(' ');
     const all = text + ' ' + attrs;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 180));
+    await window.__paSettle(180);
     return {
       hit: /送出評分/.test(all),
       sample: (all.match(/.{0,14}送出評分.{0,14}/) || [''])[0],
@@ -3954,16 +4107,16 @@ async function main() {
   for (const [w, h] of [[1280, 800], [800, 720]]) {
     if (w !== 1280) {
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false }, sessionId);
-      await sleep(360);
+      await settle(360);
     }
     const fit = await evaluate(`
       const g = window.__promptasy;
       g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 160));
+      await window.__paSettle(160);
       g.promptConsole.open(g.content.challenge('archive-seal-25'));
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 300));
+      await window.__paSettle(300);
       const body = document.querySelector('#prompt-console .panel__body');
       return {
         overflowX: body.scrollWidth - body.clientWidth,
@@ -3978,35 +4131,35 @@ async function main() {
     ok(fit.optionWidth <= w, `${w}×${h}：選項卡沒有超出視窗`, String(fit.optionWidth));
   }
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(300);
+  await settle(300);
 
   // --- 切到自由書寫：預檢、快速填入、送出都還在（學習優先，畢業的人可以離開輔助輪） ---
   const freeStillWorks = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.promptConsole.open(g.content.challenge('dial-room-43'));
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 280));
+    await window.__paSettle(280);
     const modeAtOpen = g.promptConsole.mode;
     document.querySelector('#prompt-console [data-mode]').click();
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const ta = document.querySelector('#prompt-console .prompt-input');
     const visible = !document.querySelector('#prompt-console [data-free]').hidden;
     ta.value = '';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const litEmpty = document.querySelectorAll('#prompt-console .checklist li.is-pass').length;
     // 快速填入全部按下去 —— 零思考路徑照樣走得通
     const chips = Array.from(document.querySelectorAll('#prompt-console [data-fill]'));
     for (const c of chips) { c.click(); await new Promise((r) => setTimeout(r, 140)); }
-    await new Promise((r) => setTimeout(r, 340));
+    await window.__paSettle(340);
     const litFilled = document.querySelectorAll('#prompt-console .checklist li.is-pass').length;
     const submit = document.querySelector('#prompt-console [data-submit]');
     const ready = submit.classList.contains('is-ready');
     submit.click();
-    await new Promise((r) => setTimeout(r, 460));
+    await window.__paSettle(460);
     return {
       modeAtOpen,
       visible,
@@ -4037,13 +4190,13 @@ async function main() {
   const backToGuided = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.promptConsole.setMode('guided');
-    await new Promise((r) => setTimeout(r, 160));
+    await window.__paSettle(160);
     g.promptConsole.open(g.content.challenge('mimic-mirror-04'));
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 280));
+    await window.__paSettle(280);
     const out = {
       mode: g.promptConsole.mode,
       carved: document.querySelectorAll('#prompt-console .carved').length,
@@ -4053,7 +4206,7 @@ async function main() {
       persisted: JSON.parse(localStorage.getItem('promptasy.v1.save')).settings.promptMode,
     };
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 180));
+    await window.__paSettle(180);
     return out;
   `);
   eq(backToGuided.mode, 'guided', '隨時切回石碑刻印');
@@ -4096,7 +4249,7 @@ async function main() {
     const fz = Math.cos(yaw);
     const back = rock.r + 6;
     g.player.teleport(rock.x - fx * back, rock.z - fz * back);
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const start = { x: g.player.position.x, z: g.player.position.z };
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
     await waitGame(1.6);
@@ -4116,7 +4269,7 @@ async function main() {
     // 石座還是走得到：站到石座旁邊，互動提示要出得來
     const marker = g.world.markers.find((m) => m.id === 'gate-of-clarity-01');
     g.player.teleport(marker.position.x + 2, marker.position.z + 2);
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const pedestalOk = !document.querySelector('[data-interact]').hidden;
     const pedestalBlocked = !!g.world.solidAt(marker.position.x + 2, marker.position.z + 2);
 
@@ -4175,7 +4328,7 @@ async function main() {
       const fx = Math.sin(yaw);
       const fz = Math.cos(yaw);
       g.player.teleport(x - fx * 6, z - fz * 6);
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       const start = { x: g.player.position.x, z: g.player.position.z };
       const startBlocked = !!g.world.solidAt(start.x, start.z);
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
@@ -4250,7 +4403,7 @@ async function main() {
         slideTarget.x - fx * 5 - fz * lat(slideTarget.r),
         slideTarget.z - fz * 5 + fx * lat(slideTarget.r)
       );
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       const s0 = { x: g.player.position.x, z: g.player.position.z };
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
       await waitGame(3.4);
@@ -4269,7 +4422,7 @@ async function main() {
     out.tablet = await walkInto(tab.position.x, tab.position.z);
     // 但互動還是走得到
     g.player.teleport(tab.position.x + 2.4, tab.position.z + 2.4);
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     out.tabletInteract = !document.querySelector('[data-interact]').hidden;
 
     // ③ 中央高原的中型碎石：半徑 0.5–0.62，Phase 20 之前在最小半徑之下（＝幽靈）
@@ -4293,7 +4446,7 @@ async function main() {
     const approaches = [];
     for (const [dx, dz] of [[2.6, 0], [-2.6, 0], [0, 2.6], [0, -2.6]]) {
       g.player.teleport(marker.position.x + dx, marker.position.z + dz);
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       approaches.push({
         dx,
         dz,
@@ -4340,7 +4493,7 @@ async function main() {
     const g = window.__promptasy;
     const tab = g.world.tablets.find((t) => t.id === 'hearth');
     g.player.teleport(tab.position.x + 1.4, tab.position.z + 1.4);
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     return {
       title: tab.tablet.title,
       lines: tab.tablet.lines.length,
@@ -4358,7 +4511,7 @@ async function main() {
   eq(tabletNear.readBefore, false, '這塊石碑還沒讀過');
 
   await key('KeyE', 'e', { vk: 69 });
-  await sleep(420);
+  await settle(420);
   const tabletRead = await evaluate(`
     const g = window.__promptasy;
     const panel = document.getElementById('lore-tablet');
@@ -4385,7 +4538,7 @@ async function main() {
   eq(tabletRead.saved, 1, '已讀石碑寫進 localStorage');
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(320);
+  await settle(320);
   eq(await evaluate('return window.__promptasy.tabletPanel.isOpen;'), false, 'Esc 收起石碑面板');
   eq(
     await evaluate('return window.__promptasy.player.speed >= 0 && !!window.__promptasy.player;'),
@@ -4394,7 +4547,7 @@ async function main() {
   );
 
   await key('KeyE', 'e', { vk: 69 });
-  await sleep(420);
+  await settle(420);
   const tabletAgain = await evaluate(`
     const g = window.__promptasy;
     const panel = document.getElementById('lore-tablet');
@@ -4404,12 +4557,12 @@ async function main() {
   ok(!/\+\d+ XP/.test(tabletAgain.note), '重讀不再給 XP（不能刷分）', tabletAgain.note);
   eq(tabletAgain.xp, tabletRead.xp, '重讀後 XP 不變');
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(280);
+  await settle(280);
 
   /* ================================================================ */
   console.log('\n▸ 圖鑑 / 設定 / 音量 / 畫質');
   await key('KeyC', 'c', { vk: 67 });
-  await sleep(350);
+  await settle(350);
   const codex = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -4449,16 +4602,16 @@ async function main() {
   eq(codex.inPanel, true, '圖鑑開啟時焦點在面板內（M6 無障礙）');
   eq(codex.secretRows, SECRET_TOTAL, `圖鑑的「秘境」章節列出 ${SECRET_TOTAL} 處`, String(codex.secretRows));
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(250);
+  await settle(250);
 
   await key('KeyO', 'o', { vk: 79 });
-  await sleep(350);
+  await settle(350);
   const vol = await evaluate(`
     const g = window.__promptasy;
     const slider = document.getElementById('set-volume');
     slider.value = '22';
     slider.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 150));
+    await window.__paSettle(150);
     return {
       settingsOpen: g.settings.isOpen,
       audioVolume: g.audio.getVolume(),
@@ -4484,7 +4637,7 @@ async function main() {
     const sel = document.getElementById('set-quality');
     sel.value = 'low';
     sel.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     return {
       engineQuality: g.engine.quality,
       saved: JSON.parse(localStorage.getItem('promptasy.v1.save')).settings.quality,
@@ -4500,7 +4653,7 @@ async function main() {
     const sel = document.getElementById('set-quality');
     sel.value = 'high';
     sel.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     return { engineQuality: g.engine.quality, frames: g.engine.renderer.info.render.frame };
   `);
   eq(qualityHigh.engineQuality, 'high', '畫質切回高 → 後製即時開啟');
@@ -4573,7 +4726,7 @@ async function main() {
   }
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(250);
+  await settle(250);
 
   /* ================================================================ */
   console.log('\n▸ 分區配樂與氣氛');
@@ -4668,7 +4821,7 @@ async function main() {
       const g = window.__promptasy;
       g.audio.setRegion('foundations', 0.4);
       const ok = await g.audio.load('foundations');
-      await new Promise((r) => setTimeout(r, 900));
+      await window.__paSettle(900);
       const d = g.audio.debug();
       return { ok, d: d.bgm.foundations, source: d.source, decodedTracks: d.decodedTracks.length };
     `);
@@ -4686,7 +4839,7 @@ async function main() {
       const g = window.__promptasy;
       g.audio.setRegion('grounding', 0.6);
       await g.audio.load('grounding');
-      await new Promise((r) => setTimeout(r, 1200));
+      await window.__paSettle(1200);
       const d = g.audio.debug();
       return {
         region: d.region,
@@ -4715,7 +4868,7 @@ async function main() {
   } else {
     const fallbackOnly = await evaluate(`
       const g = window.__promptasy;
-      await new Promise((r) => setTimeout(r, 600));
+      await window.__paSettle(600);
       const d = g.audio.debug();
       return { source: d.source, synth: d.bgm[d.region].synthGain };
     `);
@@ -4728,7 +4881,7 @@ async function main() {
     const g = window.__promptasy;
     g.audio.setRegion('foundations', 0.4);
     g.audio.useFiles(false);
-    await new Promise((r) => setTimeout(r, 1400));
+    await window.__paSettle(1400);
     const d = g.audio.debug();
     const cues = ['pass', 'unlock', 'gateOpen', 'click', 'shrine', 'finale', 'submit', 'open', 'codex',
       'trialPass', 'masterSeal', 'hardGate', 'simLow', 'simMid', 'simHigh',
@@ -4751,7 +4904,7 @@ async function main() {
   const restored = await evaluate(`
     const g = window.__promptasy;
     g.audio.useFiles(true);
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     return g.audio.debug().usesFiles;
   `);
   eq(restored, true, '可以再切回音檔');
@@ -4822,7 +4975,7 @@ async function main() {
     const g = window.__promptasy;
     const gate = g.world.gates.find((x) => x.id === 'reasoning');
     g.player.teleport(gate.position.x - 6, gate.position.z - 6);
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const before = { x: g.player.position.x, z: g.player.position.z };
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
     return { unlocked: g.progression.isRegionUnlocked('reasoning'), gateOpen: gate.isOpen, before };
@@ -4834,7 +4987,7 @@ async function main() {
     const g = window.__promptasy;
     // 圓心查活的資料（v1.2 · P22c：從 -95,-95 搬到 -123.5,-123.5）
     const site = g.world.sites.find((s) => s.id === 'reasoning');
-    await new Promise((r) => setTimeout(r, 1600));
+    await window.__paSettle(1600);
     window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
     const d = Math.hypot(g.player.position.x - site.x, g.player.position.z - site.z);
     return { distToRegion: d, radius: site.radius, walkable: g.world.isWalkable(site.x, site.z) };
@@ -4857,7 +5010,7 @@ async function main() {
     const g = window.__promptasy;
     if (g.gateAsk.isOpen) g.gateAsk.close();
     g.player.teleport(0, 6);
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     return 1;
   `);
 
@@ -4924,7 +5077,7 @@ async function main() {
     // 從門的正前方 12 公尺（超過自動詢問半徑）往門走過去
     const dir = gate.corridor.dir;
     g.player.teleport(gate.position.x - dir.x * 12, gate.position.z - dir.z * 12);
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const beforeOpen = g.gateAsk.isOpen;
     // 直接沿著橋往門的方向推進（不靠鏡頭方向，測試才穩）
     const until = performance.now() + 6000;
@@ -4936,7 +5089,7 @@ async function main() {
       await new Promise((r) => setTimeout(r, 90));
     }
     // 覆蓋層的焦點是在 requestAnimationFrame 裡送過去的 —— 等它落定再量
-    await new Promise((r) => setTimeout(r, 350));
+    await window.__paSettle(350);
     const panel = document.querySelector('#gate-ask');
     return {
       beforeOpen,
@@ -4964,7 +5117,7 @@ async function main() {
   const stayed = await evaluate(`
     const g = window.__promptasy;
     document.querySelector('#gate-ask [data-stay]').click();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const gate = g.world.gates.find((x) => x.id === 'reasoning');
     return {
       open: g.gateAsk.isOpen,
@@ -4984,17 +5137,17 @@ async function main() {
   // (3) 站在原地不會被連問（要走遠一點再回來）
   const noNag = await evaluate(`
     const g = window.__promptasy;
-    await new Promise((r) => setTimeout(r, 1200));
+    await window.__paSettle(1200);
     return g.gateAsk.isOpen;
   `);
   eq(noNag, false, '選了「先留下修行」之後站在門口不會被連問');
 
   // (4) 按 E 也問得出來（純鍵盤路徑）
   await key('KeyE', 'e', { vk: 69 });
-  await sleep(400);
+  await settle(400);
   const byKey = await evaluate(`
     const g = window.__promptasy;
-    await new Promise((r) => setTimeout(r, 350));
+    await window.__paSettle(350);
     return {
       open: g.gateAsk.isOpen,
       region: g.gateAsk.regionId,
@@ -5017,13 +5170,13 @@ async function main() {
     };
   `);
   await tabNative(true);
-  await sleep(200);
+  await settle(200);
   const onGo = await evaluate(`
     return document.activeElement ? document.activeElement.getAttribute('data-go') !== null : false;
   `);
   eq(onGo, true, 'Shift+Tab 走得到「直接前往」（焦點鎖在對話框裡）');
   await enterNative();
-  await sleep(900);
+  await settle(900);
 
   const proceeded = await evaluate(`
     const g = window.__promptasy;
@@ -5096,10 +5249,10 @@ async function main() {
     const g = window.__promptasy;
     const gate = g.world.gates.find((x) => x.id === 'reasoning');
     g.player.teleport(gate.position.x, gate.position.z);
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     const afterWalk = g.gateAsk.isOpen;
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE' }));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     return { afterWalk, afterKey: g.gateAsk.isOpen };
   `);
   eq(noRepeat.afterWalk, false, '門開了之後走過去不會再被問');
@@ -5108,12 +5261,12 @@ async function main() {
   // (7) 跨重整仍然開著、仍然不會再問
   await reloadPage('先行前往後重新載入');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(600);
+  await settle(600);
   const afterReload = await evaluate(`
     const g = window.__promptasy;
     const gate = g.world.gates.find((x) => x.id === 'reasoning');
     g.player.teleport(gate.position.x, gate.position.z);
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     return {
       unlocked: g.progression.isRegionUnlocked('reasoning'),
       gateOpen: gate.isOpen,
@@ -5134,7 +5287,7 @@ async function main() {
   const settingsHonest = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const text = document.querySelector('#settings .settings__stats').innerText;
     g.settings.close();
     return text;
@@ -5171,9 +5324,9 @@ async function main() {
 
   await cdp.send('Page.navigate', { url: APP_URL }, sessionId);
   await waitFor(() => evaluate('return !!window.__promptasy;'), { label: '重新載入' });
-  await sleep(700);
+  await settle(700);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
 
   const reloaded = await evaluate(`
     const g = window.__promptasy;
@@ -5219,7 +5372,7 @@ async function main() {
       if (mulNow.some((v) => Math.abs(v - 1) > 0.02) && g.audio.region === 'reasoning') break;
       await new Promise((r) => setTimeout(r, 120));
     }
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const m = g.engine.mood();
     return {
       audioBefore,
@@ -5269,7 +5422,7 @@ async function main() {
     const gs = g.world.sites.find((s) => s.id === 'grounding');
     const gd = Math.hypot(gs.x, gs.z) || 1;
     g.player.teleport(gs.x - (gs.x / gd) * 20, gs.z - (gs.z / gd) * 20);
-    await new Promise((r) => setTimeout(r, 1500));
+    await window.__paSettle(1500);
     const cam = g.engine.camera.position;
     const p = g.player.position;
     const dist = Math.hypot(cam.x - p.x, cam.z - p.z);
@@ -5371,7 +5524,7 @@ async function main() {
     // 重播名字的對焦動畫（從 display:none 回來時 CSS 動畫本來就會整組重播）
     name.style.animation = 'none'; void name.offsetWidth; name.style.animation = '';
     root.classList.remove('is-ready');
-    await new Promise((r) => setTimeout(r, 120));
+    await window.__paSettle(120);
     const early = {
       filter: getComputedStyle(name).filter,
       opacity: Number(getComputedStyle(name).opacity),
@@ -5382,7 +5535,7 @@ async function main() {
     // 揭示全部由 CSS 延遲驅動 —— open() 會把整段重播一次
     g.title.open();
     // 全段 ≈ 0.15 名字 → 1.0 髮絲線 → 1.35 定位句 → 2.0 中文 → 2.7 開始鍵，等它跑完
-    await new Promise((r) => setTimeout(r, 4200));
+    await window.__paSettle(4200);
     const done = {
       filter: getComputedStyle(name).filter,
       opacity: Number(getComputedStyle(name).opacity),
@@ -5427,16 +5580,17 @@ async function main() {
 
   // 下面幾項量的是書寫檯（textarea ＋ 送出）的版面與動畫 → 先切到自由書寫模式
   await evaluate(`window.__promptasy.promptConsole.setMode('free'); return 1;`);
-  await sleep(200);
+  await settle(200);
 
   // 3) 面板開啟動畫會收斂（不會卡在半透明 / 偏移）
   const openAnim = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenges[0]);
+    /* P25b：留著固定等待 —— 這一拍要的就是「動畫還在半路上」的那一格；等到影格穩定反而量不到它。 */
     await new Promise((r) => setTimeout(r, 60));
     const panel = document.querySelector('#prompt-console .panel');
     const early = { o: Number(getComputedStyle(panel).opacity), t: getComputedStyle(panel).transform };
-    await new Promise((r) => setTimeout(r, 1500));
+    await window.__paSettle(1500);
     const t = getComputedStyle(panel).transform;
     const m = t === 'none' ? [1, 0, 0, 1, 0, 0] : t.match(/-?[\\d.]+/g).map(Number);
     const late = { o: Number(getComputedStyle(panel).opacity), t, scale: m[0], dy: m[5] };
@@ -5457,12 +5611,12 @@ async function main() {
       'Output format: 3 bullet points, each under 20 words.';
     document.querySelector('#prompt-console [data-submit]').click();
     // 抓在「第一條已經浮出來、最後一條還沒開始」的那一刻
-    await new Promise((r) => setTimeout(r, 330));
+    await window.__paSettle(330);
     const rows = [...document.querySelectorAll('#prompt-console .row')];
     const early = rows.map((r) => Number(getComputedStyle(r).opacity));
     const delays = rows.map((r) => parseFloat(getComputedStyle(r).animationDelay));
     const xpEarly = document.querySelector('[data-xptick]')?.textContent || '';
-    await new Promise((r) => setTimeout(r, 1600));
+    await window.__paSettle(1600);
     const late = rows.map((r) => Number(getComputedStyle(r).opacity));
     const xpLate = document.querySelector('[data-xptick]')?.textContent || '';
     const xpTo = document.querySelector('[data-xptick]')?.getAttribute('data-to') || '';
@@ -5501,13 +5655,22 @@ async function main() {
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: w, height: h, deviceScaleFactor: 1, mobile: false,
     }, sessionId);
-    await sleep(400);
+    /*
+     * v1.2 · P25b：改視窗尺寸是「動畫播完看最終樣子」那一類 —— 等版面
+     * 連續三次取樣一模一樣（視窗實際尺寸 ＋ 頁面高度）再量，不要等一個
+     * 猜出來的毫秒數。soft ＝ 真的一直抖也照樣往下量，讓斷言自己講話。
+     */
+    await untilStable(
+      '[document.documentElement.clientWidth, document.documentElement.clientHeight, document.body.scrollHeight]',
+      { soft: true, label: `視窗 ${w}×${h} 的版面停下來` }
+    );
+    await settle(400);
     const layout = await evaluate(`
       const g = window.__promptasy;
       const panels = [];
       for (const [name, api] of [['練習室', g.promptConsole], ['圖鑑', g.codex], ['設定', g.settings]]) {
         api.open(api === g.promptConsole ? g.content.challenges[0] : undefined);
-        await new Promise((r) => setTimeout(r, 260));
+        await window.__paSettle(260);
         const root = api.root;
         const panel = root.querySelector('.panel');
         const body = root.querySelector('.panel__body');
@@ -5519,7 +5682,7 @@ async function main() {
           right: Math.round(panel.getBoundingClientRect().right),
         });
         api.close();
-        await new Promise((r) => setTimeout(r, 120));
+        await window.__paSettle(120);
       }
       return {
         panels,
@@ -5536,7 +5699,7 @@ async function main() {
     }
   }
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(300);
+  await settle(300);
 
   /* ================================================================ */
   /* Phase 14 · ①官方範例中文化 ②說明文字放大 ③指南針                  */
@@ -5550,14 +5713,14 @@ async function main() {
     // 全部收集起來才看得到 68 條的內容
     g.progression.state.collected = g.content.curriculum.techniques.map((t) => t.id);
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
 
     const official = g.content.curriculum.techniques.find((t) => t.id === 'clarity-01');
     const card = Array.from(document.querySelectorAll('#codex .tech')).find(
       (li) => li.querySelector('.tech__id')?.textContent === 'clarity-01'
     );
     card.querySelector('details').open = true;
-    await new Promise((r) => setTimeout(r, 160));
+    await window.__paSettle(160);
     const body = card.querySelector('.tech__body');
     const origin = body.querySelector('.origin');
     const visible = (el) => !!el && el.getClientRects().length > 0;
@@ -5582,7 +5745,7 @@ async function main() {
     };
     // 展開全部技巧，模擬「玩家把整本翻過一遍」
     document.querySelectorAll('#codex .tech > details').forEach((d) => { d.open = true; });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const leaks = [];
     for (const el of document.querySelectorAll('#codex .tech__tip, #codex .tech__ex, #codex .tech__note')) {
       if (el.checkVisibility && !el.checkVisibility()) continue;
@@ -5666,7 +5829,7 @@ async function main() {
     );
     const origin = card.querySelector('.origin');
     origin.open = true;
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     return {
       body: origin.querySelector('pre.origin__body')?.textContent || '',
       note: origin.querySelector('.origin__note')?.textContent || '',
@@ -5690,7 +5853,7 @@ async function main() {
     const g = window.__promptasy;
     g.codex.close();
     g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const px = (sel) => {
       const el = document.querySelector(sel);
       return el ? parseFloat(getComputedStyle(el).fontSize) : 0;
@@ -5728,10 +5891,10 @@ async function main() {
   const compass = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     // 前面的測試可能把玩家丟到別的地方 —— 先站回出生點，方位才對得起來
     g.player.teleport(0, 6);
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     const el = document.querySelector('.compass');
     const before = g.compass.state();
     const dialBefore = document.querySelector('.compass__dial').style.transform;
@@ -5770,9 +5933,9 @@ async function main() {
     };
     const release = (code) => window.dispatchEvent(new KeyboardEvent('keyup', { code, bubbles: true }));
     press('ArrowLeft');
-    await new Promise((r) => setTimeout(r, 1200));
+    await window.__paSettle(1200);
     release('ArrowLeft');
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const after = { yaw: g.player.cameraYaw, dial: dialOf(), needle: needleOf() };
     // 對照世界狀態自己算一次
     const s = g.compass.state();
@@ -5806,10 +5969,10 @@ async function main() {
   const compassHide = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const hiddenWhenPanel = document.querySelector('.compass').getClientRects().length === 0;
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const backAfter = document.querySelector('.compass').getClientRects().length > 0;
     return { hiddenWhenPanel, backAfter };
   `);
@@ -5824,7 +5987,7 @@ async function main() {
     const p = g.player.position;
     // 往目標挪一半的距離
     g.player.teleport((p.x + t.x) / 2, (p.z + t.z) / 2);
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     const s1 = g.compass.state();
     return { d0: s0.objective.distance, d1: s1.objective.distance, label: document.querySelector('.compass__label').textContent };
   `);
@@ -5845,13 +6008,13 @@ async function main() {
         const el = document.querySelector('${selector}');
         if (!el) return null;
         el.scrollIntoView({ block: 'center' });
-        await new Promise((r) => setTimeout(r, 160));
+        await window.__paSettle(160);
         const r = el.getBoundingClientRect();
         return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
       `);
       if (!box) return false;
       await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y }, sessionId);
-      await sleep(340);
+      await settle(340);
       const hit = await evaluate(`return !!document.querySelector('${selector}')?.matches(':hover');`);
       if (hit) return true;
     }
@@ -5861,9 +6024,10 @@ async function main() {
   /** 讓 Chrome 進入「鍵盤模式」，之後的 focus() 才會命中 :focus-visible。 */
   async function focusVisible(selector) {
     await key('Tab', 'Tab', { vk: 9 });
+    /* P25b：留著固定 sleep —— 只是讓 Chrome 收下這一次 Tab（進入鍵盤模式），沒有可以問的狀態。 */
     await sleep(120);
     await evaluate(`document.querySelector('${selector}').focus(); return 1;`);
-    await sleep(280);
+    await settle(280);
   }
 
   await evaluate(`
@@ -5871,7 +6035,7 @@ async function main() {
     g.settings.close();
     g.codex.close();
     g.promptConsole.open(g.content.challenges[0]);
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     return 1;
   `);
 
@@ -5989,7 +6153,7 @@ async function main() {
   const inlay = await evaluate(`
     const el = document.querySelector('${HOVER_TARGET}');
     el.scrollIntoView({ block: 'center' });
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     return getComputedStyle(el, '::after').backgroundSize.split(',')[0].trim();
   `);
   const hovered = await hoverEl(HOVER_TARGET);
@@ -6046,15 +6210,15 @@ async function main() {
   // ── 選項卡與鍵盤符文石 ──────────────────────────────────────
   await evaluate(`
     document.querySelector('#prompt-console [data-act-next="3"]').click();
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     // 前面的測試可能把答題方式切成自由書寫 —— 選項卡只有石碑刻印模式才有
     const slot = document.querySelector('#prompt-console [data-stele-slot]');
     if (slot.hidden || !document.querySelector('#prompt-console .opt')?.checkVisibility()) {
       document.querySelector('#prompt-console [data-mode]').click();
-      await new Promise((r) => setTimeout(r, 700));
+      await window.__paSettle(700);
     }
     document.querySelector('#prompt-console .carve').scrollIntoView({ block: 'center' });
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return 1;
   `);
   const optSeal = await evaluate(`
@@ -6099,7 +6263,7 @@ async function main() {
     const layersBefore = getComputedStyle(opts[0], '::after').backgroundImage.split('gradient').length - 1;
     for (const o of opts) {
       o.click();
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const wrong = document.querySelector('#prompt-console .opt.is-wrong');
       if (wrong) {
         const cs = getComputedStyle(wrong, '::after');
@@ -6151,7 +6315,7 @@ async function main() {
         { type: 'mouseMoved', x: Math.round(wrongAt[0]), y: Math.round(wrongAt[1]), button: 'none', buttons: 0 },
         sessionId
       );
-      await sleep(240);
+      await settle(240);
       const hoveredWrong = await evaluate(`
         const w = document.querySelector('#prompt-console .opt.is-wrong');
         return { hover: w.matches(':hover'), lifted: getComputedStyle(w).translate };
@@ -6175,9 +6339,9 @@ async function main() {
   const form = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const range = document.querySelector('#settings input[type="range"]');
     const cb = document.querySelector('#settings input[type="checkbox"]');
     const sel = document.querySelector('#settings select');
@@ -6193,11 +6357,11 @@ async function main() {
     const wasChecked = cb.checked;
     const faceBefore = getComputedStyle(cb, '::before').backgroundImage;
     cb.checked = !wasChecked;
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const faceAfter = getComputedStyle(cb, '::before').backgroundImage;
     const markAfter = getComputedStyle(cb, '::after').opacity;
     cb.checked = true;
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return {
       rangeAppearance: getComputedStyle(range).appearance,
       thumbClip: /polygon\\(/.test(thumbRule) ? 'polygon(' : thumbRule.slice(0, 120),
@@ -6223,13 +6387,13 @@ async function main() {
 
   // ── prefers-reduced-motion：保留狀態，拿掉位移與掃光 ──────────
   await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] }, sessionId);
-  await sleep(260);
+  await settle(260);
   const calm = await evaluate(`
     const g = window.__promptasy;
     g.settings.close();
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     g.promptConsole.open(g.content.challenges[0]);
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     const hero = document.querySelector('#prompt-console [data-act-next="2"]');
     const item = document.querySelector('#prompt-console .acts__item.is-now');
     return {
@@ -6244,7 +6408,7 @@ async function main() {
   eq(calm.edgeStillGradient, true, 'reduced-motion：邊的立體感留著（那是資訊）');
   eq(calm.faceStillGradient, true, 'reduced-motion：石面留著');
   await cdp.send('Emulation.setEmulatedMedia', { features: [] }, sessionId);
-  await sleep(200);
+  await settle(200);
 
   // ── 護欄：整份樣式表沒有任何外部資產 ──────────────────────────
   const noRemote = await evaluate(`
@@ -6262,17 +6426,17 @@ async function main() {
   `);
   eq(noRemote.length, 0, '樣式表零外部資產（全部是漸層 / 內嵌 SVG / 本機字型）', JSON.stringify(noRemote).slice(0, 160));
 
-  await evaluate(`window.__promptasy.promptConsole.close(); await new Promise((r) => setTimeout(r, 300)); return 1;`);
+  await evaluate(`window.__promptasy.promptConsole.close(); await window.__paSettle(300); return 1;`);
 
   /* ================================================================ */
   console.log('\n▸ 從設定重看引導課程 ＋ 跳過');
   const replay = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     const hasButton = !!document.querySelector('#settings [data-prologue]');
     document.querySelector('#settings [data-prologue]').click();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     return {
       hasButton,
       settingsOpen: g.settings.isOpen,
@@ -6292,16 +6456,16 @@ async function main() {
   const skipFlow = await evaluate(`
     const g = window.__promptasy;
     document.querySelector('.echo [data-skip]').click();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const confirmShown = !document.querySelector('.echo__confirm').hidden;
     // 先反悔一次：確認「繼續學」不會關掉課程
     document.querySelector('.echo [data-confirm-no]').click();
-    await new Promise((r) => setTimeout(r, 160));
+    await window.__paSettle(160);
     const stillActive = g.prologue.isActive;
     document.querySelector('.echo [data-skip]').click();
-    await new Promise((r) => setTimeout(r, 160));
+    await window.__paSettle(160);
     document.querySelector('.echo [data-confirm-yes]').click();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     return {
       confirmShown,
       stillActive,
@@ -6319,7 +6483,7 @@ async function main() {
   eq(skipFlow.introOpen, true, '跳過的人至少拿到一張操作說明');
 
   await evaluate(`document.querySelector('.intro [data-start]').click(); return 1;`);
-  await sleep(260);
+  await settle(260);
   eq(await evaluate('return window.__promptasy.intro.isOpen;'), false, '操作說明可關閉');
 
   /* ================================================================ */
@@ -6350,14 +6514,14 @@ async function main() {
   const perfOn = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     const box = document.querySelector('#settings [data-perf]');
     const hasRow = !!box;
     const rowText = box ? box.closest('.settings__row').textContent : '';
     box.checked = true;
     box.dispatchEvent(new Event('change', { bubbles: true }));
     // swiftshader 軟體渲染很慢（個位數 FPS），要等夠久才收得到幾幀
-    await new Promise((r) => setTimeout(r, 3000));
+    await window.__paSettle(3000);
     const node = document.querySelector('.perfmon');
     const st = g.perfmon.state();
     const grip = getComputedStyle(node.querySelector('.perfmon__grip')).pointerEvents;
@@ -6417,7 +6581,7 @@ async function main() {
     const g = window.__promptasy;
     const node = document.querySelector('.perfmon');
     // 多等一會兒：GPU 的計時查詢要隔幾幀才收得到結果
-    await new Promise((r) => setTimeout(r, 1500));
+    await window.__paSettle(1500);
     const st = g.perfmon.state();
     const nameEl = node.querySelector('[data-gpuname]');
     const flagEl = node.querySelector('[data-gpusoft]');
@@ -6432,7 +6596,7 @@ async function main() {
       clientX: Math.round(tipBox.x + tipBox.width / 2),
       clientY: Math.round(tipBox.y + tipBox.height / 2),
     }));
-    await new Promise((r) => setTimeout(r, 120));
+    await window.__paSettle(120);
     const bubbleAfter = bubble ? getComputedStyle(bubble).visibility : '';
     const tipText = bubble ? bubble.textContent : '';
     // 石牌有 clip-path（切角）—— 氣泡跑出石牌就會被切掉、字讀不完
@@ -6519,7 +6683,7 @@ async function main() {
     const g = window.__promptasy;
     const node = document.querySelector('.perfmon');
     node.querySelector('[data-fold]').click();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const collapsed = {
       cls: node.classList.contains('is-collapsed'),
       bodyShown: getComputedStyle(node.querySelector('.perfmon__body')).display !== 'none',
@@ -6528,7 +6692,7 @@ async function main() {
       aria: node.querySelector('[data-fold]').getAttribute('aria-expanded'),
     };
     node.querySelector('[data-fold]').click();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     return { collapsed, backOpen: !node.classList.contains('is-collapsed') };
   `);
   eq(perfFold.collapsed.cls, true, '可以收合成小牌子');
@@ -6538,15 +6702,15 @@ async function main() {
   eq(perfFold.collapsed.aria, 'false', '收合狀態有 aria-expanded');
   eq(perfFold.backOpen, true, '再按一次展開');
 
-  await evaluate(`window.__promptasy.settings.close(); await new Promise((r) => setTimeout(r, 240)); return 1;`);
+  await evaluate(`window.__promptasy.settings.close(); await window.__paSettle(240); return 1;`);
 
   // F3：關掉 → 再打開
   await key('F3', 'F3', { vk: 114 });
-  await sleep(320);
+  await settle(320);
   const perfF3Off = await evaluate(`
     const g = window.__promptasy;
     const before = g.perfmon.state().frames;
-    await new Promise((r) => setTimeout(r, 2000));
+    await window.__paSettle(2000);
     const after = g.perfmon.state().frames;
     const st = g.perfmon.state();
     return {
@@ -6569,7 +6733,7 @@ async function main() {
   eq(perfF3Off.after, perfF3Off.before, '關掉後每幀的工作真的停了（幀數不再累加）');
 
   await key('F3', 'F3', { vk: 114 });
-  await sleep(2000);
+  await settle(2000);
   const perfF3On = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -6586,7 +6750,7 @@ async function main() {
 
   // 跨重整仍記得
   await reloadPage('效能監視器跨重整');
-  await sleep(2000);
+  await settle(2000);
   const perfReload = await evaluate(`
     const g = window.__promptasy;
     const st = g.perfmon.state();
@@ -6614,7 +6778,7 @@ async function main() {
   const noKeyCopy = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     const parts = [document.body.textContent || '', g.title.root.textContent || '', g.intro.root.textContent || ''];
     parts.push(
       Array.from(document.querySelectorAll('[title], [placeholder], [aria-label]'))
@@ -6622,12 +6786,12 @@ async function main() {
         .join(' ')
     );
     g.settings.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     parts.push(document.body.textContent || '');
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const all = parts.join(' ');
     const patterns = [/api[\\s._-]*key/i, /api\\s*金鑰/i, /金鑰/, /bring your own key/i, /自備[^\\n]{0,6}(key|模型)/i, /真\\s*LLM\\s*模式/i];
     const hits = [];
@@ -6667,7 +6831,7 @@ async function main() {
 
   await reloadPage('種入稱號存檔後重新載入');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
 
   const rankNow = await evaluate(`
     const g = window.__promptasy;
@@ -6688,7 +6852,7 @@ async function main() {
   eq(rankNow.nextTitle, '神諭使者', '指得出下一個稱號');
 
   await key('KeyC', 'c', { vk: 67 });
-  await sleep(400);
+  await settle(400);
   const codexShare = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -6709,7 +6873,7 @@ async function main() {
   const card = await evaluate(`
     const g = window.__promptasy;
     document.querySelector('#codex [data-share-codex]').click();
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     const cv = g.shareCard.canvas;
     // 讀像素用另一張畫布（willReadFrequently），不去動遊戲自己那張的 context
     const probe = document.createElement('canvas');
@@ -6790,7 +6954,7 @@ async function main() {
   eq(card.actsVisible, true, '「下載圖片」不用捲動就看得到');
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(320);
+  await settle(320);
   const afterShare = await evaluate(`
     const g = window.__promptasy;
     return { shareOpen: g.shareCard.isOpen, codexOpen: g.codex.isOpen };
@@ -6798,20 +6962,20 @@ async function main() {
   eq(afterShare.shareOpen, false, 'Esc 關閉分享卡');
   eq(afterShare.codexOpen, true, 'Esc 只關分享卡，圖鑑還在');
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(280);
+  await settle(280);
 
   /* --- 通關後的分享入口：卡片標亮「這一關剛學到的技法」 --- */
   const resultShare = await evaluate(`
     const g = window.__promptasy;
     const ch = g.content.challenge('gate-of-clarity-01');
     g.promptConsole.open(ch);
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     g.promptConsole.setMode('free');
-    await new Promise((r) => setTimeout(r, 180));
+    await window.__paSettle(180);
     document.querySelector('#prompt-console [data-act-next="2"]').click();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     document.querySelector('#prompt-console [data-act-next="3"]').click();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return { teaches: ch.teaches.slice(0, 3), open: g.promptConsole.isOpen, act: g.promptConsole.act };
   `);
   eq(resultShare.open, true, '重新打開一關');
@@ -6822,7 +6986,7 @@ async function main() {
     const ta = document.querySelector('.prompt-input');
     ta.value = g.content.challenge('gate-of-clarity-01').sample;
     document.querySelector('#prompt-console [data-submit]').click();
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     const btn = document.querySelector('#prompt-console [data-share]');
     return {
       grade: document.querySelector('#prompt-console .grade__mark')?.textContent || '',
@@ -6839,7 +7003,7 @@ async function main() {
   const resultCard = await evaluate(`
     const g = window.__promptasy;
     document.querySelector('#prompt-console [data-share]').click();
-    await new Promise((r) => setTimeout(r, 800));
+    await window.__paSettle(800);
     const m = g.shareCard.model();
     return {
       open: g.shareCard.isOpen,
@@ -6881,7 +7045,7 @@ async function main() {
   // 800px 窄畫面下不會水平溢位
   await cdp.send('Emulation.setDeviceMetricsOverride',
     { width: 820, height: 720, deviceScaleFactor: 1, mobile: false }, sessionId);
-  await sleep(500);
+  await settle(500);
   const narrow = await evaluate(`
     const panel = document.querySelector('#sharecard .panel');
     const cv = document.querySelector('#sharecard .sharecard__canvas');
@@ -6895,12 +7059,12 @@ async function main() {
   eq(narrow.canvasFits, true, '820px 下卡片圖縮進面板寬度內');
   eq(narrow.docOverflow, 0, '820px 下整頁無水平溢位');
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(400);
+  await settle(400);
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(280);
+  await settle(280);
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(280);
+  await settle(280);
 
   /* ================================================================ */
   console.log('\n▸ 分享 ＝ 圖 ＋ 一段話（Phase 28）');
@@ -6953,7 +7117,7 @@ async function main() {
       // eslint-disable-next-line no-await-in-loop
       if (await evaluate(`return !!window.__promptasy.shareCard.file;`)) return true;
       // eslint-disable-next-line no-await-in-loop
-      await sleep(300);
+      await settle(300);
     }
     return false;
   }
@@ -6967,7 +7131,7 @@ async function main() {
       return true;
     `);
     await cdp.send('Input.insertText', { text }, sessionId);
-    await sleep(160);
+    await settle(160);
   }
 
   await evaluate(`window.__promptasy.shareCard.open({ kind: 'codex' }); return true;`);
@@ -7087,7 +7251,7 @@ async function main() {
   const copyClick = await evaluate(`
     window.__clip.length = 0;
     document.querySelector('#sharecard [data-copy]').click();
-    await new Promise((r) => setTimeout(r, 360));
+    await window.__paSettle(360);
     return {
       clip: window.__clip,
       toast: [...document.querySelectorAll('.toast')].map((n) => n.textContent.trim()),
@@ -7155,7 +7319,7 @@ async function main() {
       document.querySelectorAll('.toast').forEach((n) => n.remove());
       const chip = document.querySelector('#sharecard [data-chip="${id}"]');
       chip.click();
-      await new Promise((r) => setTimeout(r, 380));
+      await window.__paSettle(380);
       return {
         clip: window.__clip,
         opened: window.__opened,
@@ -7235,11 +7399,11 @@ async function main() {
   `);
   eq(chipKeys.focused, 'threads', '鍵盤走得到那一排的第一顆');
   await key('ArrowRight', 'ArrowRight', { vk: 39 });
-  await sleep(180);
+  await settle(180);
   const afterRight = await evaluate(`return document.activeElement.getAttribute('data-chip');`);
   eq(afterRight, 'facebook', '→ 走到下一顆');
   await key('ArrowRight', 'ArrowRight', { vk: 39 });
-  await sleep(180);
+  await settle(180);
   // 那一排與主角那一顆是同一族的圖示鈕（.iconbtn）→ 方向鍵一路走到複製鈕
   const afterRight2 = await evaluate(`
     return { chip: document.activeElement.getAttribute('data-chip'), copy: document.activeElement.hasAttribute('data-copy') };
@@ -7247,7 +7411,7 @@ async function main() {
   eq(afterRight2.chip, null, '→ 再走一步就離開平台那兩顆');
   eq(afterRight2.copy, true, '→ 走到的是「複製圖＋文」（它跟那一排同一族）');
   await key('ArrowLeft', 'ArrowLeft', { vk: 37 });
-  await sleep(180);
+  await settle(180);
   const afterLeft = await evaluate(`return document.activeElement.getAttribute('data-chip');`);
   eq(afterLeft, 'facebook', '← 走得回去');
   // Enter 真的按得下去（用真正的按鍵事件，不是 click()）
@@ -7258,7 +7422,7 @@ async function main() {
     return true;
   `);
   await enterNative();
-  await sleep(420);
+  await settle(420);
   const byEnter = await evaluate(`
     return {
       opened: window.__opened,
@@ -7320,7 +7484,7 @@ async function main() {
     });
     g.shareCard.close();
     g.shareCard.open({ kind: 'codex' });
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const dl = document.querySelector('#sharecard [data-download]');
     const copy = document.querySelector('#sharecard [data-copy]');
     return {
@@ -7358,7 +7522,7 @@ async function main() {
     return true;
   `);
   await enterNative();
-  await sleep(500);
+  await settle(500);
   const copiedByKey = await evaluate(`
     return {
       shared: window.__shared,
@@ -7387,7 +7551,7 @@ async function main() {
     navigator.clipboard.write = async () => { throw new Error('denied'); };
     document.querySelectorAll('.toast').forEach((n) => n.remove());
     document.querySelector('#sharecard [data-copy]').click();
-    await new Promise((r) => setTimeout(r, 360));
+    await window.__paSettle(360);
     const toast = [...document.querySelectorAll('.toast')].map((n) => n.textContent.trim());
     navigator.clipboard.write = realWrite;
     return { toast };
@@ -7404,7 +7568,7 @@ async function main() {
     { width: 820, height: 720, deviceScaleFactor: 1, mobile: false },
     sessionId
   );
-  await sleep(520);
+  await settle(520);
   const sendNarrow = await evaluate(`
     const panel = document.querySelector('#sharecard .panel');
     const copy = document.querySelector('#sharecard [data-copy]');
@@ -7435,7 +7599,7 @@ async function main() {
     eq(c.inside, true, `820px 下「${c.id}」在面板寬度內（沒有被擠出去）`);
   }
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(420);
+  await settle(420);
 
   // 把動過的東西還原，後面的段落照原樣跑
   await evaluate(`
@@ -7449,7 +7613,7 @@ async function main() {
     if (window.__dlSpy) { document.removeEventListener('click', window.__dlSpy, true); delete window.__dlSpy; }
     return { shareOpen: g.shareCard.isOpen, openRestored: typeof window.open === 'function' };
   `);
-  await sleep(260);
+  await settle(260);
 
   /* ================================================================ */
   console.log('\n▸ 導航閃爍提示（Phase 21）');
@@ -7499,7 +7663,7 @@ async function main() {
     }
     if (away) g.player.teleport(away.x, away.z);
     window.__nudgeAway = away;
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     /*
      * 課程 v2 · Phase F：這一輪玩到這裡時，知識式軟門檻可能已經替玩家開了新的土地，
      * 而「＿＿已開啟」那一則提示會把冷卻計時器推起來 —— 那是對的行為，但會蓋掉
@@ -7668,11 +7832,11 @@ async function main() {
   const nudgePanel = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     g.nudge.update(0.2);
     const during = g.nudge.state();
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     return { during, isOn: document.querySelector('.nudge').classList.contains('is-on') };
   `);
   eq(nudgePanel.during.visible, false, '打開面板 → 提示立刻收起來（他沒有迷路）');
@@ -7725,22 +7889,63 @@ async function main() {
     // 先站到「看得到但走不到」的距離（仍在更新範圍內），並把晃動歸零 ——
     // 這一段要驗的是「走進去才會晃」，不是衰減曲線
     g.player.teleport(chime.x + 20, chime.z + 20);
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     chime.swing = 0;
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     out.swingFar = chime.swing;
     out.tubeFar = chime.tubes[0].pivot.rotation.z;
-    // 走過去
+    /*
+     * v1.2 · P25b：風鈴是**已知的 flaky 家族**，根因是這一段在等牆鐘。
+     * swing 走進去那一刻被設成 1、之後每秒衰減 0.55 —— 原本從「呼叫
+     * teleport 的那一刻」起算 700 毫秒，可是觸發要等下一幀才發生，
+     * 機器一慢，這 700 毫秒裡有一大半在等「還沒開始衰減」，
+     * 剩下的又可能已經衰減過頭。
+     * 改成：先輪詢等它**真的被觸發**（swing 從 0 翻成 > 0，前一行剛把它歸零，
+     * 所以等的是真的翻面），再從那一刻起算 700 毫秒 —— 於是量到的是
+     * 「衰減 0.7 秒之後還剩多少」，一個與機器速度無關的數字。
+     */
+    const till = async (fn, what) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < 15000) {
+        if (fn()) return true;
+        await window.__paSettle(60, 1);
+      }
+      throw new Error('等不到：' + what);
+    };
     g.player.teleport(chime.x, chime.z);
-    await new Promise((r) => setTimeout(r, 700));
+    await till(() => chime.swing > 0, '走進去把風鈴撞響');
+    await window.__paSettle(700);
     out.swingNear = chime.swing;
-    out.tubeNear = chime.tubes[0].pivot.rotation.z;
+    /*
+     * 管子的角度是 sin(t × 5.2 + phase) × amp —— 某一個瞬間剛好過零是正常的，
+     * 「有沒有在動」要看一小段時間裡的最大偏擺，不是某一格的快照。
+     */
+    let tubeMax = 0;
+    for (let i = 0; i < 6; i += 1) {
+      tubeMax = Math.max(tubeMax, Math.abs(chime.tubes[0].pivot.rotation.z));
+      await window.__paSettle(40, 1);
+    }
+    out.tubeNear = out.tubeFar + tubeMax;
     // 光菇：走近時一朵一朵亮起來
     g.player.teleport(caps.x + 26, caps.z + 26);
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     out.capsFar = caps.caps.map((c) => Math.round(c.mat.emissiveIntensity * 100) / 100);
+    /*
+     * 亮度是指數逼近（dt × 4.5）——「亮完了」是一個看得出來的狀態，
+     * 等它連續三次取樣不再變（動畫收斂），不要等一個猜出來的毫秒數。
+     */
     g.player.teleport(caps.x, caps.z);
-    await new Promise((r) => setTimeout(r, 900));
+    {
+      let last = -1;
+      let same = 0;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 15000 && same < 3) {
+        await window.__paSettle(120, 1);
+        const now = Math.round(caps.caps.reduce((a, c) => a + c.lit, 0) * 100);
+        if (now === last) same += 1; else same = 0;
+        last = now;
+      }
+    }
     out.capsNear = caps.caps.map((c) => Math.round(c.mat.emissiveIntensity * 100) / 100);
     return out;
   `);
@@ -7768,7 +7973,7 @@ async function main() {
     const spec = g.inscriptionData.entries[0];
     const before = { xp: g.progression.state.xp, found: g.progression.inscriptionCount() };
     g.player.teleport(spec.at[0] + 2.2, spec.at[1] + 2.2);
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const hint = document.querySelector('[data-interact]');
     const out = {
       specId: spec.id,
@@ -7777,7 +7982,7 @@ async function main() {
       hintText: hint.textContent.replace(/\\s+/g, ' ').trim(),
     };
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 520));
+    await window.__paSettle(520);
     const panel = document.querySelector('#inscription');
     out.open = g.inscriptionPanel.isOpen;
     out.small = !panel.classList.contains('overlay--wide');
@@ -7842,17 +8047,17 @@ async function main() {
   const insAgain = await evaluate(`
     const g = window.__promptasy;
     g.inscriptionPanel.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const xp = g.progression.state.xp;
     const spec = g.inscriptionData.entries[0];
     g.player.teleport(spec.at[0] + 2.2, spec.at[1] + 2.2);
-    await new Promise((r) => setTimeout(r, 380));
+    await window.__paSettle(380);
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const note = document.querySelector('#inscription .inscribe__note')?.textContent.trim() || '';
     const after = g.progression.state.xp;
     g.inscriptionPanel.close();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return { xp, after, note };
   `);
   eq(insAgain.after, insAgain.xp, '重讀同一則刻文不再給 XP（不能刷分）');
@@ -7862,13 +8067,13 @@ async function main() {
   const finds = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 380));
+    await window.__paSettle(380);
     const rows = [...document.querySelectorAll('#codex .finds__list li')].map((li) => ({
       label: li.querySelector('b').textContent.trim(),
       n: li.querySelector('span').textContent.trim(),
     }));
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return { rows, total: g.inscriptionData.entries.length, found: g.progression.inscriptionCount() };
   `);
   ok(finds.rows.length >= 2, '圖鑑有「走出來的收集」兩列', JSON.stringify(finds.rows));
@@ -7888,7 +8093,7 @@ async function main() {
     const spec = g.secretData.entries.find((s) => s.blessing) || g.secretData.entries[0];
     const before = { xp: g.progression.state.xp, n: g.progression.secretCount() };
     g.player.teleport(spec.at[0] + 24, spec.at[1] + 24);
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const farFound = g.progression.hasFoundSecret(spec.id);
     g.player.teleport(spec.at[0] + 1.5, spec.at[1] + 1.5);
     /*
@@ -7903,7 +8108,7 @@ async function main() {
       await new Promise((r) => setTimeout(r, 100));
     }
     // 翻面之後再給一拍，讓 toast 與存檔那幾件事跟上（它們跟偵測不在同一個 tick）
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const toasts = [...document.querySelectorAll('.toast')].map((t) => t.textContent.trim());
     const out = {
       id: spec.id,
@@ -7921,7 +8126,7 @@ async function main() {
     };
     // 再站一會兒：不會給第二次
     const xp2 = g.progression.state.xp;
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     out.xpStable = g.progression.state.xp === xp2;
     out.nStable = g.progression.secretCount() === out.n;
     return out;
@@ -7945,10 +8150,10 @@ async function main() {
   const blessed = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 360));
+    await window.__paSettle(360);
     const txt = document.querySelector('#codex .finds')?.textContent || '';
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return { txt };
   `);
   ok(blessed.txt.includes('回聲的祝福'), '圖鑑低調地標了一句「回聲的祝福」', blessed.txt.slice(0, 120));
@@ -7958,16 +8163,16 @@ async function main() {
     const g = window.__promptasy;
     const chime = g.world.reactive.objects.find((o) => o.kind === 'chime');
     g.player.teleport(chime.x + 20, chime.z + 20);
-    await new Promise((r) => setTimeout(r, 380));
+    await window.__paSettle(380);
     chime.swing = 0; // 從乾淨的狀態開始（衰減不是這一段要驗的事）
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     // 面板開著的時候「走」進反應範圍
     g.player.teleport(chime.x, chime.z);
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     const swingDuringPanel = chime.swing;
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     return { swingDuringPanel, swingAfter: chime.swing };
   `);
   eq(quiet.swingDuringPanel, 0, '面板打開時走進反應範圍 → 世界安靜（整組停手）');
@@ -8088,7 +8293,7 @@ async function main() {
       hintText: hint.textContent.replace(/\\s+/g, ' ').trim(),
     };
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 520));
+    await window.__paSettle(520);
     const panel = document.querySelector('#letter');
     out.open = g.letterPanel.isOpen;
     out.small = !panel.classList.contains('overlay--wide');
@@ -8141,17 +8346,17 @@ async function main() {
   const letterAgain = await evaluate(`
     const g = window.__promptasy;
     g.letterPanel.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const xp = g.progression.state.xp;
     const spec = g.letterData.entries.find((e) => e.techniqueId);
     g.player.teleport(spec.at[0] + 2.2, spec.at[1] + 2.2);
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const note = document.querySelector('#letter .letter__note')?.textContent.trim() || '';
     const after = g.progression.state.xp;
     g.letterPanel.close();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return { xp, after, note };
   `);
   eq(letterAgain.after, letterAgain.xp, '重撿同一頁不再給 XP（不能刷分）');
@@ -8176,7 +8381,7 @@ async function main() {
     g.player.teleport(spec.at[0] + 2.2, spec.at[1] + 2.2);
     await waitFor(spec.title);
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     const panel = document.querySelector('#letter');
     const out = {
       id: spec.id,
@@ -8187,7 +8392,7 @@ async function main() {
       collectedBefore: g.progression.state.collected.length,
     };
     g.letterPanel.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     out.collectedAfter = g.progression.state.collected.length;
     out.n = g.progression.letterCount();
     return out;
@@ -8203,7 +8408,7 @@ async function main() {
   const letterFinds = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const rows = [...document.querySelectorAll('#codex .finds__list li')].map((li) => ({
       label: li.querySelector('b').textContent.trim(),
       n: li.querySelector('span').textContent.trim(),
@@ -8224,7 +8429,7 @@ async function main() {
       allTitles: g.letterData.entries.map((e) => e.title),
     };
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return out;
   `);
   {
@@ -8316,7 +8521,7 @@ async function main() {
     const g = window.__promptasy;
     const tab = g.world.tablets.find((t) => (t.tablet.lines || []).some((l) => typeof l !== 'string'));
     g.tabletPanel.open(tab.tablet, { firstRead: false, xpGain: 0 });
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const rows = [...document.querySelectorAll('#lore-tablet .lore__line')].map((p) => {
       const cs = getComputedStyle(p);
       const box = p.getBoundingClientRect();
@@ -8331,11 +8536,11 @@ async function main() {
     });
     const out = { id: tab.id, rows };
     g.tabletPanel.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     // 舊格式（純字串）的碑照樣渲染
     const plain = g.world.tablets.find((t) => (t.tablet.lines || []).every((l) => typeof l === 'string'));
     g.tabletPanel.open(plain.tablet, { firstRead: false, xpGain: 0 });
-    await new Promise((r) => setTimeout(r, 380));
+    await window.__paSettle(380);
     out.plain = {
       id: plain.id,
       lines: [...document.querySelectorAll('#lore-tablet .lore__line')].map((p) => ({
@@ -8344,7 +8549,7 @@ async function main() {
       })),
     };
     g.tabletPanel.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return out;
   `);
   {
@@ -8470,7 +8675,7 @@ async function main() {
      */
     const far = farAt || [e.at[0] + 10, e.at[1] + 10];
     g.player.teleport(far[0], far[1]);
-    await new Promise((r) => setTimeout(r, 380));
+    await window.__paSettle(380);
     const farHint = document.querySelector('[data-interact]');
     const hintFar = farHint.hidden || !/濁靈/.test(farHint.textContent);
     const m = g.world.murks.byId(e.id);
@@ -8532,7 +8737,7 @@ async function main() {
   eq(JSON.stringify(murkTurn.pos), JSON.stringify(murkPre.posBefore), '牠本體一寸都沒移動（沒有會走動的 NPC）');
 
   await key('KeyE', 'e', { vk: 69 });
-  await sleep(500);
+  await settle(500);
   const murkOpen = await evaluate(`
     const g = window.__promptasy;
     const c = g.promptConsole;
@@ -8566,10 +8771,10 @@ async function main() {
     const g = window.__promptasy;
     const c = g.promptConsole;
     document.querySelector('#prompt-console [data-act-next="2"]').click();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const guideLinks = document.querySelectorAll('#prompt-console .act--guide a[href^="https://"]').length;
     c.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const out = { guideLinks, guidanceSeen: g.progression.state.guidanceSeen.slice() };
     /*
      * v1.2 · P06b：預設設定下第三幕是石碑刻印 —— 有選項、書寫檯讓位。
@@ -8585,7 +8790,7 @@ async function main() {
       rubricLen: c.challenge.rubric.length,
     };
     c.setMode('free');
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     out.guided.modeAfter = c.mode;
     out.guided.steleHiddenAfter = document.querySelector('#prompt-console .stele-stage').hidden;
     const ta = document.querySelector('.prompt-input');
@@ -8597,7 +8802,7 @@ async function main() {
       // v1.2 · P03：onRubricHits 的資料 ＋ 粒子池是不是真的噴了（回呼是同步的，這裡直接讀）
       out.hitsPayloads.push(JSON.stringify(g.rubricHits()));
       out.spawnedAfter.push(g.world.murks.particlesSpawned);
-      await new Promise((r) => setTimeout(r, 450));
+      await window.__paSettle(450);
     }
     out.cuesAfter = g.audio.debug().cues.slice();
     out.gradeMark = document.querySelector('#prompt-console .grade__mark')?.textContent.trim();
@@ -8612,7 +8817,7 @@ async function main() {
     out.sampleBtnFound = !!sampleBtn;
     out.sampleDisabled = sampleBtn ? sampleBtn.disabled : null;
     if (sampleBtn && !sampleBtn.disabled) sampleBtn.click();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     out.taAfterSample = ta.value;
     out.sample = c.challenge.sample;
     out.xp = g.progression.state.xp;
@@ -8697,13 +8902,13 @@ async function main() {
   eq(murkPeeled.active, 0, '碎光熄了（粒子池歸零）');
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(300);
+  await settle(300);
   /* --- 關掉重開：狀態一致（殼數仍 2、不重播） --- */
   const murkReopen = await evaluate(`
     const g = window.__promptasy;
     const closed = { open: g.promptConsole.isOpen, state: JSON.stringify(g.progression.murkState('murk-vague-ask')) };
     g.promptConsole.open(g.murkChallenge('murk-vague-ask'));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const head = document.querySelector('#prompt-console');
     const out = {
       closed,
@@ -8731,7 +8936,7 @@ async function main() {
     const { xpForGrade } = await import('/src/challenges/rubric.js');
     if (c.mode !== 'free') c.setMode('free');
     c.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const st0 = g.progression.state;
     const before = {
       xp: st0.xp,
@@ -8749,7 +8954,7 @@ async function main() {
     const mm = g.world.murks.byId('murk-vague-ask');
     const stateRightAfter = mm.state;
     const activeRightAfter = g.world.murks.activeParticles();
-    await new Promise((r) => setTimeout(r, 600));
+    await window.__paSettle(600);
     const st = g.progression.state;
     const ms = g.progression.murkState('murk-vague-ask');
     const out = {
@@ -8782,7 +8987,7 @@ async function main() {
     // 再送一次同一句範例：早就安撫 → 那一行換成「牠早就聽懂了 · 累積 · 最佳評價」、XP 不再加
     ta.value = c.challenge.sample;
     document.querySelector('#prompt-console [data-submit]').click();
-    await new Promise((r) => setTimeout(r, 600));
+    await window.__paSettle(600);
     out.again = {
       pass: !!document.querySelector('#prompt-console .result__top.is-pass'),
       newlyLine: document.querySelector('#prompt-console .result [data-murk-newly]')?.textContent.replace(/\\s+/g, ' ').trim() || '',
@@ -8906,17 +9111,17 @@ async function main() {
     }
     ok(!/送出評分|按鈕|面板|rubric|XP/.test(`${echoAfterCalm.line}${echoAfterCalm.sub}`), '回聲不用系統術語', echoAfterCalm.line);
   }
-  await sleep(300);
+  await settle(300);
   /* --- 重開：標頭有「最佳評價」；圖鑑第四列 1/8、條目含濁言／範例／出處 --- */
   const murkBook = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.murkChallenge('murk-vague-ask'));
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     const sub = document.querySelector('#prompt-console .panel__sub')?.textContent || '';
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const rows = [...document.querySelectorAll('#codex .finds__list li')].map((li) => ({
       label: li.querySelector('b').textContent.trim(),
       n: li.querySelector('span').textContent.trim(),
@@ -8941,7 +9146,7 @@ async function main() {
       total: g.murks.entries.length,
     };
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return out;
   `);
   ok(/最佳評價 [SA]/.test(murkBook.sub), '重開主控台：標頭顯示最佳評價', murkBook.sub);
@@ -8997,13 +9202,13 @@ async function main() {
     const lines = e.sample.split('\\n');
     const half = Math.ceil(lines.length / 2);
     c.open(g.murkChallenge('${GID}'));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     if (c.mode !== 'free') c.setMode('free');
     c.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     document.querySelector('.prompt-input').value = lines.slice(0, half).join('\\n');
     document.querySelector('#prompt-console [data-submit]').click();
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     const hits = g.rubricHits();
     const out = {
       half,
@@ -9016,7 +9221,7 @@ async function main() {
       newlyLine: document.querySelector('#prompt-console .result [data-murk-newly]')?.textContent.replace(/\\s+/g, ' ').trim() || '',
     };
     c.close();
-    await new Promise((r) => setTimeout(r, 280));
+    await window.__paSettle(280);
     return out;
   `);
   ok(halfSubmit.passed.length >= 3, '第一次說清楚了好幾層（自由書寫、只給一半的句子）', JSON.stringify(halfSubmit.passed));
@@ -9043,9 +9248,9 @@ async function main() {
     const e = g.murks.entries.find((x) => x.id === '${GID}');
     c.setMode('guided');
     c.open(g.murkChallenge('${GID}'));
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     c.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const rows = [...document.querySelectorAll('#prompt-console .layers__row')].map((li) => ({
       done: li.classList.contains('is-done'),
       now: li.classList.contains('is-now'),
@@ -9100,7 +9305,7 @@ async function main() {
   `);
   for (const step of remain.idx) {
     await key(`Digit${step.n}`, String(step.n), { vk: 48 + step.n });
-    await sleep(360);
+    await settle(360);
   }
   const filled = await evaluate(`
     const g = window.__promptasy;
@@ -9113,7 +9318,7 @@ async function main() {
   await waitFor(() => evaluate(`return !document.querySelector('#prompt-console [data-result]').hidden;`), { label: 'P17：結果面板', every: 150 });
   const greatCalm = await evaluate(`
     const g = window.__promptasy;
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     return {
       state: g.progression.murkState('${GID}'),
       count: g.murkCount(),
@@ -9138,7 +9343,7 @@ async function main() {
   eq(greatSettled.shells, 0, '全剝 → 沒有殼');
   ok(greatSettled.head < 0.6, '頭縮成清燈', String(greatSettled.head));
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-  await sleep(320);
+  await settle(320);
 
   /* --- ③b 重訪一隻已經安撫的大濁靈：每一層都散掉了 → 石碑一開就是刻滿的 ---- *
    *
@@ -9153,15 +9358,15 @@ async function main() {
     const before = g.audio.debug().cues.join('|');
     c.setMode('guided');
     c.open(g.murkChallenge('${GID}'));
-    await new Promise((r) => setTimeout(r, 340));
+    await window.__paSettle(340);
     const dbg = g.audio.debug();
     const opened = { act: c.act, carved: c.stele.progress.carved, total: c.stele.progress.total };
     // 照玩家會走的路一幕一幕推（不用 force）：委託 → 指引 → 刻印
     c.goAct(2);
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const act2 = c.act;
     c.goAct(3);
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     const out = {
       opened,
       act2,
@@ -9178,7 +9383,7 @@ async function main() {
       cueTrail: dbg.cues.slice(-4),
     };
     c.close();
-    await new Promise((r) => setTimeout(r, 280));
+    await window.__paSettle(280);
     return out;
   `);
   eq(revisit.opened.act, 1, '重訪仍然從第一幕（委託）開始 —— 不會偷偷幫玩家跳過題目');
@@ -9209,7 +9414,7 @@ async function main() {
     const lowId = g.murks.entries.find((x) => x.kind === 'great' && x.id !== '${GID}').id;
     g.progression.state.murks[lowId] = { hits: [0], grade: 'C' };
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 450));
+    await window.__paSettle(450);
     const pick = (id) => document.querySelector('#codex [data-murk="' + id + '"]');
     const mine = pick('${GID}');
     const low = pick(lowId);
@@ -9243,7 +9448,7 @@ async function main() {
     };
     delete g.progression.state.murks[lowId];
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     return out;
   `);
   eq(layered.greatFlags, 12, '圖鑑認得出 12 隻大濁靈');
@@ -9277,16 +9482,16 @@ async function main() {
     const spawned0 = g.world.murks.particlesSpawned;
     const setting0 = g.progression.state.settings.promptMode;
     c.open(ch);
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     if (c.mode !== 'free') c.setMode('free');
     c.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 150));
+    await window.__paSettle(150);
     const ta = document.querySelector('.prompt-input');
     const send = async (text) => {
       ta.value = text;
       document.querySelector('#prompt-console [data-submit]').click();
       const h = g.rubricHits();
-      await new Promise((r) => setTimeout(r, 300));
+      await window.__paSettle(300);
       return { keys: Object.keys(h).sort(), id: h.challenge && h.challenge.id, kind: h.challenge && h.challenge.kind, passed: h.passedIndices, newly: h.newlyPassedIndices, total: h.total, ok: !!document.querySelector('#prompt-console .result__top.is-pass') };
     };
     // 「派任務」那一列命中、沒有可量化限制 → 沒過（不寫 bestGrades）
@@ -9294,15 +9499,15 @@ async function main() {
     const b = await send('請把這張告示改寫成清楚好懂的公告。');
     const cc = await send('。');
     c.close();
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     c.open(ch);
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     if (c.mode !== 'free') c.setMode('free');
     c.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 150));
+    await window.__paSettle(150);
     const d = await send('請把這張告示改寫成清楚好懂的公告。');
     c.close();
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     if (g.progression.state.settings.promptMode !== setting0) g.progression.updateSettings({ promptMode: setting0 });
     return { a, b, cc, d, spawnedDelta: g.world.murks.particlesSpawned - spawned0, best: g.progression.bestGrade('gate-of-clarity-01'), rubricLen: ch.rubric.length };
   `);
@@ -9324,7 +9529,7 @@ async function main() {
   await reloadPage('P03 重新載入（reduced-motion）');
   // 重整後標題卡會在：跟其他重整段一樣按 Enter 收掉，世界才接得到互動
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
   const murkRM = await evaluate(`
     const g = window.__promptasy;
     const boot = (() => {
@@ -9336,22 +9541,22 @@ async function main() {
     const m2 = g.world.murks.byId(e.id);
     const before2 = { state: m2.state, shells: m2.visibleShellCount() };
     g.player.teleport(e.at[0] + 2.5, e.at[1] + 2.5);
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     g.promptConsole.open(g.murkChallenge(e.id));
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     if (g.promptConsole.mode !== 'free') g.promptConsole.setMode('free');
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 150));
+    await window.__paSettle(150);
     const ta = document.querySelector('.prompt-input');
     ta.value = e.sample;
     const spawned0 = g.world.murks.particlesSpawned;
     document.querySelector('#prompt-console [data-submit]').click();
     // 回呼同步 → 這一刻就該是終態
     const right = { state: m2.state, shells: m2.visibleShellCount(), states: [0, 1, 2].map((i) => m2.shellState(i)), headScale: m2.head.scale.x, spawned: g.world.murks.particlesSpawned - spawned0, active: g.world.murks.activeParticles(), flash: m2.flash };
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const cues = g.audio.debug().cues.slice();
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     return { boot, before2, right, cues, murkCount: g.murkCount(), pos: [m2.group.position.x, m2.group.position.y, m2.group.position.z], at: e.at, titleOpen: g.title.isOpen };
   `);
   eq(murkRM.titleOpen, false, '（前提）重整後標題卡已收掉');
@@ -9376,7 +9581,7 @@ async function main() {
   await cdp.send('Emulation.setEmulatedMedia', { features: [] }, sessionId);
   await reloadPage('P03 重新載入（回到一般動態）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
   const murkBoot2 = await evaluate(`
     const g = window.__promptasy;
     const a = g.world.murks.byId('murk-vague-ask');
@@ -9452,7 +9657,7 @@ async function main() {
     const m = g.world.murks.byId(e.id);
     g.player.setInputEnabled(true);
     g.player.teleport(e.at[0] + 2.5, e.at[1] + 2.5);
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     return {
       setting: g.progression.state.settings.promptMode,
       shells: m.visibleShellCount(), state: m.state,
@@ -9477,7 +9682,7 @@ async function main() {
     return r && /濁靈/.test(r) ? r : null;
   }, { timeout: 8000, label: 'P06b：走近提示' });
   await key('KeyE', 'e', { vk: 69 });
-  await sleep(500);
+  await settle(500);
   const chooseOpen = await evaluate(`
     const g = window.__promptasy;
     return { open: g.promptConsole.isOpen, id: g.promptConsole.challenge?.id, act: g.promptConsole.act, mode: g.promptConsole.mode, kindOf: g.promptConsole.flowKindOf(g.promptConsole.challenge?.flow) };
@@ -9490,11 +9695,11 @@ async function main() {
 
   // Enter 推到第二幕 → 焦點移開線索 → Enter 推到第三幕
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(420);
+  await settle(420);
   eq(await evaluate(`return window.__promptasy.promptConsole.act;`), 2, 'Enter 推到第二幕（指引）');
   await evaluate(`document.querySelector('#prompt-console .act--guide').focus(); return 1;`);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(420);
+  await settle(420);
   const chooseAct3 = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -9520,7 +9725,7 @@ async function main() {
     return { wrong, carved: g.promptConsole.stele.progress.carved };
   `);
   await key(`Digit${chooseWrong.wrong + 1}`, String(chooseWrong.wrong + 1), { vk: 48 + chooseWrong.wrong + 1 });
-  await sleep(420);
+  await settle(420);
   const chooseReject = await evaluate(`
     const g = window.__promptasy;
     const fb = [...document.querySelectorAll('#prompt-console [data-opt-fb]')].filter((el) => !el.hidden);
@@ -9535,7 +9740,7 @@ async function main() {
   for (let i = 0; i < chooseSetup.slots; i += 1) {
     const n = chooseSetup.correctIdx[i] + 1;
     await key(`Digit${n}`, String(n), { vk: 48 + n });
-    await sleep(420);
+    await settle(420);
     chooseCarve.push(
       await evaluate(`
         const g = window.__promptasy;
@@ -9590,21 +9795,21 @@ async function main() {
   ok(chooseSettled.headScale < 0.6, '牠變成清燈', String(chooseSettled.headScale));
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(300);
+  await settle(300);
   /* --- 同一隻切成自由書寫：打字那條路仍然在（不倒退） --- */
   const chooseFree = await evaluate(`
     const g = window.__promptasy;
     const c = g.promptConsole;
     c.open(g.murkChallenge('${chooseId}'));
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     c.setMode('free');
     c.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     const ta = document.querySelector('.prompt-input');
     const visible = !!ta && ta.offsetParent !== null;
     ta.value = c.challenge.sample;
     document.querySelector('#prompt-console [data-submit]').click();
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     const out = {
       mode: c.mode,
       setting: g.progression.state.settings.promptMode,
@@ -9615,7 +9820,7 @@ async function main() {
       murkCount: g.murkCount(),
     };
     c.close();
-    await new Promise((r) => setTimeout(r, 250));
+    await window.__paSettle(250);
     // 收尾：把答題方式放回預設，後面的段落照舊
     g.progression.updateSettings({ promptMode: 'guided' });
     return out;
@@ -9816,7 +10021,7 @@ async function main() {
     eq(bad.forcedAfterClear, null, '清掉覆寫');
     eq(bad.hourAfter.forced, null, 'hour().forced null');
   }
-  await sleep(300);
+  await settle(300);
 
   /* ================================================================ */
   /*
@@ -9874,7 +10079,7 @@ async function main() {
      * 那是正確行為（提示本來就該顯示那一件）。要驗的是「這一件的提示不見了」。
      */
     g.player.teleport(spec.at[0] + 14, spec.at[1] + 14);
-    await new Promise((r) => setTimeout(r, 380));
+    await window.__paSettle(380);
     const farHint = document.querySelector('[data-interact]');
     const hintFar = farHint.hidden || !farHint.textContent.includes(spec.title);
     const lidFar = obj.lidPivot.rotation.x;
@@ -9898,7 +10103,7 @@ async function main() {
       nearGlow: obj.near,
     };
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 520));
+    await window.__paSettle(520);
     const panel = document.querySelector('#handle');
     out.open = g.handlePanel.isOpen;
     out.shown = [...panel.querySelectorAll('.inscribe__line')].map((p) => p.textContent.trim());
@@ -9912,7 +10117,7 @@ async function main() {
     out.saved = JSON.parse(localStorage.getItem('promptasy.v1.save')).handlesUsed;
     out.before = before;
     // 蓋子真的掀開了
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     out.lidNear = obj.lidPivot.rotation.x;
     return out;
   `);
@@ -9937,18 +10142,18 @@ async function main() {
   const urnAgain = await evaluate(`
     const g = window.__promptasy;
     g.handlePanel.close();
-    await new Promise((r) => setTimeout(r, 280));
+    await window.__paSettle(280);
     const spec = g.handleData.entries.find((e) => e.kind === 'urn');
     const xp = g.progression.state.xp;
     g.player.teleport(spec.at[0] + 1.8, spec.at[1] + 1.8);
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const hintText = document.querySelector('[data-interact]').textContent.replace(/\\s+/g, ' ').trim();
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const note = document.querySelector('#handle .inscribe__note')?.textContent.trim() || '';
     const after = g.progression.state.xp;
     g.handlePanel.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return { xp, after, note, hintText, n: g.progression.handleCount() };
   `);
   eq(urnAgain.after, urnAgain.xp, '再掀一次不再給 XP（不能刷分）');
@@ -9962,12 +10167,12 @@ async function main() {
     const obj = g.world.handles.object(spec.id);
     const out = { id: spec.id, steps: [], xp0: g.progression.state.xp };
     g.player.teleport(spec.at[0] + 2.0, spec.at[1] + 2.0);
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     out.hint0 = document.querySelector('[data-interact]').textContent.replace(/\\s+/g, ' ').trim();
     out.spin0 = obj.drum.rotation.y;
     for (let i = 0; i < 3; i += 1) {
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-      await new Promise((r) => setTimeout(r, 420));
+      await window.__paSettle(420);
       out.steps.push({
         remaining: obj.remaining,
         used: g.progression.hasUsedHandle(spec.id),
@@ -9977,7 +10182,7 @@ async function main() {
         toast: [...document.querySelectorAll('.toast')].map((t) => t.textContent.trim()).pop() || '',
       });
     }
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     out.spin1 = obj.drum.rotation.y;
     out.opened = obj.opened;
     out.shaft = obj.shaft.visible;
@@ -10006,7 +10211,7 @@ async function main() {
     const g = window.__promptasy;
     const spec = g.handleData.entries.find((e) => e.kind === 'bench');
     g.player.teleport(spec.at[0] + 2.2, spec.at[1] + 2.2);
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const out = {
       id: spec.id,
       hint: document.querySelector('[data-interact]').textContent.replace(/\\s+/g, ' ').trim(),
@@ -10014,7 +10219,7 @@ async function main() {
       restBefore: g.player.restAmount,
     };
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 1100));
+    await window.__paSettle(1100);
     out.seated = g.seatedOn();
     out.rest = g.player.restAmount;
     out.cam = g.player.cameraDistance;
@@ -10023,19 +10228,19 @@ async function main() {
     out.hintSeated = document.querySelector('[data-interact]').textContent.replace(/\\s+/g, ' ').trim();
     // 再按一次 E → 起身
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     out.seatedAfter = g.seatedOn();
     out.restAfter = g.player.restAmount;
     out.camAfter = g.player.cameraDistance;
     // 再坐一次，然後「走一步」→ 應該自己站起來
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     out.seatedAgain = g.seatedOn();
     g.player.teleport(spec.at[0] + 6, spec.at[1] + 6);
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     out.seatedAfterWalk = g.seatedOn();
     out.restAfterWalk = g.player.restAmount;
     return out;
@@ -10073,17 +10278,17 @@ async function main() {
     out.hitBefore = obj.hit;
     out.swingBefore = obj.swingPivot.rotation.x;
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     out.hit = obj.hit;
     out.swing = obj.swingPivot.rotation.x;
     out.ring = obj.ring.visible;
     out.xp1 = g.progression.state.xp;
     out.panel = g.handlePanel.isOpen;
     // 再敲：照樣有反應，但不再給 XP
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     obj.hit = 0;
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     out.hit2 = obj.hit;
     out.xp2 = g.progression.state.xp;
     return out;
@@ -10103,14 +10308,14 @@ async function main() {
     const spec = g.handleData.entries.find((e) => e.kind === 'watchstone');
     const obj = g.world.handles.object(spec.id);
     g.player.teleport(spec.at[0] + 2.0, spec.at[1] + 2.0);
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const out = {
       hint: document.querySelector('[data-interact]').textContent.replace(/\\s+/g, ' ').trim(),
       eyeBefore: obj.eyes[0].material.emissiveIntensity,
       faceBefore: obj.headPivot.rotation.y,
     };
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 2400));
+    await window.__paSettle(2400);
     out.eye = obj.eyes[0].material.emissiveIntensity;
     out.face = obj.headPivot.rotation.y;
     out.target = obj.target ? obj.target.name : null;
@@ -10138,10 +10343,10 @@ async function main() {
     const g = window.__promptasy;
     const spec = g.handleData.entries.find((e) => e.kind === 'signpost');
     g.player.teleport(spec.at[0] + 2.0, spec.at[1] + 2.0);
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const out = { hint: document.querySelector('[data-interact]').textContent.replace(/\\s+/g, ' ').trim() };
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 520));
+    await window.__paSettle(520);
     const panel = document.querySelector('#handle');
     out.open = g.handlePanel.isOpen;
     out.rows = [...panel.querySelectorAll('.ways__row')].map((li) => ({
@@ -10153,7 +10358,7 @@ async function main() {
     out.overflow = panel.scrollWidth - panel.clientWidth;
     out.ways = spec.ways;
     g.handlePanel.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return out;
   `);
   ok(/閱讀/.test(signFlow.hint), '走近指路石 → 提示是「閱讀」', signFlow.hint);
@@ -10170,7 +10375,7 @@ async function main() {
     const spec = g.handleData.entries.find((e) => e.kind === 'brazier');
     const obj = g.world.handles.object(spec.id);
     g.player.teleport(spec.at[0] + 2.0, spec.at[1] + 2.0);
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const out = {
       id: spec.id,
       hint: document.querySelector('[data-interact]').textContent.replace(/\\s+/g, ' ').trim(),
@@ -10189,7 +10394,7 @@ async function main() {
       await new Promise((r) => setTimeout(r, 100));
     }
     // 「一直亮著」：再放幾拍，火不會自己熄下去
-    await new Promise((r) => setTimeout(r, 600));
+    await window.__paSettle(600);
     out.lit = obj.lit;
     out.flame = obj.flameA.material.emissiveIntensity;
     out.glow = obj.glow.material.opacity;
@@ -10212,9 +10417,9 @@ async function main() {
     g.player.teleport(spec.at[0] + 1.8, spec.at[1] + 1.8);
     return true;
   `);
-  await sleep(450);
+  await settle(450);
   await key('KeyE', 'e', { vk: 69 });
-  await sleep(700);
+  await settle(700);
   const kbHandle = await evaluate(`
     const g = window.__promptasy;
     const spec = g.handleData.entries.find((e) => e.kind === 'moonpool');
@@ -10233,13 +10438,13 @@ async function main() {
   const handleFinds = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const rows = [...document.querySelectorAll('#codex .finds__list li')].map((li) => ({
       label: li.querySelector('b').textContent.trim(),
       n: li.querySelector('span').textContent.trim(),
     }));
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     return { rows, total: g.handleData.entries.length, used: g.progression.handleCount() };
   `);
   {
@@ -10271,7 +10476,7 @@ async function main() {
     const spec = g.handleData.entries.find((e) => e.kind === 'gong');
     const obj = g.world.handles.object(spec.id);
     g.player.teleport(spec.at[0] + 1.8, spec.at[1] + 1.8);
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     obj.hit = 0;
     g.codex.open();
     // 輪詢到提示真的收起來（軟體渲染一幀可能好幾百毫秒，固定 sleep 對不準牆鐘）
@@ -10282,10 +10487,10 @@ async function main() {
     }
     const hintDuring = document.querySelector('[data-interact]').hidden;
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     const hitDuring = obj.hit;
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 400));
+    await window.__paSettle(400);
     return { hintDuring, hitDuring, stillThere: !document.querySelector('[data-interact]').hidden };
   `);
   eq(handleQuiet.hintDuring, true, '面板開著時互動提示收起來');
@@ -10296,7 +10501,7 @@ async function main() {
   await reloadPage('Phase 22 重整');
   const persisted = await evaluate(`
     const g = window.__promptasy;
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const spec = g.inscriptionData.entries[0];
     return {
       ins: g.progression.inscriptionCount(),
@@ -10524,28 +10729,28 @@ async function main() {
 
   // 前一段做過一次重整 → 標題卡又擋在前面。用鍵盤把它按掉（本來就是「按任意鍵開始」）
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(700);
+  await settle(700);
   eq(await evaluate(`return window.__promptasy.title.isOpen;`), false, '按鍵就收得掉標題卡');
 
   // 場面清乾淨：把前面測試留下的任何一層收掉，把操控權還給角色
   await evaluate(`
     const g = window.__promptasy;
     if (g.prologue.isActive) g.prologue.skip();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     // 跳過序章的人會拿到一張操作說明卡 —— 收掉它
     const startBtn = document.querySelector('.intro [data-start]');
     if (g.intro.isOpen && startBtn) startBtn.click();
     for (const k of ['keyhelp','shareCard','promptConsole','codex','settings','finale','tabletPanel','inscriptionPanel','practice']) {
       try { if (g[k] && g[k].isOpen) g[k].close(); } catch {}
     }
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     // 前面的測試把答題方式切來切去 —— 這一段要驗的是預設的石碑刻印
     g.progression.updateSettings({ promptMode: 'guided' });
     g.promptConsole.setMode('guided');
     g.player.setInputEnabled(true);
     return 1;
   `);
-  await sleep(300);
+  await settle(300);
 
   // 挑一關還沒通關、而且有石碑流程的；把角色放在「鏡頭正前方 9 公尺」的位置，
   // 這樣按住 W 就會直直走過去（走的方向是鏡頭看出去的方向）
@@ -10562,7 +10767,7 @@ async function main() {
     const yaw = g.player.cameraYaw;
     const fx = Math.sin(yaw), fz = Math.cos(yaw);
     g.player.teleport(m.position.x - fx * 8, m.position.z - fz * 8);
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return {
       id: c.id,
       title: c.title,
@@ -10593,7 +10798,7 @@ async function main() {
 
   // --- E 開啟 → Enter 一幕一幕推 ---
   await key('KeyE', 'e', { vk: 69 });
-  await sleep(500);
+  await settle(500);
   const kbAct1 = await evaluate(`
     const g = window.__promptasy;
     return { open: g.promptConsole.isOpen, act: g.promptConsole.act, id: g.promptConsole.challenge?.id };
@@ -10603,7 +10808,7 @@ async function main() {
   eq(kbAct1.act, 1, '導演的第一顆鏡頭是第一幕');
 
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(420);
+  await settle(420);
   const kbAct2 = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -10619,7 +10824,7 @@ async function main() {
 
   // L：翻開線索（第二幕那一頁）
   await key('KeyL', 'l', { vk: 76 });
-  await sleep(260);
+  await settle(260);
   const kbClue = await evaluate(`
     const d = document.querySelector('#prompt-console .act--guide .clue');
     return { open: d.open, focused: document.activeElement === d.querySelector('summary'), text: d.querySelector('p').textContent.trim().length };
@@ -10628,7 +10833,7 @@ async function main() {
   eq(kbClue.focused, true, '翻開後焦點停在那一頁上');
   ok(kbClue.text > 4, '線索真的有內容', String(kbClue.text));
   await key('KeyL', 'l', { vk: 76 });
-  await sleep(200);
+  await settle(200);
   eq(
     await evaluate(`return document.querySelector('#prompt-console .act--guide .clue').open;`),
     false,
@@ -10638,7 +10843,7 @@ async function main() {
   // 焦點停在 summary 上時 Enter 屬於它，所以先把焦點移開再推下一幕
   await evaluate(`document.querySelector('#prompt-console .act--guide').focus(); return 1;`);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(420);
+  await settle(420);
   const kbAct3 = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -10659,7 +10864,7 @@ async function main() {
 
   // 方向鍵在選項之間走（Tab 之外的那條路）
   await key('ArrowDown', 'ArrowDown', { vk: 40 });
-  await sleep(160);
+  await settle(160);
   const kbRove = await evaluate(`
     const opts = Array.from(document.querySelectorAll('#prompt-console .opt'));
     return { at: opts.indexOf(document.activeElement) };
@@ -10678,7 +10883,7 @@ async function main() {
     ok(idx >= 0, `第 ${i + 1} 段找得到正確選項`);
     const n = idx + 1;
     await key(`Digit${n}`, String(n), { vk: 48 + n });
-    await sleep(420);
+    await settle(420);
     kbCarve.push(
       await evaluate(`
         const g = window.__promptasy;
@@ -10733,7 +10938,7 @@ async function main() {
 
   // --- S 開分享卡 → Esc 收起（底下那一關還在） ---
   await key('KeyS', 's', { vk: 83 });
-  await sleep(700);
+  await settle(700);
   const kbShare = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -10749,7 +10954,7 @@ async function main() {
   eq(kbShare.download, true, '分享卡上有「下載圖片」（Tab 就走得到）');
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(400);
+  await settle(400);
   const kbAfterShare = await evaluate(`
     const g = window.__promptasy;
     return { share: g.shareCard.isOpen, console: g.promptConsole.isOpen };
@@ -10758,12 +10963,12 @@ async function main() {
   eq(kbAfterShare.console, true, '底下那一關還開著');
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(400);
+  await settle(400);
   eq(await evaluate(`return window.__promptasy.promptConsole.isOpen;`), false, '再按一次 Esc 收起這一關');
 
   // --- C 翻圖鑑：方向鍵走條目、Enter 展開 ---
   await key('KeyC', 'c', { vk: 67 });
-  await sleep(600);
+  await settle(600);
   const kbCodexOpen = await evaluate(`
     const g = window.__promptasy;
     const body = document.querySelector('#codex .panel__body');
@@ -10779,7 +10984,7 @@ async function main() {
 
   await evaluate(`document.querySelector('#codex .tech > details > summary').focus(); return 1;`);
   await key('ArrowDown', 'ArrowDown', { vk: 40 });
-  await sleep(200);
+  await settle(200);
   const kbCodexRove = await evaluate(`
     const list = Array.from(document.querySelectorAll('#codex .tech > details > summary'));
     return {
@@ -10794,7 +10999,7 @@ async function main() {
   eq(kbCodexRove.at, Math.min(1, kbCodexRove.total - 1), '方向鍵走到下一條', JSON.stringify(kbCodexRove));
 
   await enterNative();
-  await sleep(260);
+  await settle(260);
   eq(
     await evaluate(`return document.activeElement.closest('details')?.open === true;`),
     true,
@@ -10806,12 +11011,18 @@ async function main() {
   );
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(400);
+  await settle(400);
   eq(await evaluate(`return window.__promptasy.codex.isOpen;`), false, 'Esc 收起圖鑑');
 
   // --- O 設定：Tab 走到下拉、方向鍵改值、空白鍵切勾勾 ---
   await key('KeyO', 'o', { vk: 79 });
-  await sleep(500);
+  /*
+   * v1.2 · P25b：先等「面板真的開了」（＝按鍵已經被吃進去），再等一拍讓
+   * rAF 把焦點送進去。等的是**前提**不是斷言本身 —— 面板開了但焦點沒進去，
+   * 下面那一條照樣紅。
+   */
+  await until('window.__promptasy.settings.isOpen', { label: '設定面板打開' });
+  await settle(500);
   eq(
     await evaluate(`return document.querySelector('#settings .panel__body').contains(document.activeElement);`),
     true,
@@ -10825,6 +11036,7 @@ async function main() {
     onQuality = await evaluate(`return document.activeElement?.id === 'set-quality';`);
     if (onQuality) break;
     await key('Tab', 'Tab', { vk: 9 });
+    /* P25b：留著固定 sleep —— 這是 Tab 巡覽迴圈自己的取樣間隔（每一圈重新問 activeElement）。 */
     await sleep(120);
     tabs += 1;
   }
@@ -10841,7 +11053,16 @@ async function main() {
     ? ['ArrowUp', 'ArrowDown', 38, 40]
     : ['ArrowDown', 'ArrowUp', 40, 38];
   await key(goKey, goKey, { vk: goVk });
-  await sleep(500);
+  /*
+   * v1.2 · P25b：等的是「畫質這個值真的從 ${qualityBefore} 翻成別的」——
+   * 先把舊值讀下來再等，所以不會被前一個值滿足。soft ＝ 等不到就往下走，
+   * 讓「方向鍵真的把下拉改掉了」那一條自己紅，而不是把整支測試炸掉。
+   */
+  await untilChanged('window.__promptasy.progression.state.settings.quality', {
+    soft: true,
+    label: '方向鍵把畫質改掉',
+  });
+  await settle(500);
   const kbQuality = await evaluate(`
     const g = window.__promptasy;
     return { setting: g.progression.state.settings.quality, engine: g.engine.quality, value: document.querySelector('#set-quality').value };
@@ -10850,7 +11071,12 @@ async function main() {
   eq(kbQuality.engine, kbQuality.value, '改完立刻生效（不用重新整理）');
   // 改回來，不影響後面的測試
   await key(backKey, backKey, { vk: backVk });
-  await sleep(500);
+  /* 同上：等它從剛剛那個值再翻回去。 */
+  await untilChanged('window.__promptasy.progression.state.settings.quality', {
+    soft: true,
+    label: '方向鍵把畫質改回去',
+  });
+  await settle(500);
   eq(
     await evaluate(`return window.__promptasy.progression.state.settings.quality;`),
     qualityBefore,
@@ -10861,7 +11087,7 @@ async function main() {
   await evaluate(`document.querySelector('#set-mute').focus(); return 1;`);
   const muteBefore = await evaluate(`return window.__promptasy.progression.state.settings.muted;`);
   await key('Space', ' ', { vk: 32 });
-  await sleep(320);
+  await settle(320);
   const kbMute = await evaluate(`
     const g = window.__promptasy;
     return { setting: g.progression.state.settings.muted, checked: document.querySelector('#set-mute').checked };
@@ -10869,7 +11095,7 @@ async function main() {
   eq(kbMute.setting, !muteBefore, '空白鍵切得動勾勾');
   eq(kbMute.checked, kbMute.setting, '畫面上的勾勾與存下來的設定一致');
   await key('Space', ' ', { vk: 32 });
-  await sleep(320);
+  await settle(320);
   eq(
     await evaluate(`return window.__promptasy.progression.state.settings.muted;`),
     muteBefore,
@@ -10877,30 +11103,30 @@ async function main() {
   );
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(400);
+  await settle(400);
   eq(await evaluate(`return window.__promptasy.settings.isOpen;`), false, 'Esc 收起設定');
 
   // --- 鏡頭拉遠 / 拉近：以前只有滾輪，現在 - 與 = 都行 ---
   const zoomStart = await evaluate(`return window.__promptasy.player.cameraDistance;`);
   await keyDown('Minus', '-', { vk: 189 });
-  await sleep(700);
+  await settle(700);
   await keyUp('Minus', '-', { vk: 189 });
-  await sleep(200);
+  await settle(200);
   const zoomOut = await evaluate(`return window.__promptasy.player.cameraDistance;`);
   ok(zoomOut > zoomStart + 0.5, '按 - 鏡頭真的拉遠了', `${zoomStart.toFixed(2)} → ${zoomOut.toFixed(2)}`);
 
   await keyDown('Equal', '=', { vk: 187 });
-  await sleep(900);
+  await settle(900);
   await keyUp('Equal', '=', { vk: 187 });
-  await sleep(200);
+  await settle(200);
   const zoomIn = await evaluate(`return window.__promptasy.player.cameraDistance;`);
   ok(zoomIn < zoomOut - 0.5, '按 = 鏡頭又拉回來', `${zoomOut.toFixed(2)} → ${zoomIn.toFixed(2)}`);
 
   // 上下限夾得住（按到底也不會翻過去）
   await keyDown('Minus', '-', { vk: 189 });
-  await sleep(2600);
+  await settle(2600);
   await keyUp('Minus', '-', { vk: 189 });
-  await sleep(200);
+  await settle(200);
   const zoomRange = await evaluate(`
     const g = window.__promptasy;
     return { d: g.player.cameraDistance, max: g.player.zoomRange.max, min: g.player.zoomRange.min };
@@ -10910,7 +11136,7 @@ async function main() {
 
   // --- ? 操作一覽 ---
   await key('Slash', '?', { vk: 191, modifiers: 8 });
-  await sleep(600);
+  await settle(600);
   const kbHelp = await evaluate(`
     const g = window.__promptasy;
     const rows = Array.from(document.querySelectorAll('#keyhelp .keyhelp__row'));
@@ -10945,14 +11171,14 @@ async function main() {
     const g = window.__promptasy;
     const before = { x: g.player.position.x, z: g.player.position.z };
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
-    await new Promise((r) => setTimeout(r, 500));
+    await window.__paSettle(500);
     window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
     return Math.hypot(g.player.position.x - before.x, g.player.position.z - before.z);
   `);
   ok(helpFrozen < 0.2, '一覽打開時角色站著不動', helpFrozen.toFixed(3));
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(400);
+  await settle(400);
   const kbHelpClosed = await evaluate(`
     const g = window.__promptasy;
     return { open: g.keyhelp.isOpen, anyOpen: g.promptConsole.isOpen || g.codex.isOpen || g.settings.isOpen };
@@ -10962,10 +11188,10 @@ async function main() {
 
   // 收起之後角色又動得了（操控權還回來了）
   await keyDown('KeyW', 'w', { vk: 87 });
-  await sleep(600);
+  await settle(600);
   const kbWalkAgain = await evaluate(`return window.__promptasy.player.speed;`);
   await keyUp('KeyW', 'w', { vk: 87 });
-  await sleep(500);
+  await settle(500);
   ok(kbWalkAgain > 1, '收起操作一覽之後角色又動得了', kbWalkAgain.toFixed(2));
 
   /* --- 打字的時候，單鍵快捷一律失效 --- */
@@ -10973,9 +11199,9 @@ async function main() {
     const g = window.__promptasy;
     g.promptConsole.setMode('free');
     g.promptConsole.open(g.content.challenges[0]);
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const ta = document.querySelector('#prompt-console .prompt-input');
     ta.value = '';
     ta.focus();
@@ -11006,9 +11232,10 @@ async function main() {
     ['?', 'Slash', 191],
   ]) {
     await typeChar(ch, code, vk);
+    /* P25b：留著固定 sleep —— 逐字敲鍵之間的節流（打字節奏本身就是被測的東西）。 */
     await sleep(60);
   }
-  await sleep(400);
+  await settle(400);
   const kbTyped = await evaluate(`
     const g = window.__promptasy;
     const ta = document.querySelector('#prompt-console .prompt-input');
@@ -11040,7 +11267,7 @@ async function main() {
 
   // 輸入框裡按 Esc 走得出去（Phase 23 修：以前 Esc 會被輸入框吃掉）
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(420);
+  await settle(420);
   eq(
     await evaluate(`return window.__promptasy.promptConsole.isOpen;`),
     false,
@@ -11049,7 +11276,7 @@ async function main() {
 
   // 把答題方式切回預設，不影響後面的測試
   await evaluate(`window.__promptasy.promptConsole.setMode('guided'); return 1;`);
-  await sleep(200);
+  await settle(200);
 
   /* ================================================================ */
   console.log('\n▸ 排序刻印與神諭工坊（Phase 27）');
@@ -11068,7 +11295,7 @@ async function main() {
       const el = document.querySelector('${selector}');
       if (!el) return null;
       el.scrollIntoView({ block: 'center' });
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       const r = el.getBoundingClientRect();
       return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
     `);
@@ -11080,7 +11307,7 @@ async function main() {
     g.promptConsole.setMode('guided');
     return 1;
   `);
-  await sleep(200);
+  await settle(200);
 
   /* --- 資料層：三種題型都在，其他 24 關一個位元組都沒變 --- */
   const kinds = await evaluate(`
@@ -11143,10 +11370,10 @@ async function main() {
   const orderOpen = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('long-scroll-tower-23'));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const actAtOpen = g.promptConsole.act;
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const b = g.promptConsole.orderBoard;
     return {
       actAtOpen,
@@ -11195,7 +11422,7 @@ async function main() {
   `);
   ok(lift === 1, '把焦點停在「問題」那一片上');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(200);
+  await settle(200);
   const held = await evaluate(`
     const b = window.__promptasy.promptConsole.orderBoard;
     return {
@@ -11213,9 +11440,9 @@ async function main() {
   eq(held.arrangement.join(','), 'question,docs,ground', '只是拿起來，還沒搬');
 
   await key('ArrowDown', 'ArrowDown', { vk: 40 });
-  await sleep(160);
+  await settle(160);
   await key('ArrowDown', 'ArrowDown', { vk: 40 });
-  await sleep(160);
+  await settle(160);
   const moved = await evaluate(`
     const b = window.__promptasy.promptConsole.orderBoard;
     return { arrangement: b.arrangement, live: b.announcement, held: b.held,
@@ -11229,7 +11456,7 @@ async function main() {
   eq(moved.ranks.join(''), '123', '位次跟著重新編號');
 
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(320);
+  await settle(320);
   const dropped = await evaluate(`
     const g = window.__promptasy;
     const b = g.promptConsole.orderBoard;
@@ -11267,7 +11494,7 @@ async function main() {
   // 真的按住手掌 900ms（> PALM_HOLD_MS）
   const palmBox = await centerOf('#prompt-console .orderboard .palm');
   await holdPalm(palmBox, '排序刻印：手掌印按滿');
-  await sleep(400);
+  await settle(400);
   const orderResult = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -11295,9 +11522,9 @@ async function main() {
   await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('priority-stair-42'));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     return 1;
   `);
   const stairBefore = await evaluate(`
@@ -11314,7 +11541,7 @@ async function main() {
   const drag = await evaluate(`
     const grip = (id) => document.querySelector('#prompt-console [data-slip="' + id + '"]');
     grip('safety').scrollIntoView({ block: 'center' });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const a = grip('safety').getBoundingClientRect();
     const list = (
       document.querySelector('#prompt-console [data-slips]:not([hidden])') ||
@@ -11335,7 +11562,7 @@ async function main() {
     try { g.shareCard?.close?.(); } catch {}
     try { if (g.codex?.isOpen) g.codex.close(); } catch {}
     try { if (g.settings?.isOpen) g.settings.close(); } catch {}
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const el = document.elementFromPoint(${drag.fromX}, ${drag.fromY});
     return { top: el ? (el.className || el.tagName) : 'none', inBoard: !!(el && el.closest && el.closest('[data-slip]')) };
   `);
@@ -11352,6 +11579,7 @@ async function main() {
   ).catch(() => null);
   for (const t of [0.25, 0.5, 0.75, 1]) {
     await mouse('mouseMoved', drag.fromX, Math.round(drag.fromY + (drag.toY - drag.fromY) * t));
+    /* P25b：留著固定 sleep —— 同上：四段位移之間的節流；搬到定位與否由下面的輪詢負責。 */
     await sleep(90);
   }
   /*
@@ -11398,6 +11626,7 @@ async function main() {
       for (const k of [0.55, 0.25, 0]) {
         const y = Math.max(4, Math.round(dropY + (probe.h || 0) * k));
         await mouse('mouseMoved', drag.toX, y);
+        /* P25b：留著固定 sleep —— 拖曳要「一步一步真的移動」，這是兩次 mousemove 之間的節流，不是在等狀態。 */
         await sleep(70);
       }
       return false;
@@ -11428,7 +11657,7 @@ async function main() {
     const g = window.__promptasy;
     const b = g.promptConsole.orderBoard;
     b.arrange(['safety', 'taste', 'rule', 'job']);
-    await new Promise((r) => setTimeout(r, 160));
+    await window.__paSettle(160);
     return {
       done: b.done,
       palmHidden: document.querySelector('#prompt-console .orderboard .palmwrap').hidden,
@@ -11447,9 +11676,9 @@ async function main() {
     const b = g.promptConsole.orderBoard;
     const xpBefore = g.progression.state.xp;
     b.arrange(b.correctOrder);
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     b.press();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     return {
       grade: document.querySelector('#prompt-console .grade__mark')?.textContent.trim(),
       text: b.text,
@@ -11467,17 +11696,17 @@ async function main() {
   const wsOpen = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const c = g.content.challenge('oracle-workshop-36');
     g.promptConsole.open(c);
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const act1 = {
       links: document.querySelectorAll('#prompt-console .act--brief a[href^="https"]').length,
       mission: document.querySelector('#prompt-console [data-mission]').textContent.trim(),
       material: document.querySelector('#prompt-console [data-material]').textContent.trim(),
     };
     g.promptConsole.goAct(2, { force: true });
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     const act2 = {
       glyphs: document.querySelectorAll('#prompt-console .glyphs .glyph').length,
       // 出處是那枚典籍（純圖示）→ 標籤走 aria-label，不是牌面上的字
@@ -11489,7 +11718,7 @@ async function main() {
         .map((a) => a.getAttribute('aria-label').trim()),
     };
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const w = g.promptConsole.workshop;
     return {
       act1, act2,
@@ -11550,7 +11779,7 @@ async function main() {
   `);
   ok(badTool === 1, '把焦點停在用不到的那把工具上');
   await enterNative();
-  await sleep(320);
+  await settle(320);
   const badToolOut = await evaluate(`
     const g = window.__promptasy;
     const btn = document.querySelector('#prompt-console [data-tool="ledger"]');
@@ -11578,7 +11807,7 @@ async function main() {
   // 純鍵盤挑對兩把工具（方向鍵在牌之間走、Enter 收下）
   await evaluate(`document.querySelector('#prompt-console [data-tool="weather"]').focus(); return 1;`);
   await enterNative();
-  await sleep(260);
+  await settle(260);
   const afterFirstTool = await evaluate(`
     const w = window.__promptasy.promptConsole.workshop;
     return { chosen: w.dispatch.chosen, stage: w.stage,
@@ -11594,7 +11823,7 @@ async function main() {
 
   await evaluate(`document.querySelector('#prompt-console [data-tool="letter"]').focus(); return 1;`);
   await enterNative();
-  await sleep(360);
+  await settle(360);
   const paramStage = await evaluate(`
     const w = window.__promptasy.promptConsole.workshop;
     return {
@@ -11619,7 +11848,7 @@ async function main() {
   // 放錯值石 → 就地教學、值石回托盤、不扣分
   await evaluate(`document.querySelector('#prompt-console [data-stone="yesterday"]').focus(); return 1;`);
   await enterNative();
-  await sleep(240);
+  await settle(240);
   const stoneHeld = await evaluate(`
     const w = window.__promptasy.promptConsole.workshop;
     return { held: w.held, live: w.announcement,
@@ -11632,7 +11861,7 @@ async function main() {
   eq(stoneHeld.focused, 'weather.place', '焦點自動跳到第一個空格（鍵盤不用自己找）');
 
   await enterNative();
-  await sleep(320);
+  await settle(320);
   const badDrop = await evaluate(`
     const w = window.__promptasy.promptConsole.workshop;
     const slot = document.querySelector('#prompt-console [data-pslot="weather.place"]');
@@ -11663,10 +11892,10 @@ async function main() {
   ]) {
     await evaluate(`document.querySelector('#prompt-console [data-stone="${stone}"]').focus(); return 1;`);
     await enterNative();
-    await sleep(200);
+    await settle(200);
     await evaluate(`document.querySelector('#prompt-console [data-pslot="${slot}"]')?.focus(); return 1;`);
     await enterNative();
-    await sleep(260);
+    await settle(260);
   }
   const orderStage = await evaluate(`
     const w = window.__promptasy.promptConsole.workshop;
@@ -11697,11 +11926,11 @@ async function main() {
   // 排順序也走同一套鍵盤文法
   await evaluate(`document.querySelector('#prompt-console .workshop [data-slip="weather"]').focus(); return 1;`);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(180);
+  await settle(180);
   await key('ArrowUp', 'ArrowUp', { vk: 38 });
-  await sleep(180);
+  await settle(180);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(400);
+  await settle(400);
   const ruleStage = await evaluate(`
     const w = window.__promptasy.promptConsole.workshop;
     return {
@@ -11729,7 +11958,7 @@ async function main() {
   // 立錯規矩 → 就地教學、不失敗
   await evaluate(`document.querySelector('#prompt-console .workshop [data-rule="0"]').focus(); return 1;`);
   await enterNative();
-  await sleep(300);
+  await settle(300);
   const badRule = await evaluate(`
     const w = window.__promptasy.promptConsole.workshop;
     const btn = document.querySelector('#prompt-console .workshop [data-rule="0"]');
@@ -11752,7 +11981,7 @@ async function main() {
   // 立對規矩（按 2 這個數字快捷）→ 手掌印
   await evaluate(`document.querySelector('#prompt-console .workshop [data-rule="1"]').focus(); return 1;`);
   await typeChar('2', 'Digit2', 50);
-  await sleep(420);
+  await settle(420);
   const wsDone = await evaluate(`
     const g = window.__promptasy;
     const w = g.promptConsole.workshop;
@@ -11778,7 +12007,7 @@ async function main() {
 
   const wsPalm = await centerOf('#prompt-console .workshop .palm');
   await holdPalm(wsPalm, '神諭工坊：手掌印按滿');
-  await sleep(400);
+  await settle(400);
   const wsResult = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -11801,7 +12030,7 @@ async function main() {
   const pedestal = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     const c = g.content.challenge('oracle-workshop-36');
     const marker = g.world.markers.find((m) => m.challenge.id === c.id);
     let node = null;
@@ -11833,11 +12062,11 @@ async function main() {
   const wsFree = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('oracle-workshop-36'));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.promptConsole.setMode('free');
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const out = {
       workshopHidden: document.querySelector('#prompt-console .workshop').hidden,
       textarea: !!document.querySelector('#prompt-console .prompt-input'),
@@ -11846,7 +12075,7 @@ async function main() {
       modeLabel: document.querySelector('#prompt-console [data-mode]').textContent.trim(),
     };
     g.promptConsole.setMode('guided');
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     out.backKind = g.promptConsole.kind;
     out.backShown = !document.querySelector('#prompt-console .workshop').hidden;
     out.backLabel = document.querySelector('#prompt-console [data-mode]').textContent.trim();
@@ -11865,9 +12094,9 @@ async function main() {
   const untouched = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const out = {
       kind: g.promptConsole.kind,
       steleShown: !document.querySelector('#prompt-console .stele-stage').hidden,
@@ -11888,22 +12117,22 @@ async function main() {
 
   /* --- 窄畫面不溢位 --- */
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 820, height: 760, deviceScaleFactor: 1, mobile: false }, sessionId);
-  await sleep(320);
+  await settle(320);
   const narrow27 = await evaluate(`
     const g = window.__promptasy;
     const out = {};
     g.promptConsole.open(g.content.challenge('long-scroll-tower-23'));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const body = document.querySelector('#prompt-console .panel__body');
     out.orderOverflow = Math.max(0, body.scrollWidth - body.clientWidth);
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.promptConsole.open(g.content.challenge('oracle-workshop-36'));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const body2 = document.querySelector('#prompt-console .panel__body');
     out.workshopOverflow = Math.max(0, body2.scrollWidth - body2.clientWidth);
     g.promptConsole.close();
@@ -11912,7 +12141,7 @@ async function main() {
   eq(narrow27.orderOverflow, 0, '820px 下排序刻印沒有水平溢位');
   eq(narrow27.workshopOverflow, 0, '820px 下神諭工坊沒有水平溢位');
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(300);
+  await settle(300);
 
   /* ================================================================ */
   console.log('\n▸ 改碑與點碑（課程 v2 · Phase B）');
@@ -11923,7 +12152,7 @@ async function main() {
     g.promptConsole.setMode('guided');
     return 1;
   `);
-  await sleep(220);
+  await settle(220);
 
   /* ---------------------------------------------------------------- *
    * 一、改碑：純鍵盤走完（畫線的句子 → Enter 攤開 → 挑錯不失敗 →
@@ -11932,10 +12161,10 @@ async function main() {
   const fixOpen = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('nightwatch-relief-07'));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const actAtOpen = g.promptConsole.act;
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const b = g.promptConsole.fixBoard;
     return {
       actAtOpen,
@@ -11973,7 +12202,7 @@ async function main() {
   // 純鍵盤：焦點停在第一句要改的 → Enter 攤開替代寫法
   await evaluate(`document.querySelector('#prompt-console [data-frag-btn="route"]').focus(); return 1;`);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(240);
+  await settle(240);
   const fixOpened = await evaluate(`
     return {
       expanded: document.querySelector('#prompt-console [data-frag-btn="route"]').getAttribute('aria-expanded'),
@@ -11996,7 +12225,7 @@ async function main() {
   `);
   await evaluate(`document.querySelector('#prompt-console [data-frag="route"][data-opt="${wrongIdxFix}"]').focus(); return 1;`);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(280);
+  await settle(280);
   const fixWrong = await evaluate(`
     const g = window.__promptasy;
     const btn = document.querySelector('#prompt-console [data-frag="route"][data-opt="${wrongIdxFix}"]');
@@ -12056,7 +12285,7 @@ async function main() {
   // Esc 在改好的那一句上 ＝ 還原（不是關面板）
   await evaluate(`document.querySelector('#prompt-console [data-frag-btn="route"]').focus(); return 1;`);
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(260);
+  await settle(260);
   const fixRestored = await evaluate(`
     const g = window.__promptasy;
     const li = document.querySelector('#prompt-console [data-frag-btn="route"]').closest('.frag');
@@ -12080,7 +12309,7 @@ async function main() {
   // Esc 在攤開的替代寫法上 ＝ 收起來（鍵位契約第一段）；再一次才關面板
   await evaluate(`document.querySelector('#prompt-console [data-frag="route"][data-opt="0"]').focus(); return 1;`);
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(240);
+  await settle(240);
   const closedOpts = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -12109,7 +12338,7 @@ async function main() {
   await waitFor(() => evaluate(`return window.__promptasy.promptConsole.fixBoard.done === true;`), {
     label: '草稿全部改好',
   });
-  await sleep(320);
+  await settle(320);
   const fixDone = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -12168,13 +12397,13 @@ async function main() {
    *          → 全部挑出來 → 手印 → S）
    * ---------------------------------------------------------------- */
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-  await sleep(240);
+  await settle(240);
   const spotOpen = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('shout-stone-11'));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const b = g.promptConsole.spotBoard;
     return {
       act: g.promptConsole.act,
@@ -12204,7 +12433,7 @@ async function main() {
   // 方向鍵在石籤之間走
   await evaluate(`document.querySelector('#prompt-console [data-spot="p1"]').focus(); return 1;`);
   await key('ArrowDown', 'ArrowDown', { vk: 40 });
-  await sleep(180);
+  await settle(180);
   eq(
     await evaluate(`return document.activeElement?.getAttribute('data-spot');`),
     'p2',
@@ -12213,7 +12442,7 @@ async function main() {
 
   // 點到「不能動」的那一句 → 彈回來 ＋ 就地教學（不扣分、不前進）
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(300);
+  await settle(300);
   const spotWrong = await evaluate(`
     const g = window.__promptasy;
     const li = document.querySelector('#prompt-console [data-spot="p2"]').closest('.spot');
@@ -12247,7 +12476,7 @@ async function main() {
   await waitFor(() => evaluate(`return window.__promptasy.promptConsole.spotBoard.done === true;`), {
     label: '有問題的都挑出來了',
   });
-  await sleep(320);
+  await settle(320);
   const spotDone = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -12342,26 +12571,26 @@ async function main() {
 
   /* --- 窄畫面不溢位 --- */
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 820, height: 760, deviceScaleFactor: 1, mobile: false }, sessionId);
-  await sleep(320);
+  await settle(320);
   const narrowB = await evaluate(`
     const g = window.__promptasy;
     const out = {};
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.promptConsole.open(g.content.challenge('nightwatch-relief-07'));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     g.promptConsole.fixBoard.open('route');
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     const body = document.querySelector('#prompt-console .panel__body');
     out.fixOverflow = Math.max(0, body.scrollWidth - body.clientWidth);
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.promptConsole.open(g.content.challenge('parts-wall-16'));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const body2 = document.querySelector('#prompt-console .panel__body');
     out.spotOverflow = Math.max(0, body2.scrollWidth - body2.clientWidth);
     g.promptConsole.close();
@@ -12370,7 +12599,7 @@ async function main() {
   eq(narrowB.fixOverflow, 0, '820px 下改碑沒有水平溢位');
   eq(narrowB.spotOverflow, 0, '820px 下點碑沒有水平溢位');
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(300);
+  await settle(300);
 
   /* ================================================================ */
   console.log('\n▸ 推規碑與雙面碑（課程 v2 · Phase C）');
@@ -12381,7 +12610,7 @@ async function main() {
     g.promptConsole.setMode('guided');
     return 1;
   `);
-  await sleep(220);
+  await settle(220);
 
   /* ---------------------------------------------------------------- *
    * 一、推規碑：純鍵盤走完
@@ -12391,10 +12620,10 @@ async function main() {
   const indOpen = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('flawed-cabinet-17'));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const actAtOpen = g.promptConsole.act;
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const b = g.promptConsole.inductBoard;
     const rows = [...document.querySelectorAll('#prompt-console .wallrow')];
     return {
@@ -12439,7 +12668,7 @@ async function main() {
   `);
   await evaluate(`document.querySelector('#prompt-console [data-guess-opt="${indWrongIdx}"]').focus(); return 1;`);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(280);
+  await settle(280);
   const indWrong = await evaluate(`
     const g = window.__promptasy;
     const btn = document.querySelector('#prompt-console [data-guess-opt="${indWrongIdx}"]');
@@ -12501,7 +12730,7 @@ async function main() {
   ok(naiveIdx >= 0, '驗證輪上真的放著「順手的規律」會給的那個答案');
   await evaluate(`document.querySelector('#prompt-console [data-guess-opt="${naiveIdx}"]').focus(); return 1;`);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(280);
+  await settle(280);
   const indNaive = await evaluate(`
     const g = window.__promptasy;
     const btn = document.querySelector('#prompt-console [data-guess-opt="${naiveIdx}"]');
@@ -12578,7 +12807,7 @@ async function main() {
   const indResult = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.inductBoard.press();
-    await new Promise((r) => setTimeout(r, 520));
+    await window.__paSettle(520);
     return {
       grade: document.querySelector('#prompt-console .grade__mark')?.textContent.trim() || '',
       best: g.progression.bestGrade('flawed-cabinet-17'),
@@ -12599,13 +12828,13 @@ async function main() {
    *      換一張卡贏家翻面 → 刻印 → 手印 → S）
    * ---------------------------------------------------------------- */
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-  await sleep(220);
+  await settle(220);
   const trOpen = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.open(g.content.challenge('example-scale-16'));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const tf = g.content.flow('example-scale-16').tradeoffFlow;
     return {
       kind: g.promptConsole.kind,
@@ -12705,7 +12934,7 @@ async function main() {
     const text = g.promptConsole.tradeoffBoard.text;
     const act = g.promptConsole.act;
     g.promptConsole.tradeoffBoard.press();
-    await new Promise((r) => setTimeout(r, 520));
+    await window.__paSettle(520);
     return {
       text,
       want: flow.slots.map((s) => s.options.find((o) => o.correct).text).join('\\n'),
@@ -12745,24 +12974,24 @@ async function main() {
 
   /* --- 窄畫面不溢位 --- */
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 820, height: 760, deviceScaleFactor: 1, mobile: false }, sessionId);
-  await sleep(320);
+  await settle(320);
   const narrowC = await evaluate(`
     const g = window.__promptasy;
     const out = {};
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.promptConsole.open(g.content.challenge('flawed-cabinet-17'));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const b1 = document.querySelector('#prompt-console .panel__body');
     out.inductOverflow = Math.max(0, b1.scrollWidth - b1.clientWidth);
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     g.promptConsole.open(g.content.challenge('example-scale-16'));
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const b2 = document.querySelector('#prompt-console .panel__body');
     out.tradeoffOverflow = Math.max(0, b2.scrollWidth - b2.clientWidth);
     g.promptConsole.close();
@@ -12771,7 +13000,7 @@ async function main() {
   eq(narrowC.inductOverflow, 0, '820px 下推規碑沒有水平溢位');
   eq(narrowC.tradeoffOverflow, 0, '820px 下雙面碑沒有水平溢位');
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(300);
+  await settle(300);
 
   /* ================================================================ */
   /* 課程 v2 · Phase D：合尺（constraint）＋ 行動裝置還債點             */
@@ -12781,12 +13010,12 @@ async function main() {
   const csOpen = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 180));
+    await window.__paSettle(180);
     g.promptConsole.open(g.content.challenge('laden-desk-27'));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const actAtOpen = g.promptConsole.act;
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const b = g.promptConsole.constraintBoard;
     return {
       actAtOpen,
@@ -12817,7 +13046,7 @@ async function main() {
     return 1;
   `);
   await key('ArrowDown', 'ArrowDown', { vk: 40 });
-  await sleep(140);
+  await settle(140);
   const csNav = await evaluate(`
     const at = document.activeElement.getAttribute('data-piece');
     const ids = [...document.querySelectorAll('#prompt-console .piece__grip')].map((b) => b.getAttribute('data-piece'));
@@ -12834,7 +13063,7 @@ async function main() {
     const spare = flow.pieces.filter((p) => !p.need).map((p) => p.id);
     // 先把該挑的挑齊 —— 每一把尺都亮
     for (const id of need) b.toggle(id);
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const litAll = b.gauges.filter((x) => x.passed).length;
     const palmShownBefore = !document.querySelector('#prompt-console .constraintboard .palmwrap').hidden;
     const xpBefore = g.progression.state.xp;
@@ -12882,7 +13111,7 @@ async function main() {
       return 1;
     `);
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(220);
+    await settle(220);
   }
   const csEsc = await evaluate(`
     const g = window.__promptasy;
@@ -12905,7 +13134,7 @@ async function main() {
   const csResult = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.constraintBoard.press();
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     return {
       grade: document.querySelector('#prompt-console .grade__mark')?.textContent,
       best: g.progression.bestGrade('laden-desk-27'),
@@ -12970,7 +13199,7 @@ async function main() {
       { width: w, height: h, deviceScaleFactor: 1, mobile: true },
       sessionId
     );
-    await sleep(360);
+    await settle(360);
     const narrowBoards = await evaluate(`
       const g = window.__promptasy;
       const list = ${JSON.stringify(BOARD_SAMPLES)};
@@ -12979,9 +13208,9 @@ async function main() {
         g.promptConsole.close();
         await new Promise((r) => setTimeout(r, 140));
         g.promptConsole.open(g.content.challenge(id));
-        await new Promise((r) => setTimeout(r, 200));
+        await window.__paSettle(200);
         g.promptConsole.goAct(3, { force: true });
-        await new Promise((r) => setTimeout(r, 280));
+        await window.__paSettle(280);
         const body = document.querySelector('#prompt-console .panel__body');
         const panel = document.querySelector('#prompt-console .panel');
         // 可以按得到的東西：高度 ≥40px（Apple/Google 的最小觸控目標）
@@ -13028,12 +13257,12 @@ async function main() {
         });
       }
       g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 140));
+      await window.__paSettle(140);
       // 圖鑑與設定也要能用
       const panels = [];
       for (const [name, api] of [['圖鑑', g.codex], ['設定', g.settings]]) {
         api.open();
-        await new Promise((r) => setTimeout(r, 260));
+        await window.__paSettle(260);
         const body = api.root.querySelector('.panel__body');
         const panel = api.root.querySelector('.panel');
         /*
@@ -13062,7 +13291,7 @@ async function main() {
           right: Math.round(panel.getBoundingClientRect().right),
         });
         api.close();
-        await new Promise((r) => setTimeout(r, 140));
+        await window.__paSettle(140);
       }
       out.panels = panels;
       out.docOverflow = Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -13088,11 +13317,11 @@ async function main() {
   const touchPlay = await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
-    await new Promise((r) => setTimeout(r, 160));
+    await window.__paSettle(160);
     g.promptConsole.open(g.content.challenge('six-lantern-48'));
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     const b = g.promptConsole.constraintBoard;
     const flow = g.content.flow('six-lantern-48').constraintFlow;
     const before = b.gauges.filter((x) => x.passed).length;
@@ -13117,7 +13346,7 @@ async function main() {
   ok(touchPlay.palmH >= 40, '390px：手掌印按得到', `${touchPlay.palmH}px`);
 
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(320);
+  await settle(320);
   await evaluate(`
     const g = window.__promptasy;
     g.promptConsole.close();
@@ -13142,7 +13371,7 @@ async function main() {
     g.shareCard.close();
     return 1;
   `);
-  await sleep(220);
+  await settle(220);
 
   /* --- 閘門：知識式軟門檻（還沒學會就是鎖著的，但門會問你一句） --- */
   const fmGateLocked = await evaluate(`
@@ -13163,7 +13392,7 @@ async function main() {
   eq(fmGateLocked, 1, '種下一份「什麼都還沒學」的存檔');
   await reloadPage('重新載入（量器坊：什麼都還沒學）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
 
   const fmGate = await evaluate(`
     const g = window.__promptasy;
@@ -13343,7 +13572,7 @@ async function main() {
       const m = g.world.markers.find((x) => x.id === '${target}');
       // 站到石座旁邊（互動半徑 6.5 之內），剩下的全部用鍵盤
       g.player.position.set(m.position.x + 3, g.world.terrainHeight(m.position.x + 3, m.position.z + 2), m.position.z + 2);
-      await new Promise((r) => setTimeout(r, 700));
+      await window.__paSettle(700);
       const el = document.querySelector('.hud__interact');
       return { d: Math.hypot(g.player.position.x - m.position.x, g.player.position.z - m.position.z), hint: el && !el.hidden ? el.innerHTML : '' };
     `);
@@ -13351,7 +13580,7 @@ async function main() {
     ok(/<kbd>E<\/kbd>/.test(near.hint), '走近提示標著 E 這個鍵', near.hint.slice(0, 80));
 
     await key('KeyE', 'e', { vk: 69 });
-    await sleep(520);
+    await settle(520);
     const kbOpen = await evaluate(`
       const g = window.__promptasy;
       return { open: g.promptConsole.isOpen, id: g.promptConsole.challenge?.id, act: g.promptConsole.act };
@@ -13361,7 +13590,7 @@ async function main() {
     eq(kbOpen.act, 1, '從第一幕（委託）開始');
 
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(420);
+    await settle(420);
     const kbGuide = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -13378,7 +13607,7 @@ async function main() {
 
     await evaluate(`document.querySelector('#prompt-console .act--guide').focus(); return 1;`);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(420);
+    await settle(420);
     const kbCarveStart = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -13401,7 +13630,7 @@ async function main() {
       ok(idx >= 0, `量器坊：第 ${i + 1} 段找得到正確選項`);
       const n = idx + 1;
       await key(`Digit${n}`, String(n), { vk: 48 + n });
-      await sleep(400);
+      await settle(400);
     }
     const kbFull = await evaluate(`
       const g = window.__promptasy;
@@ -13416,7 +13645,7 @@ async function main() {
     eq(kbFull.palmFocused, true, '焦點自己落在手掌印上');
 
     await holdPalm();
-    await sleep(800);
+    await settle(800);
     const kbDone = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -13431,7 +13660,7 @@ async function main() {
     eq(kbDone.skill, true, '技能「fmt-specify」進了圖鑑');
     ok(kbDone.saved.includes('fmt-specify'), '而且真的寫進了存檔', kbDone.saved.join(','));
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(320);
+    await settle(320);
   }
 
   /* 一座一座真的玩過去（用的是各題型自己的把手，跟鍵盤走的是同一條路） */
@@ -13442,11 +13671,11 @@ async function main() {
       const c = g.content.challenge(id);
       const flow = g.content.flow(id);
       g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 140));
+      await window.__paSettle(140);
       g.promptConsole.open(c);
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const kind = g.promptConsole.kind;
       const step = (n) => new Promise((r) => setTimeout(r, n));
       const carve = async (board) => {
@@ -13510,7 +13739,7 @@ async function main() {
         await carve(b);
         b.press();
       }
-      await new Promise((r) => setTimeout(r, 900));
+      await window.__paSettle(900);
       return {
         kind,
         grade: document.querySelector('#prompt-console .grade__mark')?.textContent.trim() || '',
@@ -13528,13 +13757,13 @@ async function main() {
   }
 
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-  await sleep(240);
+  await settle(240);
 
   /* --- 全破之後：這一區精通、圖鑑列得出它與它的技能 --- */
   const fmCodex = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const cards = [...document.querySelectorAll('#codex .region-card')];
     // 課程 v2 · Phase F 之後圖鑑不只六張卡了 —— 用名字挑出量器坊那一張，不要用「最後一張」
     const last = cards.find((c) => /量器坊/.test(c.querySelector('h3')?.textContent || '')) || cards[cards.length - 1];
@@ -13563,7 +13792,7 @@ async function main() {
   ok(/^https:\/\//.test(fmCodex.firstSrc), '出處是可點的 https 連結', fmCodex.firstSrc);
 
   await evaluate(`window.__promptasy.codex.close(); return 1;`);
-  await sleep(220);
+  await settle(220);
 
   /* --- 窄畫面：量器坊的新題型在 390px 上也讀得完、按得動 --- */
   await cdp.send(
@@ -13571,7 +13800,7 @@ async function main() {
     { width: 390, height: 844, deviceScaleFactor: 1, mobile: false },
     sessionId
   );
-  await sleep(320);
+  await settle(320);
   const fmNarrow = await evaluate(`
     const g = window.__promptasy;
     const out = [];
@@ -13579,9 +13808,9 @@ async function main() {
       g.promptConsole.close();
       await new Promise((r) => setTimeout(r, 140));
       g.promptConsole.open(g.content.challenge(id));
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
       const panel = document.querySelector('#prompt-console .panel');
       const tappable = [...document.querySelectorAll('#prompt-console button:not([hidden])')]
         .filter((b) => b.offsetParent !== null);
@@ -13603,7 +13832,7 @@ async function main() {
     eq(row.small, 0, `[${row.id}] 390px 下每一顆可按的東西都夠大`, String(row.small));
   }
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(320);
+  await settle(320);
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
 
 
@@ -13624,7 +13853,7 @@ async function main() {
     g.shareCard.close();
     return 1;
   `);
-  await sleep(220);
+  await settle(220);
 
   /* --- 兩道閘門：知識式軟門檻 --- */
   await evaluate(`
@@ -13642,7 +13871,7 @@ async function main() {
   `);
   await reloadPage('重新載入（契約鍛冶場：什麼都還沒學）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
 
   const tfGates = await evaluate(`
     const g = window.__promptasy;
@@ -13881,7 +14110,7 @@ async function main() {
       const g = window.__promptasy;
       const m = g.world.markers.find((x) => x.id === '${target}');
       g.player.position.set(m.position.x + 3, g.world.terrainHeight(m.position.x + 3, m.position.z + 2), m.position.z + 2);
-      await new Promise((r) => setTimeout(r, 700));
+      await window.__paSettle(700);
       const el = document.querySelector('.hud__interact');
       return { d: Math.hypot(g.player.position.x - m.position.x, g.player.position.z - m.position.z), hint: el && !el.hidden ? el.innerHTML : '' };
     `);
@@ -13889,12 +14118,12 @@ async function main() {
     ok(/<kbd>E<\/kbd>/.test(near.hint), '走近提示標著 E 這個鍵', near.hint.slice(0, 80));
 
     await key('KeyE', 'e', { vk: 69 });
-    await sleep(520);
+    await settle(520);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(420);
+    await settle(420);
     await evaluate(`document.querySelector('#prompt-console .act--guide').focus(); return 1;`);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(460);
+    await settle(460);
 
     const wsStart = await evaluate(`
       const g = window.__promptasy;
@@ -13920,7 +14149,7 @@ async function main() {
       const bad = ws.tools.find((t) => !t.needed);
       const before = b.stage;
       b.pickTool(bad.id);
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const el = document.querySelector('[data-tool="' + bad.id + '"]');
       return {
         stage: b.stage,
@@ -13970,7 +14199,7 @@ async function main() {
 
     await evaluate(`document.querySelector('#prompt-console [data-palm]').focus(); return 1;`);
     await holdPalm();
-    await sleep(800);
+    await settle(800);
     const wsResult = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -13985,7 +14214,7 @@ async function main() {
     eq(wsResult.skill, true, '技能「tool-native-field」進了圖鑑');
     ok(wsResult.saved.includes('tool-native-field'), '而且真的寫進了存檔', wsResult.saved.join(','));
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(320);
+    await settle(320);
   }
 
   /* --- 護欄崗的派工檯換了自己的稱呼（工具牌／值石那一套不會冒出來） --- */
@@ -13993,18 +14222,18 @@ async function main() {
     const skin = await evaluate(`
       const g = window.__promptasy;
       g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 160));
+      await window.__paSettle(160);
       g.promptConsole.open(g.content.challenge('guest-in-disguise-79'));
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
       const eyebrow = document.querySelector('#prompt-console .workshop .stele__eyebrow')?.textContent.trim() || '';
       const empty = document.querySelector('#prompt-console .workshop .stele__empty')?.textContent.trim() || '';
       const board = g.promptConsole.workshop;
       board.pickTool(g.content.flow('guest-in-disguise-79').workshop.order.sequence[0]);
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       board.pickTool(g.content.flow('guest-in-disguise-79').workshop.order.sequence[1]);
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const tray = document.querySelector('#prompt-console .workshop .stonetray__label')?.textContent.trim() || '';
       const trayAria = document.querySelector('#prompt-console .workshop [data-stonetray]')?.getAttribute('aria-label') || '';
       g.promptConsole.close();
@@ -14015,7 +14244,7 @@ async function main() {
     eq(skin.tray, '內容石', '托盤也換了自己的稱呼');
     eq(skin.trayAria, '內容石托盤', '無障礙標籤跟著換');
   }
-  await sleep(220);
+  await settle(220);
 
   /* --- 一座一座真的玩過去 --- */
   for (const shrine of tfPlan) {
@@ -14025,11 +14254,11 @@ async function main() {
       const c = g.content.challenge(id);
       const flow = g.content.flow(id);
       g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 140));
+      await window.__paSettle(140);
       g.promptConsole.open(c);
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const kind = g.promptConsole.kind;
       const step = (n) => new Promise((r) => setTimeout(r, n));
       const carve = async (board) => {
@@ -14109,7 +14338,7 @@ async function main() {
         await step(260);
         b.press();
       }
-      await new Promise((r) => setTimeout(r, 900));
+      await window.__paSettle(900);
       return {
         kind,
         grade: document.querySelector('#prompt-console .grade__mark')?.textContent.trim() || '',
@@ -14126,7 +14355,7 @@ async function main() {
   }
 
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-  await sleep(240);
+  await settle(240);
 
   /* --- 安全題的誠實界線：畫面上不宣稱「prompt 就是安全邊界」 --- */
   {
@@ -14138,10 +14367,10 @@ async function main() {
         g.promptConsole.close();
         await new Promise((r) => setTimeout(r, 120));
         g.promptConsole.open(g.content.challenge(id));
-        await new Promise((r) => setTimeout(r, 180));
+        await window.__paSettle(180);
         text += '\\n' + document.querySelector('#prompt-console .panel').innerText;
         g.promptConsole.goAct(2, { force: true });
-        await new Promise((r) => setTimeout(r, 220));
+        await window.__paSettle(220);
         text += '\\n' + document.querySelector('#prompt-console .panel').innerText;
         srcs = srcs.concat([...document.querySelectorAll('#prompt-console .act--guide a.bookicon')].map((a) => a.getAttribute('href')));
       }
@@ -14161,7 +14390,7 @@ async function main() {
   const tfCodex = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const cards = [...document.querySelectorAll('#codex .region-card')];
     const pick = (zh) => cards.find((c) => new RegExp(zh).test(c.querySelector('h3')?.textContent || ''));
     const read = (card) => card ? {
@@ -14197,7 +14426,7 @@ async function main() {
     { width: 390, height: 844, deviceScaleFactor: 1, mobile: false },
     sessionId
   );
-  await sleep(320);
+  await settle(320);
   const tfNarrow = await evaluate(`
     const g = window.__promptasy;
     const out = [];
@@ -14205,9 +14434,9 @@ async function main() {
       g.promptConsole.close();
       await new Promise((r) => setTimeout(r, 140));
       g.promptConsole.open(g.content.challenge(id));
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 340));
+      await window.__paSettle(340);
       const panel = document.querySelector('#prompt-console .panel');
       const tappable = [...document.querySelectorAll('#prompt-console button:not([hidden])')]
         .filter((b) => b.offsetParent !== null);
@@ -14229,7 +14458,7 @@ async function main() {
     eq(row.small, 0, `[${row.id}] 390px 下每一顆可按的東西都夠大`, String(row.small));
   }
   await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-  await sleep(320);
+  await settle(320);
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
 
 
@@ -14250,7 +14479,7 @@ async function main() {
     g.shareCard.close();
     return 1;
   `);
-  await sleep(220);
+  await settle(220);
 
   /* --- 閘門：知識式軟門檻（含「任一區精通」） --- */
   await evaluate(`
@@ -14268,7 +14497,7 @@ async function main() {
   `);
   await reloadPage('重新載入（校驗場：什麼都還沒學）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
 
   const rfGate = await evaluate(`
     const g = window.__promptasy;
@@ -14435,7 +14664,7 @@ async function main() {
       const g = window.__promptasy;
       const m = g.world.markers.find((x) => x.id === '${target}');
       g.player.position.set(m.position.x + 3, g.world.terrainHeight(m.position.x + 3, m.position.z + 2), m.position.z + 2);
-      await new Promise((r) => setTimeout(r, 700));
+      await window.__paSettle(700);
       const el = document.querySelector('.hud__interact');
       return { d: Math.hypot(g.player.position.x - m.position.x, g.player.position.z - m.position.z), hint: el && !el.hidden ? el.innerHTML : '' };
     `);
@@ -14443,12 +14672,12 @@ async function main() {
     ok(/<kbd>E<\/kbd>/.test(near.hint), '走近提示標著 E 這個鍵', near.hint.slice(0, 80));
 
     await key('KeyE', 'e', { vk: 69 });
-    await sleep(520);
+    await settle(520);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(420);
+    await settle(420);
     await evaluate(`document.querySelector('#prompt-console .act--guide').focus(); return 1;`);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(460);
+    await settle(460);
 
     const mStart = await evaluate(`
       const g = window.__promptasy;
@@ -14481,7 +14710,7 @@ async function main() {
       const wrongIdx = opts.findIndex((_, i) => !g.content.flow('${target}').slots[0].options[i].correct);
       opts[wrongIdx].focus();
       opts[wrongIdx].click();
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const btn = document.querySelectorAll('#prompt-console .multiboard [data-slot-opt]')[wrongIdx];
       return {
         carvedBefore: before,
@@ -14518,7 +14747,7 @@ async function main() {
         clientX: Math.round(tipBox.x + tipBox.width / 2),
         clientY: Math.round(tipBox.y + tipBox.height / 2),
       }));
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       return {
         handoffOpen: b.handoffOpen,
         round: b.progress.round,
@@ -14552,7 +14781,7 @@ async function main() {
      * 第二下才輪到面板。兩段都驗。
      */
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(300);
+    await settle(300);
     const mEscTip = await evaluate(`
       return {
         open: !document.querySelector('#prompt-console')?.hidden,
@@ -14562,7 +14791,7 @@ async function main() {
     eq(mEscTip.tipOpen, false, 'ⓘ 開著時第一下 Esc 先把它收起來');
     eq(mEscTip.open, true, '收 ⓘ 的那一下不會順手把整個面板關掉');
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(360);
+    await settle(360);
     const mEsc = await evaluate(`
       const g = window.__promptasy;
       return { open: !document.querySelector('#prompt-console')?.hidden, canMove: g.player.inputEnabled };
@@ -14572,7 +14801,7 @@ async function main() {
 
     /* 重開這一關 → 一定回到第一輪（結構上不可能串錯輪次） */
     await key('KeyE', 'e', { vk: 69 });
-    await sleep(520);
+    await settle(520);
     const mReopen = await evaluate(`
       const g = window.__promptasy;
       const b = g.promptConsole.multiBoard;
@@ -14589,27 +14818,27 @@ async function main() {
       const b = g.promptConsole.multiBoard;
       const flow = g.content.flow('${target}');
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
       const n = flow.multiFlow.rounds[0].count;
       for (let i = 0; i < n; i += 1) {
         b.pick(flow.slots[i].options.findIndex((o) => o.correct));
         await new Promise((r) => setTimeout(r, 120));
       }
       b.advance();
-      await new Promise((r) => setTimeout(r, 220));
+      await window.__paSettle(220);
       const afterAdvance = { round: b.progress.round, carved: b.progress.carved, text: b.text, handoffOpen: b.handoffOpen };
       // 切回第一幕再回來
       g.promptConsole.goAct(1, { force: true });
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const afterAct = { round: b.progress.round, carved: b.progress.carved, text: b.text };
       // 切到自由書寫再切回來
       g.promptConsole.setMode('free');
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       const freeKind = g.promptConsole.mode;
       g.promptConsole.setMode('guided');
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       const afterMode = { round: b.progress.round, carved: b.progress.carved, text: b.text };
       return { afterAdvance, afterAct, afterMode, freeKind };
     `);
@@ -14632,7 +14861,7 @@ async function main() {
         b.pick(flow.slots[i].options.findIndex((o) => o.correct));
         await new Promise((r) => setTimeout(r, 120));
       }
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       return {
         done: b.done,
         act: g.promptConsole.act,
@@ -14650,7 +14879,7 @@ async function main() {
 
     await evaluate(`document.querySelector('#prompt-console [data-palm]').focus(); return 1;`);
     await holdPalm();
-    await sleep(700);
+    await settle(700);
 
     const mResult = await evaluate(`
       const g = window.__promptasy;
@@ -14668,19 +14897,19 @@ async function main() {
     ok(mResult.sources > 0, '結果面板附得出可點的官方出處', String(mResult.sources));
 
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(360);
+    await settle(360);
   }
 
   /* --- reduced-motion 下兩輪刻印照樣走得完 --- */
   {
     await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] }, sessionId);
-    await sleep(200);
+    await settle(200);
     const rm = await evaluate(`
       const g = window.__promptasy;
       g.promptConsole.open(g.content.challenge('endless-corridor-86'));
-      await new Promise((r) => setTimeout(r, 420));
+      await window.__paSettle(420);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
       const b = g.promptConsole.multiBoard;
       const flow = g.content.flow('endless-corridor-86');
       for (let i = 0; i < flow.multiFlow.rounds[0].count; i += 1) {
@@ -14691,12 +14920,12 @@ async function main() {
       const visible = card ? card.checkVisibility() : false;
       const anim = card ? getComputedStyle(card).animationName : '';
       b.advance();
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       for (let i = flow.multiFlow.rounds[0].count; i < flow.slots.length; i += 1) {
         b.pick(flow.slots[i].options.findIndex((o) => o.correct));
         await new Promise((r) => setTimeout(r, 120));
       }
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       return { visible, anim, done: b.done, round: b.progress.round };
     `);
     eq(rm.visible, true, 'reduced-motion 下回話卡照樣看得見');
@@ -14704,9 +14933,9 @@ async function main() {
     eq(rm.done, true, 'reduced-motion 下兩輪照樣刻得完');
     eq(rm.round, 1, 'reduced-motion 下輪次照樣推得到第二輪');
     await cdp.send('Emulation.setEmulatedMedia', { features: [] }, sessionId);
-    await sleep(200);
+    await settle(200);
     await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-    await sleep(240);
+    await settle(240);
   }
 
   /* ================================================================== */
@@ -14726,7 +14955,7 @@ async function main() {
     g.shareCard.close();
     return 1;
   `);
-  await sleep(220);
+  await settle(220);
 
   /* --- 閘門：知識式軟門檻（任一區精通） --- */
   await evaluate(`
@@ -14744,7 +14973,7 @@ async function main() {
   `);
   await reloadPage('重新載入（減法之庭：什麼都還沒學）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
 
   const fgGate = await evaluate(`
     const g = window.__promptasy;
@@ -14906,7 +15135,7 @@ async function main() {
       g.world.openGate('reasoning', true);
       const m = g.world.markers.find((x) => x.id === '${target}');
       g.player.position.set(m.position.x + 3, g.world.terrainHeight(m.position.x + 3, m.position.z + 2), m.position.z + 2);
-      await new Promise((r) => setTimeout(r, 700));
+      await window.__paSettle(700);
       const el = document.querySelector('.hud__interact');
       return { d: Math.hypot(g.player.position.x - m.position.x, g.player.position.z - m.position.z), hint: el && !el.hidden ? el.innerHTML : '' };
     `);
@@ -14914,12 +15143,12 @@ async function main() {
     ok(/<kbd>E<\/kbd>/.test(near.hint), '走近提示標著 E 這個鍵', near.hint.slice(0, 80));
 
     await key('KeyE', 'e', { vk: 69 });
-    await sleep(520);
+    await settle(520);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(420);
+    await settle(420);
     await evaluate(`document.querySelector('#prompt-console .act--guide').focus(); return 1;`);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(460);
+    await settle(460);
 
     const sStart = await evaluate(`
       const g = window.__promptasy;
@@ -14933,7 +15162,7 @@ async function main() {
         clientX: Math.round(tipBox.x + tipBox.width / 2),
         clientY: Math.round(tipBox.y + tipBox.height / 2),
       }));
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       return {
         act: g.promptConsole.act,
         kind: g.promptConsole.kind,
@@ -14978,7 +15207,7 @@ async function main() {
       return { before, textBefore, other };
     `);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(320);
+    await settle(320);
     const sAfter = await evaluate(`
       const g = window.__promptasy;
       const b = g.promptConsole.simBoard;
@@ -15018,7 +15247,7 @@ async function main() {
       return 1;
     `);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(380);
+    await settle(380);
     const sOpen = await evaluate(`
       const g = window.__promptasy;
       const b = g.promptConsole.simBoard;
@@ -15048,7 +15277,7 @@ async function main() {
       const wrongIdx = opts.findIndex((_, i) => !flow.slots[0].options[i].correct);
       opts[wrongIdx].focus();
       opts[wrongIdx].click();
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const btn = document.querySelectorAll('#prompt-console .simboard [data-slot-opt]')[wrongIdx];
       return {
         carvedBefore: before,
@@ -15072,7 +15301,7 @@ async function main() {
         b.pick(flow.slots[i].options.findIndex((o) => o.correct));
         await new Promise((r) => setTimeout(r, 140));
       }
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
       return {
         done: b.done,
         text: b.text,
@@ -15089,7 +15318,7 @@ async function main() {
     eq(sCarve.act, 4, '刻滿自動切到第四幕（手印）');
 
     await holdPalm();
-    await sleep(700);
+    await settle(700);
     const sResult = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -15114,25 +15343,25 @@ async function main() {
     eq(netOut.length, 0, '轉鈕全程沒有向外要過任何東西（樣本是本機的離線資料）', netOut.slice(0, 3).join(' '));
 
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(320);
+    await settle(320);
 
     /* 切到自由書寫再切回來：退回石碑刻印時字一模一樣（相容契約） */
     await key('KeyE', 'e', { vk: 69 });
-    await sleep(500);
+    await settle(500);
     const sFree = await evaluate(`
       const g = window.__promptasy;
       g.promptConsole.setMode('free');
-      await new Promise((r) => setTimeout(r, 220));
+      await window.__paSettle(220);
       const free = g.promptConsole.mode;
       g.promptConsole.setMode('guided');
-      await new Promise((r) => setTimeout(r, 220));
+      await window.__paSettle(220);
       return { free, back: g.promptConsole.mode, kind: g.promptConsole.kind };
     `);
     eq(sFree.free, 'free', '轉鈕也切得到自由書寫');
     eq(sFree.back, 'guided', '切得回引導式');
     eq(sFree.kind, 'sim', '切回來還是轉鈕');
     await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-    await sleep(240);
+    await settle(240);
   }
 
   /* --- 減法之庭的一座（改碑）也走得完：新區域不是只有地形 --- */
@@ -15142,7 +15371,7 @@ async function main() {
       const g = window.__promptasy;
       const m = g.world.markers.find((x) => x.id === '${target}');
       g.player.position.set(m.position.x + 3, g.world.terrainHeight(m.position.x + 3, m.position.z + 2), m.position.z + 2);
-      await new Promise((r) => setTimeout(r, 700));
+      await window.__paSettle(700);
       const el = document.querySelector('.hud__interact');
       return { d: Math.hypot(g.player.position.x - m.position.x, g.player.position.z - m.position.z), hint: el && !el.hidden ? el.innerHTML : '' };
     `);
@@ -15150,7 +15379,7 @@ async function main() {
     ok(/<kbd>E<\/kbd>/.test(near.hint), '減法之庭的石座一樣按 E 互動', near.hint.slice(0, 80));
 
     await key('KeyE', 'e', { vk: 69 });
-    await sleep(520);
+    await settle(520);
     const fgAct1 = await evaluate(`
       const g = window.__promptasy;
       const act = document.querySelector('#prompt-console .act--brief');
@@ -15165,7 +15394,7 @@ async function main() {
     ok(fgAct1.mission.length > 6, '委託寫得出來', fgAct1.mission.slice(0, 40));
 
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(420);
+    await settle(420);
     const fgAct2 = await evaluate(`
       return {
         sources: [...document.querySelectorAll('#prompt-console .act--guide a[href^="https://"]')].length,
@@ -15177,7 +15406,7 @@ async function main() {
 
     await evaluate(`document.querySelector('#prompt-console .act--guide').focus(); return 1;`);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(460);
+    await settle(460);
     const fgFix = await evaluate(`
       const g = window.__promptasy;
       const b = g.promptConsole.fixBoard;
@@ -15186,7 +15415,7 @@ async function main() {
         b.pick(frag.id, frag.options.findIndex((o) => o.correct));
         await new Promise((r) => setTimeout(r, 140));
       }
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       return {
         kind: g.promptConsole.kind,
         done: b.done,
@@ -15198,14 +15427,14 @@ async function main() {
     eq(fgFix.done, true, '改完了');
     eq(fgFix.text, fgFix.sample, '改好的整段字就是示範解答');
     await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-    await sleep(240);
+    await settle(240);
   }
 
   /* --- 圖鑑：減法之庭那一張卡在（收集感延伸到新區域） --- */
   const fgCodex = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const cards = [...document.querySelectorAll('#codex .region-card')];
     const card = cards.find((el) => /減法之庭/.test(el.querySelector('h3')?.textContent || ''));
     const out = {
@@ -15217,7 +15446,7 @@ async function main() {
       cards: cards.length,
     };
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return out;
   `);
   eq(fgCodex.hasCard, true, '圖鑑上有減法之庭那一張卡');
@@ -15247,7 +15476,7 @@ async function main() {
     g.shareCard.close();
     return 1;
   `);
-  await sleep(220);
+  await settle(220);
 
   /* --- 閘門：知識式軟門檻（指定的那一片土地精通） --- */
   await evaluate(`
@@ -15265,7 +15494,7 @@ async function main() {
   `);
   await reloadPage('重新載入（觀象臺：什麼都還沒學）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
 
   const stGate = await evaluate(`
     const g = window.__promptasy;
@@ -15431,7 +15660,7 @@ async function main() {
       const g = window.__promptasy;
       const m = g.world.markers.find((x) => x.id === '${target}');
       g.player.position.set(m.position.x + 3, g.world.terrainHeight(m.position.x + 3, m.position.z + 2), m.position.z + 2);
-      await new Promise((r) => setTimeout(r, 700));
+      await window.__paSettle(700);
       const el = document.querySelector('.hud__interact');
       return { d: Math.hypot(g.player.position.x - m.position.x, g.player.position.z - m.position.z), hint: el && !el.hidden ? el.innerHTML : '' };
     `);
@@ -15439,7 +15668,7 @@ async function main() {
     ok(/<kbd>E<\/kbd>/.test(near.hint), '走近提示標著 E 這個鍵', near.hint.slice(0, 80));
 
     await key('KeyE', 'e', { vk: 69 });
-    await sleep(520);
+    await settle(520);
     const kbOpen = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -15457,7 +15686,7 @@ async function main() {
     eq(kbOpen.media, 0, '多模態的關卡也沒有塞任何圖片／影片／音檔進畫面（只評 prompt 的結構）');
 
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(420);
+    await settle(420);
     const kbGuide = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -15474,7 +15703,7 @@ async function main() {
 
     await evaluate(`document.querySelector('#prompt-console .act--guide').focus(); return 1;`);
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(420);
+    await settle(420);
     const kbCarveStart = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -15497,7 +15726,7 @@ async function main() {
       ok(idx >= 0, `觀象臺：第 ${i + 1} 段找得到正確選項`);
       const n = idx + 1;
       await key(`Digit${n}`, String(n), { vk: 48 + n });
-      await sleep(400);
+      await settle(400);
     }
     const kbFull = await evaluate(`
       const g = window.__promptasy;
@@ -15512,7 +15741,7 @@ async function main() {
     eq(kbFull.palmFocused, true, '焦點自己落在手掌印上');
 
     await holdPalm();
-    await sleep(800);
+    await settle(800);
     const kbDone = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -15527,7 +15756,7 @@ async function main() {
     eq(kbDone.skill, true, '技能「mm-basics」進了圖鑑');
     ok(kbDone.saved.includes('mm-basics'), '而且真的寫進了存檔', kbDone.saved.join(','));
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(320);
+    await settle(320);
   }
 
   /* --- 純鍵盤走完一座改碑（usesProsodyPunctuation） --- */
@@ -15536,9 +15765,9 @@ async function main() {
     await evaluate(`
       const g = window.__promptasy;
       g.promptConsole.open(g.content.challenge('${target}'));
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
       return 1;
     `);
     const fixStart = await evaluate(`
@@ -15559,14 +15788,14 @@ async function main() {
     for (const fid of fragIds) {
       await evaluate(`document.querySelector('#prompt-console [data-frag-btn="${fid}"]').focus(); return 1;`);
       await key('Enter', 'Enter', { vk: 13 });
-      await sleep(240);
+      await settle(240);
       const idx = await evaluate(`
         const f = window.__promptasy.content.flow('${target}').fixFlow;
         return f.fragments.find((x) => x.id === '${fid}').options.findIndex((o) => o.correct);
       `);
       await evaluate(`document.querySelector('#prompt-console [data-frag="${fid}"][data-opt="${idx}"]').focus(); return 1;`);
       await key('Enter', 'Enter', { vk: 13 });
-      await sleep(320);
+      await settle(320);
     }
     const fixFull = await evaluate(`
       const g = window.__promptasy;
@@ -15584,7 +15813,7 @@ async function main() {
     eq(fixFull.text, fixFull.sample, '改好的整段文字＝這一關的示範解答（兩種模式同一段字）');
 
     await holdPalm();
-    await sleep(800);
+    await settle(800);
     const fixDone = await evaluate(`
       const g = window.__promptasy;
       return {
@@ -15597,7 +15826,7 @@ async function main() {
     eq(fixDone.cleared, true, '傳聲石那一座記成通關（純鍵盤）');
     eq(fixDone.skill, true, '技能「tts-writing」進了圖鑑');
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(320);
+    await settle(320);
   }
 
   /* 其餘六座：用各題型自己的把手（跟鍵盤走的是同一條路） */
@@ -15608,11 +15837,11 @@ async function main() {
       const c = g.content.challenge(id);
       const flow = g.content.flow(id);
       g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 140));
+      await window.__paSettle(140);
       g.promptConsole.open(c);
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const kind = g.promptConsole.kind;
       const step = (n) => new Promise((r) => setTimeout(r, n));
       const carve = async (board) => {
@@ -15664,7 +15893,7 @@ async function main() {
         await carve(b);
         b.press();
       }
-      await new Promise((r) => setTimeout(r, 900));
+      await window.__paSettle(900);
       return {
         kind,
         grade: document.querySelector('#prompt-console .grade__mark')?.textContent.trim() || '',
@@ -15683,7 +15912,7 @@ async function main() {
   }
 
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-  await sleep(240);
+  await settle(240);
 
   /* --- 零外部請求：整段觀象臺玩下來沒有多要任何媒體或外部資源 --- */
   const stNet = await evaluate(`
@@ -15702,7 +15931,7 @@ async function main() {
   const stCodex = await evaluate(`
     const g = window.__promptasy;
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const cards = [...document.querySelectorAll('#codex .region-card')];
     const card = cards.find((c) => /觀象臺/.test(c.querySelector('h3')?.textContent || ''));
     const out = {
@@ -15716,7 +15945,7 @@ async function main() {
       cards: cards.length,
     };
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return out;
   `);
   eq(stCodex.hasCard, true, '圖鑑上有觀象臺那一張卡');
@@ -15768,7 +15997,7 @@ async function main() {
   `);
   await reloadPage('舊存檔搬家後重新載入');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(600);
+  await settle(600);
 
   const migrated = await evaluate(`
     const g = window.__promptasy;
@@ -15810,11 +16039,11 @@ async function main() {
   const bothCleared = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     document.querySelector('#settings [data-reset]').click();
-    await new Promise((r) => setTimeout(r, 120));
+    await window.__paSettle(120);
     document.querySelector('#settings [data-reset]').click();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     g.settings.close();
     return {
       newKey: localStorage.getItem('promptasy.v1.save'),
@@ -15829,11 +16058,11 @@ async function main() {
   const reset = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     document.querySelector('#settings [data-reset]').click();
-    await new Promise((r) => setTimeout(r, 120));
+    await window.__paSettle(120);
     document.querySelector('#settings [data-reset]').click();
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     return {
       xp: g.progression.state.xp,
       collected: g.progression.state.collected.length,
@@ -15895,12 +16124,32 @@ async function main() {
   async function gEval(expression) {
     const r = await gcdp.send(
       'Runtime.evaluate',
-      { expression: `(async () => { ${expression} })()`, awaitPromise: true, returnByValue: true },
+      { expression: `(async () => { ${PAGE_PRELUDE} ${expression} })()`, awaitPromise: true, returnByValue: true },
       gsid
     );
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
     return r.result.value;
   }
+  /**
+   * 入場門這一段的 settle —— 和主瀏覽器那支同一個道理，
+   * 只是影格要數**這一個** Chrome 的（settle() 數的是主瀏覽器的，
+   * 在這裡就只剩牆鐘那一半了）。
+   */
+  async function gSettle(ms, n = SETTLE_FRAMES) {
+    await Promise.all([
+      sleep(ms),
+      gEval(`
+        await new Promise((res) => {
+          let i = 0;
+          const step = () => { if (++i >= ${n}) res(); else requestAnimationFrame(step); };
+          requestAnimationFrame(step);
+          setTimeout(res, 8000);   // rAF 不跑的環境的逃生索
+        });
+        return 1;
+      `).catch(() => null),
+    ]);
+  }
+
   /** 真的按一下（rawKeyDown ＋ char ＋ keyUp）—— 這一組才會被當成使用者手勢。 */
   async function gEnter() {
     const base = { code: 'Enter', key: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
@@ -15916,7 +16165,7 @@ async function main() {
   await gcdp.send('Page.navigate', { url: APP_URL }, gsid);
   await waitFor(() => gEval('return !!window.__promptasy;'), { label: '入場門情境載入' });
   // whenRunning 的探測窗是 220ms —— 等它過去，狀態才定下來
-  await sleep(1400);
+  await gSettle(1400);
 
   const gateShown = await gEval(`
     const g = window.__promptasy;
@@ -16024,7 +16273,7 @@ async function main() {
     gsid
   );
   await gcdp.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'Escape', key: 'Escape', windowsVirtualKeyCode: 27 }, gsid);
-  await sleep(300);
+  await gSettle(300);
   eq(await gEval('return window.__promptasy.entryGate.isOpen;'), true, 'Esc 在入口什麼都不做（門還在）');
 
   // 推開它：這一下是 trusted gesture → 音訊解鎖
@@ -16101,7 +16350,7 @@ async function main() {
 
   // 再一下 → 進遊戲（維持「標題卡一鍵進場」）
   await gEnter();
-  await sleep(900);
+  await gSettle(900);
   const gateEntered = await gEval(`
     const g = window.__promptasy;
     return {
@@ -16152,7 +16401,7 @@ async function main() {
     g.codex.close();
     return 1;
   `);
-  await sleep(220);
+  await settle(220);
 
   /* --- 硬門檻：走到門前只會被問，而且問的那一句沒有「直接前往」 --- */
   await evaluate(`
@@ -16170,7 +16419,7 @@ async function main() {
   `);
   await reloadPage('重新載入（分歧之廳：什麼都還沒學）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
 
   const dvGate = await evaluate(`
     const g = window.__promptasy;
@@ -16246,7 +16495,7 @@ async function main() {
   eq(dvAsk.focusStay, true, '焦點落在「先留下修行」上（鍵盤走得完）');
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(360);
+  await settle(360);
   const dvStay = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -16296,7 +16545,7 @@ async function main() {
     g.promptConsole.goAct(3, { force: true });
     return 1;
   `);
-  await sleep(320);
+  await settle(320);
   const rvBoard = await evaluate(`
     const g = window.__promptasy;
     const b = g.promptConsole.reverseBoard;
@@ -16327,7 +16576,7 @@ async function main() {
 
   /* --- 方向鍵在名牌之間走 --- */
   await key('ArrowRight', 'ArrowRight', { vk: 39 });
-  await sleep(200);
+  await settle(200);
   const rvRove = await evaluate(`
     const list = Array.from(document.querySelectorAll('#prompt-console .reverseboard [data-tag]'));
     return { at: list.indexOf(document.activeElement), total: list.length };
@@ -16345,7 +16594,7 @@ async function main() {
     return { n: i + 1, id: flow.tags[i].id, textBefore: g.promptConsole.reverseBoard.text, at: g.promptConsole.reverseBoard.progress.at };
   `);
   await key(`Digit${rvWrongIdx.n}`, String(rvWrongIdx.n), { vk: 48 + rvWrongIdx.n });
-  await sleep(280);
+  await settle(280);
   const rvMiss = await evaluate(`
     const g = window.__promptasy;
     const b = g.promptConsole.reverseBoard;
@@ -16383,7 +16632,7 @@ async function main() {
     return { n };
   `);
   await key(`Digit${rvFirst.n}`, String(rvFirst.n), { vk: 48 + rvFirst.n });
-  await sleep(280);
+  await settle(280);
   const rvAfterFirst = await evaluate(`
     const b = window.__promptasy.promptConsole.reverseBoard;
     return { at: b.progress.at, named: b.named.length, announced: b.announcement, focusedOnTag: !!document.activeElement?.closest('[data-tag]') };
@@ -16394,7 +16643,7 @@ async function main() {
   eq(rvAfterFirst.focusedOnTag, true, '焦點自己跟到下一輪的名牌');
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(300);
+  await settle(300);
   const rvEsc = await evaluate(`
     const g = window.__promptasy;
     const b = g.promptConsole.reverseBoard;
@@ -16425,7 +16674,7 @@ async function main() {
       return 1;
     `);
     await key(`Digit${n}`, String(n), { vk: 48 + n });
-    await sleep(220);
+    await settle(220);
   }
   await waitFor(() => evaluate(`return window.__promptasy.promptConsole.reverseBoard.progress.taken === true;`), {
     label: '拆碑：整份拆完',
@@ -16460,7 +16709,7 @@ async function main() {
       return 1;
     `);
     await key(`Digit${n}`, String(n), { vk: 48 + n });
-    await sleep(240);
+    await settle(240);
   }
   await waitFor(() => evaluate(`return window.__promptasy.promptConsole.reverseBoard.done === true;`), {
     label: '拆碑：刻滿',
@@ -16528,7 +16777,7 @@ async function main() {
   );
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(320);
+  await settle(320);
 
   /* --- 反差題的模型卡掛得出可點的官方出處 --- */
   const tfCards = await evaluate(`
@@ -16551,7 +16800,7 @@ async function main() {
   }
 
   await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-  await sleep(220);
+  await settle(220);
 
   /* ================================================================== */
   /* 課程 v2 · Phase J2：12 座應用關（試煉）＋ 土地印記 ＋ 大師層印記      */
@@ -16586,7 +16835,7 @@ async function main() {
   `);
   await reloadPage('重新載入（應用關：只學過兩條）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(500);
+  await settle(500);
 
   const trialOpen = await evaluate(`
     const g = window.__promptasy;
@@ -16621,12 +16870,12 @@ async function main() {
   ok(trialOpen.rows.some((t) => /你已經學過/.test(t)), '對照表上標出「你已經學過」', trialOpen.rows.join(' ｜ '));
 
   await key('Digit2', '2', { vk: 50, modifiers: 8 });
-  await sleep(200);
+  await settle(200);
   eq(await evaluate(`return window.__promptasy.promptConsole.act;`), 1, 'Alt + 2 不會跳到不存在的那一幕');
 
   await evaluate(`document.querySelector('#prompt-console .act--brief').focus(); return 1;`);
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(320);
+  await settle(320);
   const trialAct3 = await evaluate(`
     const g = window.__promptasy;
     return {
@@ -16649,9 +16898,9 @@ async function main() {
   await evaluate(`document.querySelector('#prompt-console [data-clear]').click(); return 1;`);
   await evaluate(`document.querySelector('#prompt-console .prompt-input').focus(); return 1;`);
   await cdp.send('Input.insertText', { text: trialSample }, sessionId);
-  await sleep(300);
+  await settle(300);
   await key('Enter', 'Enter', { vk: 13, modifiers: 2 });
-  await sleep(800);
+  await settle(800);
   const trialResult = await evaluate(`
     const g = window.__promptasy;
     const el = document.querySelector('#prompt-console [data-result]');
@@ -16688,10 +16937,10 @@ async function main() {
   );
 
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(260);
+  await settle(260);
   await reloadPage('重新載入（印記還在嗎）');
   await key('Enter', 'Enter', { vk: 13 });
-  await sleep(480);
+  await settle(480);
   const sealAfterReload = await evaluate(`
     const g = window.__promptasy;
     return { seals: g.progression.seals(), has: g.progression.hasSeal('foundations') };
@@ -16706,7 +16955,7 @@ async function main() {
     g.promptConsole.open(shrine);
     g.promptConsole.setMode('free');
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     document.querySelector('#prompt-console [data-clear]').click();
     const t = document.querySelector('#prompt-console .prompt-input');
     t.focus();
@@ -16714,9 +16963,9 @@ async function main() {
     return { id: shrine.id, sample: shrine.sample };
   `);
   await cdp.send('Input.insertText', { text: penlessRun.sample }, sessionId);
-  await sleep(300);
+  await settle(300);
   await key('Enter', 'Enter', { vk: 13, modifiers: 2 });
-  await sleep(800);
+  await settle(800);
   const penlessOut = await evaluate(`
     const g = window.__promptasy;
     const m = g.progression.masterSeals();
@@ -16744,13 +16993,14 @@ async function main() {
   for (let i = 0; i < 16; i += 1) {
     sealCues = await evaluate(`return window.__promptasy.audio.debug().cues;`);
     if (sealCues.includes('masterSeal')) break;
+    /* P25b：留著固定 sleep —— 這是這個重試迴圈自己的取樣間隔（每一圈都重新問 cues，條件成立就跳出）。 */
     await sleep(150);
   }
   ok(sealCues.includes('masterSeal'), '拿到大師層印記時真的響了一聲（masterSeal）', sealCues.join(','));
 
   /* --- 作弊面：先翻開範例，關掉重開再拿 S 也不算 --- */
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(240);
+  await settle(240);
   const peekRun = await evaluate(`
     const g = window.__promptasy;
     const shrine = g.content.challenges.filter((c) => !c.application && c.region === 'foundations')[1];
@@ -16769,7 +17019,7 @@ async function main() {
     g.promptConsole.open(g.content.challenges.find((c) => c.id === ${JSON.stringify('__PEEK__')}));
     g.promptConsole.setMode('free');
     g.promptConsole.goAct(3, { force: true });
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     document.querySelector('#prompt-console [data-clear]').click();
     const t = document.querySelector('#prompt-console .prompt-input');
     t.focus();
@@ -16777,9 +17027,9 @@ async function main() {
     return 1;
   `.replace('__PEEK__', peekRun.id));
   await cdp.send('Input.insertText', { text: peekRun.sample }, sessionId);
-  await sleep(300);
+  await settle(300);
   await key('Enter', 'Enter', { vk: 13, modifiers: 2 });
-  await sleep(800);
+  await settle(800);
   const peekOut = await evaluate(`
     const g = window.__promptasy;
     const m = g.progression.masterSeals();
@@ -16796,9 +17046,9 @@ async function main() {
 
   /* --- 圖鑑：印記那一塊看得到，而且 finale 一格沒變 --- */
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(260);
+  await settle(260);
   await key('KeyC', 'c', { vk: 67 });
-  await sleep(560);
+  await settle(560);
   const codexSeals = await evaluate(`
     const el = document.querySelector('#codex');
     const seals = el.querySelector('.seals');
@@ -16888,7 +17138,7 @@ async function main() {
     eq(JSON.stringify(st.stray), '[]', '星圖那一整塊的公司名只出現在說明那一行與出處連結上', JSON.stringify(st.stray));
   }
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(240);
+  await settle(240);
   /*
    * 防「空泛通過」：上面那組用的是這個存檔真實的 badges（可能剛好都是 0），
    * 所以再餵一組寫死的數字重畫一次 —— 星點數、亮起的宿、連線都要跟著變。
@@ -16899,7 +17149,7 @@ async function main() {
     const before = { ...g.progression.state.badges };
     g.progression.state.badges = { openai: 5, anthropic: 3, google: 0, xai: 7 };
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const el = document.querySelector('#codex');
     const groups = [...el.querySelectorAll('.starmap__mansion')];
     const out = {
@@ -16910,7 +17160,7 @@ async function main() {
       overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     };
     g.codex.close();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     g.progression.state.badges = before;
     return out;
   `);
@@ -16924,7 +17174,7 @@ async function main() {
   const finaleStar = await evaluate(`
     const g = window.__promptasy;
     g.finale.open();
-    await new Promise((r) => setTimeout(r, 420));
+    await window.__paSettle(420);
     const el = document.querySelector('#achievement');
     const sky = el.querySelector('.starmap__sky');
     const r = sky ? sky.getBoundingClientRect() : { width: 0, height: 0 };
@@ -16943,7 +17193,7 @@ async function main() {
       overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     };
     g.finale.close();
-    await new Promise((r) => setTimeout(r, 240));
+    await window.__paSettle(240);
     return out;
   `);
   eq(finaleStar.open, true, '成就頁打得開');
@@ -16972,7 +17222,7 @@ async function main() {
     { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false },
     sessionId
   );
-  await sleep(320);
+  await settle(320);
 
   /*
    * 手掌印是十一種題型共用的結尾（WORLD.md §3.3b 規則 1）——
@@ -17089,7 +17339,7 @@ async function main() {
     { width: 390, height: 844, deviceScaleFactor: 1, mobile: false },
     sessionId
   );
-  await sleep(360);
+  await settle(360);
   const palmNarrow = await evaluate(`
     const g = window.__promptasy;
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -17148,7 +17398,7 @@ async function main() {
     { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false },
     sessionId
   );
-  await sleep(320);
+  await settle(320);
 
   /* --- 自由書寫沒有手掌印（它走的是「呈給神諭」那顆鍵） --- */
   const palmFree = await evaluate(`
@@ -17228,7 +17478,7 @@ async function main() {
       const box = await evaluate(`
         const m = document.querySelector('#prompt-console [data-gloss]');
         m.scrollIntoView({ block: 'center' });
-        await new Promise((r) => setTimeout(r, 120));
+        await window.__paSettle(120);
         const r = m.getBoundingClientRect();
         return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
       `);
@@ -17242,6 +17492,7 @@ async function main() {
         { type: 'mouseMoved', x: box.x, y: box.y, button: 'none', buttons: 0 },
         sessionId
       );
+      /* P25b：留著固定 sleep —— 這是外層 waitFor 的取樣間隔（游標移過去 → 下一行就問結果，問不到就再繞一圈）。 */
       await sleep(150);
       return evaluate(`
         const c = document.querySelector('.glosscard');
@@ -17278,7 +17529,7 @@ async function main() {
 
   /* --- Esc 先收小卡，關卡還開著 --- */
   await key('Escape', 'Escape', { vk: 27 });
-  await sleep(260);
+  await settle(260);
   const glossEsc = await evaluate(`
     return {
       cardOpen: !document.querySelector('.glosscard').hidden,
@@ -17294,13 +17545,13 @@ async function main() {
     { width: 390, height: 844, deviceScaleFactor: 1, mobile: false },
     sessionId
   );
-  await sleep(400);
+  await settle(400);
   const glossNarrow = await evaluate(`
     const m = document.querySelector('#prompt-console [data-gloss]');
     m.scrollIntoView({ block: 'center' });
-    await new Promise((r) => setTimeout(r, 300));
+    await window.__paSettle(300);
     m.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const c = document.querySelector('.glosscard');
     const r = c.getBoundingClientRect();
     return {
@@ -17320,7 +17571,7 @@ async function main() {
     { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false },
     sessionId
   );
-  await sleep(320);
+  await settle(320);
 
   /* --- 第二幕（指引）與圖鑑也標得到 --- */
   const glossElsewhere = await evaluate(`
@@ -17485,7 +17736,7 @@ async function main() {
     `;
 
     await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-    await sleep(300);
+    await settle(300);
 
     /* ---------------------------------------------------------------- */
     /* (1) 一條式標頭（1280）                                            */
@@ -17495,7 +17746,12 @@ async function main() {
       g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
       return 1;
     `);
-    await sleep(900);
+    /* P25b：先等面板真的掛上畫面（前提），再等版面動畫走完，才量高度。 */
+    await until(
+      `window.__promptasy.promptConsole.isOpen && document.querySelector('#prompt-console .panel')`,
+      { label: '關卡面板掛上畫面' }
+    );
+    await settle(900);
     const head = await evaluate(headRows('#prompt-console'));
     ok(head, '關卡標頭量得到（不是 0×0 空過）');
     eq(head.bar, true, '關卡走的是一條式標頭');
@@ -17558,7 +17814,12 @@ async function main() {
       g.codex.open();
       return 1;
     `);
-    await sleep(900);
+    /* P25b：先等圖鑑的 ⓘ 真的在畫面上，再量它的尺寸。 */
+    await until(
+      `window.__promptasy.codex.isOpen && document.querySelector('#codex .codex__hint .infotip__btn')`,
+      { label: '圖鑑的 ⓘ 掛上畫面' }
+    );
+    await settle(900);
     const tipSize = await evaluate(`
       const btn = document.querySelector('#codex .codex__hint .infotip__btn');
       const r = btn.getBoundingClientRect();
@@ -17581,7 +17842,7 @@ async function main() {
     );
     ok(tipSize.fontPx <= 11, 'ⓘ 的字級跟著砍半', `${tipSize.fontPx}px`);
     await evaluate(`window.__promptasy.codex.close(); return 1;`);
-    await sleep(320);
+    await settle(320);
 
     /* ---------------------------------------------------------------- */
     /* (3) 迴歸：ⓘ 絕不自己彈出來                                        */
@@ -17600,25 +17861,30 @@ async function main() {
       g.promptConsole.goAct(2, { force: true });
       return 1;
     `);
-    await sleep(900);
+    /* P25b：先等第二幕那本典籍真的在畫面上，再取它的中心點。 */
+    await until(
+      `window.__promptasy.promptConsole.act === 2 && document.querySelector('#prompt-console .act--guide a.bookicon')`,
+      { label: '第二幕的典籍圖示掛上畫面' }
+    );
+    await settle(900);
     const tipPoint = await evaluate(`
       const r = document.querySelector('#prompt-console .act--guide a.bookicon').getBoundingClientRect();
       return [r.x + r.width / 2, r.y + r.height / 2];
     `);
     await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-    await sleep(320);
+    await settle(320);
     await park(tipPoint[0], tipPoint[1]);
-    await sleep(240);
+    await settle(240);
     await evaluate(`
       const g = window.__promptasy;
       g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
       return 1;
     `);
-    await sleep(900);
+    await settle(900);
     const tipsAct1 = await evaluate(visibleTips);
     eq(tipsAct1.length, 0, '打開一關的時候畫面上沒有任何 ⓘ 的說明是開著的', JSON.stringify(tipsAct1));
     await evaluate(`document.querySelector('#prompt-console [data-act-next="2"]').click(); return 1;`);
-    await sleep(1100);
+    await settle(1100);
     const tipsParked = await evaluate(visibleTips);
     eq(
       tipsParked.length,
@@ -17632,7 +17898,7 @@ async function main() {
      * .reveal 的入場動畫會讓先前量好的位置過期（findings 有記）。
      */
     await park(6, 6);
-    await sleep(200);
+    await settle(200);
     const tipsMoved = await waitFor(
       async () => {
         const at = await evaluate(`
@@ -17641,7 +17907,7 @@ async function main() {
         `);
         await park(6, 6);
         await park(at[0], at[1]);
-        await sleep(200);
+        await settle(200);
         const seen = await evaluate(visibleTips);
         return seen.length ? seen : null;
       },
@@ -17659,14 +17925,14 @@ async function main() {
     const tipFocus = await evaluate(`
       const btn = document.querySelector('#prompt-console .act--guide a.bookicon');
       btn.focus();
-      await new Promise((r) => setTimeout(r, 220));
+      await window.__paSettle(220);
       const on = getComputedStyle(document.querySelector('#prompt-console .act--guide .infotip__bubble')).visibility;
       // 典籍是一條連結（按下去就開官方文件）→ 無障礙的關係走 aria-describedby
       const describes =
         btn.getAttribute('aria-describedby') ===
         document.querySelector('#prompt-console .act--guide .infotip__bubble').id;
       btn.blur();
-      await new Promise((r) => setTimeout(r, 220));
+      await window.__paSettle(220);
       return { on, describes, off: getComputedStyle(document.querySelector('#prompt-console .act--guide .infotip__bubble')).visibility };
     `);
     eq(tipFocus.on, 'visible', 'Tab 走到那本典籍上照樣看得到說明（鍵盤不打折）');
@@ -17677,17 +17943,17 @@ async function main() {
       const g = window.__promptasy;
       g.promptConsole.close();
       g.codex.open();
-      await new Promise((r) => setTimeout(r, 500));
+      await window.__paSettle(500);
       const btn = document.querySelector('#codex .codex__hint .infotip__btn');
       const before = btn.getAttribute('aria-expanded');
       btn.focus();
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const on = btn.getAttribute('aria-expanded');
       btn.blur();
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const off = btn.getAttribute('aria-expanded');
       g.codex.close();
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       return { before, on, off };
     `);
     eq(tipExpanded.before, 'false', 'ⓘ 預設是收起來的（aria-expanded=false）');
@@ -17695,9 +17961,9 @@ async function main() {
     eq(tipExpanded.off, 'false', '離開 focus 又收回去');
     // 面板打開時焦點不准落在 ⓘ 上
     await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
-    await sleep(320);
+    await settle(320);
     await evaluate(`window.__promptasy.codex.open(); return 1;`);
-    await sleep(800);
+    await settle(800);
     const codexFocus = await evaluate(`
       const a = document.activeElement;
       return {
@@ -17708,7 +17974,7 @@ async function main() {
     eq(codexFocus.isTip, false, '圖鑑打開時焦點不會落在 ⓘ 上', codexFocus.text);
     eq((await evaluate(visibleTips)).length, 0, '圖鑑打開時也沒有任何 ⓘ 自己開著');
     await evaluate(`window.__promptasy.codex.close(); return 1;`);
-    await sleep(320);
+    await settle(320);
 
     /* ---------------------------------------------------------------- */
     /* (4) 390px：關卡名不截斷、進度小牌掉到第二行、Esc 守在右上          */
@@ -17718,13 +17984,18 @@ async function main() {
       { width: 390, height: 844, deviceScaleFactor: 1, mobile: false },
       sessionId
     );
-    await sleep(420);
+    await settle(420);
     await evaluate(`
       const g = window.__promptasy;
       g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
       return 1;
     `);
-    await sleep(900);
+    /* P25b：同上，先等面板掛上畫面再量 390px 的版面。 */
+    await until(
+      `window.__promptasy.promptConsole.isOpen && document.querySelector('#prompt-console .panel')`,
+      { label: '390px：關卡面板掛上畫面' }
+    );
+    await settle(900);
     const head390 = await evaluate(headRows('#prompt-console'));
     ok(head390, '390px 下標頭量得到');
     eq(head390.bar, true, '390px 下仍然是一條式標頭');
@@ -17747,7 +18018,7 @@ async function main() {
     );
     const tip390 = await evaluate(`
       document.querySelector('#prompt-console [data-act-next="2"]').click();
-      await new Promise((r) => setTimeout(r, 700));
+      await window.__paSettle(700);
       // 第二幕那顆說明卡掛在導言那本典籍上（2026-08-03 定稿）
       const btn = document.querySelector('#prompt-console .act--guide a.bookicon');
       const r = btn.getBoundingClientRect();
@@ -17764,7 +18035,7 @@ async function main() {
     eq((await evaluate(visibleTips)).length, 0, '390px 下切到第二幕也沒有說明卡自己彈出來');
     await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
     await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
-    await sleep(420);
+    await settle(420);
   }
 
   /* ================================================================ */
@@ -17779,7 +18050,7 @@ async function main() {
     const fxPre = await evaluate(`
       const g = window.__promptasy;
       if (g.promptConsole.isOpen) g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       g.engine.setQuality('high');
       const fx = g.world.rubricFx;
       fx.reset();
@@ -17834,10 +18105,10 @@ async function main() {
       const g = window.__promptasy;
       const c = g.promptConsole;
       c.open(g.content.challenge('gate-of-clarity-01'));
-      await new Promise((r) => setTimeout(r, 340));
+      await window.__paSettle(340);
       if (c.mode !== 'free') c.setMode('free');
       c.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       const ta = document.querySelector('#prompt-console .prompt-input');
       ta.value = ${JSON.stringify(ONLY_TASK)};
       document.querySelector('#prompt-console [data-submit]').click();
@@ -17914,12 +18185,12 @@ async function main() {
       const g = window.__promptasy;
       const c = g.promptConsole;
       c.close();
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       c.open(g.content.challenge('gate-of-clarity-01'));
-      await new Promise((r) => setTimeout(r, 340));
+      await window.__paSettle(340);
       if (c.mode !== 'free') c.setMode('free');
       c.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       const ta = document.querySelector('#prompt-console .prompt-input');
       ta.value = ${JSON.stringify(ONLY_TASK)};
       document.querySelector('#prompt-console [data-submit]').click();
@@ -17951,12 +18222,12 @@ async function main() {
       const enabledLow = fx.enabled;
       const spawnedBefore = fx.particlesSpawned;
       c.close();
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       c.open(g.content.challenge('gate-of-clarity-01'));
-      await new Promise((r) => setTimeout(r, 340));
+      await window.__paSettle(340);
       if (c.mode !== 'free') c.setMode('free');
       c.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       const ta = document.querySelector('#prompt-console .prompt-input');
       ta.value = ${JSON.stringify(ONLY_TASK)};
       document.querySelector('#prompt-console [data-submit]').click();
@@ -17973,7 +18244,7 @@ async function main() {
       g.engine.setQuality('high');
       out.enabledHigh = fx.enabled;
       c.close();
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       return out;
     `);
     eq(fxLow.enabledLow, false, '低畫質時演出層是關的');
@@ -18146,13 +18417,13 @@ async function main() {
       const fx = g.world.rubricFx;
       fx.reset();
       if (c.isOpen) c.close();
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       const other = g.world.markers.find((m) => m.region !== 'foundations' && (m.challenge.rubric || []).some((r) => r.check === 'assignsTask'));
       c.open(g.content.challenge(other.id));
-      await new Promise((r) => setTimeout(r, 340));
+      await window.__paSettle(340);
       if (c.mode !== 'free') c.setMode('free');
       c.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       const ta = document.querySelector('#prompt-console .prompt-input');
       ta.value = ${JSON.stringify(ONLY_TASK)};
       document.querySelector('#prompt-console [data-submit]').click();
@@ -18166,7 +18437,7 @@ async function main() {
         markerId: st.playing.length ? st.playing[0].markerId : null,
       };
       c.close();
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       return out;
     `);
     ok(fxOtherRegion.region !== 'foundations', `（前提）挑到的是別片土地（${fxOtherRegion.region}）`);
@@ -18185,7 +18456,7 @@ async function main() {
       const marker = g.world.markers.find((m) => m.id === 'gate-of-clarity-01');
       const scale0 = marker.beacon.scale.y;
       fx.play(marker, ['hasConstraint']);
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const mid = { scale: marker.beacon.scale.y, playing: fx.state().playing.length };
       fx.reset();
       return { scale0, mid, after: { scale: marker.beacon.scale.y, playing: fx.state().playing.length, particles: fx.state().particlesActive } };
@@ -18226,12 +18497,12 @@ async function main() {
         const g = window.__promptasy;
         const c = g.promptConsole;
         if (c.isOpen) c.close();
-        await new Promise((r) => setTimeout(r, 260));
+        await window.__paSettle(260);
         c.open(g.content.challenge(${JSON.stringify(id)}));
-        await new Promise((r) => setTimeout(r, 340));
+        await window.__paSettle(340);
         if (c.mode !== 'free') c.setMode('free');
         c.goAct(3, { force: true });
-        await new Promise((r) => setTimeout(r, 240));
+        await window.__paSettle(240);
         const ta = document.querySelector('#prompt-console .prompt-input');
         ta.value = ${JSON.stringify(text)};
         document.querySelector('#prompt-console [data-submit]').click();
@@ -18250,7 +18521,7 @@ async function main() {
           unlocked: g.progression.state.unlockedRegions.slice(),
         };
         c.close();
-        await new Promise((r) => setTimeout(r, 240));
+        await window.__paSettle(240);
         return out;
       `);
     };
@@ -18309,11 +18580,11 @@ async function main() {
     const codexLean = await evaluate(`
       const g = window.__promptasy;
       g.codex.open();
-      await new Promise((r) => setTimeout(r, 420));
+      await window.__paSettle(420);
       const txt = document.querySelector('#codex')?.textContent || '';
       const out = { has: txt.includes('最少技巧達成'), leanWord: txt.includes('最少字') };
       g.codex.close();
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
       return out;
     `);
     eq(codexLean.has, true, '圖鑑的成就那一格列得出「最少技巧達成」');
@@ -18336,7 +18607,7 @@ async function main() {
     const built = await evaluate(`
       const g = window.__promptasy;
       if (g.promptConsole.isOpen) g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 220));
+      await window.__paSettle(220);
       g.progression.skipGate('reasoning');
       g.world.openGate('reasoning', true);
       const layers = g.world.screens || [];
@@ -18382,7 +18653,7 @@ async function main() {
       evaluate(`
         const g = window.__promptasy;
         g.player.teleport(${at[0]}, ${at[1]});
-        await new Promise((r) => setTimeout(r, 320));
+        await window.__paSettle(320);
         const s = g.world.landmarkSightFrom(g.player.position.x, g.player.position.z, 'reasoning');
         return { flat: s.flat, hidden: s.hidden, by: s.by, x: g.player.position.x, z: g.player.position.z };
       `);
@@ -18410,7 +18681,7 @@ async function main() {
     const push = await evaluate(`
       const g = window.__promptasy;
       g.player.teleport(${approach[0]}, ${approach[1]});
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
       const before = { x: g.player.position.x, z: g.player.position.z };
       const clamped = g.world.clampPosition(${f.cx}, ${f.cz}, before.x, before.z);
       const solidAtCore = Boolean(g.world.solidAt(${f.cx}, ${f.cz}));
@@ -18441,7 +18712,7 @@ async function main() {
     const walk = await evaluate(`
       const g = window.__promptasy;
       g.player.teleport(${approach[0]}, ${approach[1]});
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const want = Math.atan2(${f.cx} - g.player.position.x, ${f.cz} - g.player.position.z);
       const norm = (a) => Math.atan2(Math.sin(a), Math.cos(a));
       let held = null;
@@ -18465,11 +18736,11 @@ async function main() {
     ok(walk.yawErr < 0.12, 'P11：鏡頭真的轉到對著石脊了（cameraYaw 是唯讀的，要用方向鍵轉）', walk.yawErr.toFixed(3));
     const sideBefore = (walk.x - f.cx) * f.vx + (walk.z - f.cz) * f.vz;
     await keyDown('KeyW', 'w', { vk: 87 });
-    await sleep(1500);
+    await settle(1500);
     await keyUp('KeyW', 'w', { vk: 87 });
     const after = await evaluate(`
       const g = window.__promptasy;
-      await new Promise((r) => setTimeout(r, 240));
+      await window.__paSettle(240);
       return { x: g.player.position.x, z: g.player.position.z };
     `);
     const sideAfter = (after.x - f.cx) * f.vx + (after.z - f.cz) * f.vz;
@@ -18537,7 +18808,7 @@ async function main() {
 
     // 收尾：回到高原，後面的檢查從乾淨的位置繼續
     await evaluate(`window.__promptasy.player.teleport(0, 6); return 1;`);
-    await sleep(240);
+    await settle(240);
   }
 
   /* ================================================================ */
@@ -18560,7 +18831,7 @@ async function main() {
           g.progression.skipGate('${regionId}');
           g.world.openGate('${regionId}', true);
           g.player.teleport(${at[0]}, ${at[1]});
-          await new Promise((r) => setTimeout(r, 320));
+          await window.__paSettle(320);
           const s = g.world.landmarkSightFrom(g.player.position.x, g.player.position.z, '${regionId}');
           return { flat: s.flat, hidden: s.hidden, by: s.by, x: g.player.position.x, z: g.player.position.z };
         `);
@@ -18652,7 +18923,7 @@ async function main() {
 
     // 畫質的選單住在設定頁裡 —— 沒開設定頁那顆 <select> 根本不在 DOM 上
     await key('KeyO', 'o', { vk: 79 });
-    await sleep(350);
+    await settle(350);
     const settingsOpen12 = await evaluate(`return { open: window.__promptasy.settings.isOpen, sel: Boolean(document.getElementById('set-quality')) };`);
     eq(settingsOpen12.open, true, 'P12：（前提）設定頁開著');
     eq(settingsOpen12.sel, true, 'P12：（前提）畫質選單在 DOM 上');
@@ -18668,7 +18939,7 @@ async function main() {
       }
       const arr = g.world.drifts.layers[0].points.geometry.attributes.position.array;
       const snap = Float32Array.from(arr);
-      await new Promise((r) => setTimeout(r, 700));
+      await window.__paSettle(700);
       let still = true;
       for (let i = 0; i < snap.length; i += 1) if (snap[i] !== arr[i]) { still = false; break; }
       return { quality: g.engine.quality, visible: g.world.drifts.group.visible, still };
@@ -18692,7 +18963,7 @@ async function main() {
     eq(driftBack.quality, 'high', 'P12：畫質切回高了');
     eq(driftBack.visible, true, 'P12：切回高畫質 → 粒子層回來了');
     await key('Escape', 'Escape', { vk: 27 });
-    await sleep(250);
+    await settle(250);
 
     /* --- ⑤ 地面：兩片土地的頂點色真的不一樣 --- */
     const groundColors = await evaluate(`
@@ -18727,7 +18998,7 @@ async function main() {
 
     // 收尾：回到高原，後面的檢查從乾淨的位置繼續
     await evaluate(`window.__promptasy.player.teleport(0, 6); return 1;`);
-    await sleep(240);
+    await settle(240);
   }
 
   /* ================================================================ */
@@ -19776,7 +20047,7 @@ async function main() {
     const built = g.world.watchmen.byId(w.id);
     const posBefore = built.group.position.clone();
     const headBefore = built.head.rotation.y;
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     out.moved = built.group.position.distanceTo(posBefore);
     out.headTurned = Math.abs(built.head.rotation.y - headBefore);
     out.faces = Math.abs(built.head.rotation.y) <= 1.221; // 頭只轉得動 ±70 度
@@ -19793,7 +20064,7 @@ async function main() {
     // 面板開著的時候走不動：按住 W 一秒，世界座標不變
     const px0 = g.player.position.x, pz0 = g.player.position.z;
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW', bubbles: true }));
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW', bubbles: true }));
     out.walkedWhileOpen = Math.hypot(g.player.position.x - px0, g.player.position.z - pz0);
 
@@ -20479,7 +20750,7 @@ async function main() {
     const built = g.world.guardians.byId(spec.id);
     const posBefore = built.group.position.clone();
     const headBefore = built.head.rotation.y;
-    await new Promise((r) => setTimeout(r, 900));
+    await window.__paSettle(900);
     out.moved = built.group.position.distanceTo(posBefore);
     out.headTurned = Math.abs(built.head.rotation.y - headBefore);
 
@@ -20981,7 +21252,7 @@ async function main() {
     const out = { toasts: [] };
     for (let i = 0; i < 4; i += 1) {
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-      await new Promise((r) => setTimeout(r, 320));
+      await window.__paSettle(320);
       out.toasts.push([...document.querySelectorAll('.toast')].map((t) => t.textContent.trim()).pop() || '');
     }
     out.open = g.progression.isShortcutOpen(sc.id);
@@ -21010,7 +21281,7 @@ async function main() {
     const out = { steps: [], xp0: g.progression.state.xp, grades0: Object.keys(g.progression.state.bestGrades).length };
     for (let i = 0; i < 3; i += 1) {
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-      await new Promise((r) => setTimeout(r, 380));
+      await window.__paSettle(380);
       const el = document.querySelector('[data-interact]');
       out.steps.push({
         open: g.progression.isShortcutOpen(sc.id),
@@ -21107,7 +21378,7 @@ async function main() {
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
       g.player.teleport(sc.from.x + sc.dir.x * (sc.gateAt - 7), sc.from.z + sc.dir.z * (sc.gateAt - 7));
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       const a = (g.player.position.x - sc.from.x) * sc.dir.x + (g.player.position.z - sc.from.z) * sc.dir.z;
       return { diff: Math.abs(d), along: a, gateAt: sc.gateAt };
     `);
@@ -21134,7 +21405,7 @@ async function main() {
   await clearStage19();
   const scPersist = await evaluate(`
     const g = window.__promptasy;
-    await new Promise((r) => setTimeout(r, 200));
+    await window.__paSettle(200);
     const sc = g.world.shortcuts[0];
     return {
       open: g.progression.isShortcutOpen(sc.id),
@@ -21257,12 +21528,12 @@ async function main() {
   const guideToggle = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const box = document.querySelector('#settings [data-guides]');
     const before = box ? box.checked : null;
     box.checked = true;
     box.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     g.settings.close();
     /*
      * 導向不是「打開就有」：它每 GUIDE_RESCAN 秒才重算一次目標，
@@ -21356,7 +21627,7 @@ async function main() {
       if (best === null || better(best, lean)) best = lean;
       sum += lean;
       if (enough(lean) && samples >= MEAN_SAMPLES) break;
-      await sleep(300);
+      await settle(300);
     }
     return {
       lean: best === null ? NaN : best,
@@ -21418,13 +21689,13 @@ async function main() {
   const guideOffToggle = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const box = document.querySelector('#settings [data-guides]');
     box.checked = false;
     box.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     g.settings.close();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     return { setting: g.progression.state.settings.guides, aim: g.world.guidance() };
   `);
   eq(guideOffToggle.setting, false, 'P19：關掉之後設定記著了');
@@ -21477,19 +21748,19 @@ async function main() {
   const guideReset = await evaluate(`
     const g = window.__promptasy;
     g.settings.open();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     const box = document.querySelector('#settings [data-guides]');
     box.checked = false;
     box.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const off = { setting: g.progression.state.settings.guides, aim: g.world.guidance() };
     // 二次確認：第一下之後 render() 會換掉那顆按鈕，所以第二下要重新問一次
     document.querySelector('#settings [data-reset]').click();
     document.querySelector('#settings [data-reset]').click();
-    await new Promise((r) => setTimeout(r, 260));
+    await window.__paSettle(260);
     const checked = document.querySelector('#settings [data-guides]').checked;
     g.settings.close();
-    await new Promise((r) => setTimeout(r, 320));
+    await window.__paSettle(320);
     return { off, setting: g.progression.state.settings.guides, checked };
   `);
   eq(guideReset.off.setting, false, 'P19：先把螢火指路關掉（存檔記著關）');
@@ -21918,7 +22189,7 @@ async function main() {
     const before = b.nearAmt;
     const openPanels = [g.promptConsole.isOpen, g.codex.isOpen, g.settings.isOpen].filter(Boolean).length;
     const overlays = [...document.querySelectorAll('.overlay')].filter((o) => !o.hidden && o.getClientRects().length).length;
-    await new Promise((r) => setTimeout(r, 700));
+    await window.__paSettle(700);
     return {
       openPanels,
       overlays,
@@ -21940,7 +22211,7 @@ async function main() {
 
   /* --- ④ 按 `E`：什麼都不會發生（它不在仲裁裡） -------------------- */
   await key('KeyE', 'e', { vk: 69 });
-  await sleep(400);
+  await settle(400);
   const archAfterE = await evaluate(`
     const g = window.__promptasy;
     const el = document.querySelector('[data-aside]');
@@ -21980,11 +22251,11 @@ async function main() {
     const g = window.__promptasy;
     g.promptConsole.close(); g.settings.close();
     g.codex.open();
-    await new Promise((r) => setTimeout(r, 360));
+    await window.__paSettle(360);
     const divisions = [...document.querySelectorAll('#codex .division .meta-rule .zh')].map((n) => n.textContent.trim());
     const rows = [...document.querySelectorAll('#codex .archive .tech')];
     rows.forEach((li) => { const d = li.querySelector('details'); if (d) d.open = true; });
-    await new Promise((r) => setTimeout(r, 220));
+    await window.__paSettle(220);
     const srcs = [...document.querySelectorAll('#codex .archive__srcs a')].map((a) => a.href);
     const bodies = [...document.querySelectorAll('#codex .archive__why')].map((p) => p.textContent.trim());
     const out = {
@@ -22047,6 +22318,7 @@ async function main() {
           out.text = el.textContent;
           return out;
         }
+        /* P25b：留著固定等待 —— 這是這個重試迴圈自己的取樣間隔（找到就 return）。 */
         await new Promise((r) => setTimeout(r, 40));
       }
     }
@@ -23060,7 +23332,7 @@ async function main() {
     );
     await reloadPage('P25a 重新載入（reduced-motion）');
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(400);
+    await settle(400);
 
     const calm = await evaluate(`
       const g = window.__promptasy;
@@ -23069,7 +23341,7 @@ async function main() {
       const ch = g.player.character;
       // 站到石座旁邊：遠處的石座走的是合批那條路（本來就不更新），量它會空過
       g.player.teleport(m.position.x + 4, m.position.z + 4);
-      await new Promise((r) => setTimeout(r, 500));
+      await window.__paSettle(500);
       const moved = () => [
         m.shard.rotation.y, m.shard.rotation.x, m.shard.position.y,
         m.ring.rotation.z, m.beacon.rotation.y, m.halo.rotation.z,
@@ -23134,7 +23406,7 @@ async function main() {
         bodyMoved = Math.max(bodyMoved, Math.abs(ch.joints.body.position.y));
       }
       window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
-      await new Promise((r) => setTimeout(r, 260));
+      await window.__paSettle(260);
       return { moved, bodyMoved };
     `);
     ok(walk.moved > 0.05, 'P25a：reduce 之下走路的腿照樣擺', String(walk.moved));
@@ -23145,17 +23417,17 @@ async function main() {
       const g = window.__promptasy;
       const c = g.content.challenges[0];
       g.promptConsole.open(c);
-      await new Promise((r) => setTimeout(r, 400));
+      await window.__paSettle(400);
       if (g.promptConsole.mode !== 'free') g.promptConsole.setMode('free');
       g.promptConsole.goAct(3, { force: true });
-      await new Promise((r) => setTimeout(r, 200));
+      await window.__paSettle(200);
       document.querySelector('.prompt-input').value = c.sample;
       document.querySelector('#prompt-console [data-submit]').click();
-      await new Promise((r) => setTimeout(r, 600));
+      await window.__paSettle(600);
       const grade = document.querySelector('#prompt-console .grade__mark');
       const out = { grade: grade ? grade.textContent.trim() : '', best: g.progression.bestGrade(c.id) };
       g.promptConsole.close();
-      await new Promise((r) => setTimeout(r, 300));
+      await window.__paSettle(300);
       return out;
     `);
     ok(/^[SABC]$/.test(pass.grade), 'P25a：reduce 之下照樣過得了一關（拿得到評價）', pass.grade);
@@ -23206,13 +23478,13 @@ async function main() {
       last.focus();
       const atLast = document.activeElement === last;
       tab(false);
-      await new Promise((r) => setTimeout(r, 120));
+      await window.__paSettle(120);
       const wrapped = document.activeElement === items[0];
       const insideAfterTab = inside();
       // 反方向：站在第一顆按 Shift+Tab
       items[0].focus();
       tab(true);
-      await new Promise((r) => setTimeout(r, 120));
+      await window.__paSettle(120);
       const insideAfterShiftTab = inside();
       const stillInside = insideAfterTab && insideAfterShiftTab;
       const lastTag = last.tagName.toLowerCase();
@@ -23221,7 +23493,7 @@ async function main() {
       const labelledby = overlayEl.getAttribute('aria-labelledby');
       const titleId = panel.querySelector('.panel__title')?.id || '';
       g.codex.close();
-      await new Promise((r) => setTimeout(r, 300));
+      await window.__paSettle(300);
       return { startedInside, count: items.length, unfocusable, unfocusableTags, atLast, wrapped, stillInside, insideAfterTab, insideAfterShiftTab, lastTag, role, modal, labelledby, titleId };
     `);
     eq(focus.startedInside, true, 'P25a：面板一打開焦點就落在面板裡');
@@ -23246,12 +23518,12 @@ async function main() {
     await cdp.send('Emulation.setEmulatedMedia', { features: [] }, sessionId);
     await reloadPage('P25a 重新載入（回到一般動態）');
     await key('Enter', 'Enter', { vk: 13 });
-    await sleep(400);
+    await settle(400);
     const busy = await evaluate(`
       const g = window.__promptasy;
       const m = g.world.markers[0];
       g.player.teleport(m.position.x + 4, m.position.z + 4);
-      await new Promise((r) => setTimeout(r, 500));
+      await window.__paSettle(500);
       const first = [m.shard.rotation.y, m.ring.rotation.z, g.world.mist.children[0].rotation.z];
       let worst = 0;
       const until = performance.now() + 8000;
@@ -23267,7 +23539,7 @@ async function main() {
     ok(busy.worst > 0.01, '（對照）P25a：一般模式那幾件真的會動（上面那條零位移不是空過）', String(busy.worst));
   }
 
-  await sleep(600);
+  await settle(600);
   const realErrors = consoleErrors.filter((e) => !/favicon|DevTools|Autofill/i.test(e));
   eq(realErrors.length, 0, '全程零 console error', realErrors.slice(0, 6).join('\n      '));
 

@@ -61,14 +61,14 @@
 <div class="wrap">
 
 <h1><span class="en">PROMPTASY · DEVELOPMENT LOG</span>Goal / Prompt 開發歷程</h1>
-<p class="sub">從空 repo 到 v1.1 上線,站長下過的每一個 goal 與實質 prompt,以及各自達成的效果。</p>
+<p class="sub">從空 repo 到 v1.1 上線、再到 v1.2「濁靈之夜」,站長下過的每一個 goal 與實質 prompt,以及各自達成的效果。</p>
 
 <div class="stats">
-  <div class="stat"><b>2026-07-25 → 08-05</b><span>開發期間(11 天)</span></div>
-  <div class="stat"><b>9</b><span>/goal 長程目標</span></div>
+  <div class="stat"><b>2026-07-25 → 09-08</b><span>開發期間(v1.0 → v1.2)</span></div>
+  <div class="stat"><b>10</b><span>/goal 長程目標</span></div>
   <div class="stat"><b>60+</b><span>實質指令與回饋</span></div>
-  <div class="stat"><b>34 + 11</b><span>v1 Phases + v2 Phases(0, A–J)</span></div>
-  <div class="stat"><b>12 區 / 142 關 / 130 技能</b><span>最終規模(v1.1)</span></div>
+  <div class="stat"><b>34 + 11 + 25</b><span>v1 / v2 / v1.2 Phases</span></div>
+  <div class="stat"><b>12 區 / 142 關 / 130 技能</b><span>規模(v1.1 起未變)</span></div>
 </div>
 
 <p class="note">
@@ -399,9 +399,54 @@ Do not use markdown in your response.
 <td class="fx">本表(docs/history/prompts.html);CLAUDE.md 分層——harness 留主檔、變更紀錄搬到 docs/history/CHANGELOG.md、文件地圖入檔,AGENTS.md 同步;MIT LICENSE 落地、README 徽章與授權段更新。</td></tr>
 </table></div>
 
+<!-- ============ v1.2「濁靈之夜」 ============ -->
+<h2>Ⅶ · v1.2「濁靈之夜」<small>2026-08-17 ~ 09-08 · 25 個 phase / 5 個里程碑</small></h2>
+<div class="tblwrap"><table>
+<tr><th>時間</th><th>類型</th><th>你說了什麼</th><th>達成效果</th></tr>
+
+<tr class="goal"><td class="when">08-17</td><td><span class="tag g">GOAL</span></td>
+<td class="q"><span class="quote">依 docs/design/gameplay-roadmap.md 推進 Promptasy v1.2「濁靈之夜」,連續模式:一個 phase 一個 phase 做、做到里程碑閘門才停</span>
+<details><summary>展開全文</summary><pre>/goal 依 docs/design/gameplay-roadmap.md 推進 Promptasy v1.2「濁靈之夜」，連續模式：一個 phase 一個 phase 做、做到里程碑閘門才停，流程照該檔 §5
+（＝CLAUDE.md／AGENTS.md Harness ＋ docs/history/ task_plan／findings／progress 三件組的 v1.2 版）。
+先 git status——來源不明或非本 phase 的未提交／已暫存改動不得 stash／reset／納入 commit，與目標重疊就停下請示；
+roadmap 有 [~] 就續做，否則取第一個 [ ] 並標 [~]；phase 依賴 findings.md「v1.2 裁決」找不到就停；
+遇到「▶ 閘門」且 findings.md 閘門紀錄無站長「過」就寫閘門摘要並停止；否則連續模式：一個 phase 收尾後直接接下一個 [ ]，做到閘門為止。讀 CLAUDE.md 護欄與 Harness、CHANGELOG 末幾條、
+task_plan.md（v1.2 章節＋§8 錯誤紀錄）、findings.md、WORLD.md 相關節；把 phase 章節寫進 task_plan.md 並 /codex consult；
+做不完就先在 roadmap 拆 a/b 只做 a。一次只讓一個 subagent 寫碼；新測試先紅後綠；禁區：curriculum.json、
+challenges.json／flows.json（除非章節明列）、vite.config.js、dev server 5175、CLAUDE.md。
+測試：至少 rubric／playtest／build，動到 src／data／存檔／互動就跑完整 e2e；全綠、console error 0；改中文字串跑 npm run fonts；
+測試失敗先定位修復，已知 flaky 只重跑一次，禁止刪除或放寬斷言；錯誤記 task_plan §8、同一錯誤不原樣重試、三種方法仍卡才報阻塞。
+/codex review 審 diff 並修 P1；護欄與 roadmap 優先於 Codex。只有護欄衝突、要動 curriculum.json、需要新資產授權、三種方法仍卡住才停下請示；其他歧義自己選最保守不倒退的做法並記進 findings.md 繼續做。
+收尾：WORLD.md 檢查表、progress.md／findings.md、CHANGELOG 一行（含預算實測數字＋下一步）、roadmap 打 [x]、
+git diff --cached --stat 確認只含本 phase、commit、push dev（release gate 才合 main）。
+鐵則：威脅不懲罰且進度只累積、沒有會走動的 NPC、一律夜景沒有日出、E 唯一互動鍵、內容正確附出處、核心可離線、
+存檔純加法可重置、每次可執行、不倒退。做到閘門才停。</pre></details></td>
+<td class="fx"><span class="ph">v1.2 P01–P25b</span><br>
+<b>一整夜的內容</b>:<b>濁靈</b>(沒說清楚的請求結成的霧;安撫＝代它把話說完,命中一條檢查就剝一層殼——20 隻,其中 12 隻大濁靈)、<b>一夜的時辰</b>(入夜→深夜→月落→星最亮之夜,進度直接寫在天空上,沒有黎明)、<b>十二片土地的色彩腳本與專屬空氣</b>(地面兩色基底＋區界 6 公尺漸變、一區一種粒子)、<b>殘頁與回信碑</b>(24 頁抄寫人的字跡)、<b>四宿星圖</b>、<b>石座演出</b>(rubric 命中什麼,石座就演什麼)、<b>中觀層</b>(遮擋帶＋母題,12 片土地每片都有)、<b>跳躍與高台</b>(可站立表面 <code>solidTop</code>、11 座高台、第一道橋缺口)、<b>12 位守夜人</b>與<b>護欄崗守門者</b>、<b>南弧吊板捷徑</b>、<b>傳聞頁與回聲重演</b>、<b>檔案廊 24 則 AI 小知識</b>、<b>中點揭示與鏡碑第二層</b>、<b>終局</b>(回聲把你序章打的第一句 prompt 還給你,你重寫它,母碑在斷環中央重新立起來)、<b>進程外顯</b>(等級穿在角色披肩上,一格＝一級)與<b>今日三事</b>(提議,不是任務:沒有期限、沒有連續天數、可關掉)。<br>
+四條鐵則全程沒破:威脅不懲罰、進度只累積;世界裡沒有會走動的 NPC;一律夜景、沒有日出;<code>E</code> 是唯一互動鍵。<b>142 關 / 12 區 / 130 技能的規模一格都沒動</b>——v1.2 加的是世界與玩法,不是內容量。</td></tr>
+
+<tr><td class="when">閘門 A 之後</td><td><span class="tag p">回饋(摘述)</span></td>
+<td class="q"><span class="quote">顏色我看不出來、路上的物件要多一點</span>;另一則:濁靈也要「用選的、不要打字」</td>
+<td class="fx"><span class="ph">P06b / P06c</span><br>查證下來屬實而且更嚴重:課程 v2 之後新加的<b>七片土地反應物 0、器物 0</b>(原本五區每區 8–12 件)——「顏色看不出來」的真因是路上沒有東西可以顯色。拿節奏稽核當靶,把 14 種現成的東西補進去,micro 死區歸零;濁靈補上選擇式作答(一段對一層殼,正解串起來就是那一隻的範例解)。</td></tr>
+
+<tr><td class="when">08-31</td><td><span class="tag p">回饋(摘述)</span></td>
+<td class="q"><span class="quote">畫面變卡了</span>＋<span class="quote">把整個地圖展開一點、大一點,現在物件多了,讓每個東西彼此不要太擠</span></td>
+<td class="fx"><span class="ph">P22b / P22c</span><br>量下來的真因是<b>這個專案一直在守錯的預算</b>:三角形/光源/碰撞體一路都在框內,可是一格之內 draw call ＋16%、加色混合透明片 ＋28%、材質 ＋25%,<b>而沒有一條斷言在數它們</b>。新增 <code>npm run audit:perf</code> 逐值進契約,三件優化把 draw call <b>4,144 → 3,033</b>、加色 <b>1,164 → 725</b>、材質 <b>2,118 → 1,422</b>,<b>三角形一個都沒動</b>。地圖則<b>座標乘 1.3、尺寸不乘</b>(面積 ×1.69、密度 ÷1.69):齒輪工坊原本 742 個格點排不出一座高台,放大後擺得下,四支擺放稽核全綠。</td></tr>
+
+<tr><td class="when">09-04</td><td><span class="tag p">裁決(摘述)</span></td>
+<td class="q">行動裝置操作這一輪不做</td>
+<td class="fx">規格沒有丟掉,連同驗收條件留在 <a href="https://github.com/romanticamaj/promptasy/issues/4">GitHub #4</a>:那一格要新的輸入抽象層、動態搖桿、鏡頭區、鍵盤高度處理與兩種實機驗證,一格就等於里程碑 E 其餘全部加起來。誠實記一筆:<b>v1.2 仍然是鍵鼠版。</b></td></tr>
+
+<tr><td class="when">09-08</td><td><span class="tag p">指令</span></td>
+<td class="q">v1.2 收尾:e2e flaky 清零、低階機效能、對外數字同步</td>
+<td class="fx"><span class="ph">P25b</span><br><b>e2e 裡「等牆鐘」的等待全面改掉</b>(node 側 289 處、頁面側 508 處):等的改成<b>條件成立</b>,或者「牆鐘 <i>和</i> N 個真的畫出來的影格一起等」——這台機器閒著時一幀 174 毫秒、忙起來 372–481 毫秒,<code>sleep(800)</code> 連兩幀都排不到,那正是先前三輪失敗集合互不重疊(＝沒有一條是真迴歸)的原因。刻意留著的那些逐一在旁邊寫明理由(幾乎都是輪詢迴圈自己的取樣間隔)。連跑三輪 e2e,4,930 項全過、零 console error、零重跑。對外數字全部重新量過再寫,沒有一個是引用來的。</td></tr>
+</table></div>
+
 <footer>
-  Promptasy · 開發歷程對照表 · 產出於 2026-08-05。
-  原文皆逐字取自 session transcript;標「摘述」者原文佚失於 context 壓縮,依當時摘要重建。
+  Promptasy · 開發歷程對照表 · 產出於 2026-08-05,v1.2 那一節補於 2026-09-08。
+  原文皆逐字取自 session transcript;標「摘述」者原文佚失於 context 壓縮,依當時摘要重建 ——
+  v1.2 那一節的三則回饋/裁決同樣標「摘述」:它們的原句留在 <a href="../design/gameplay-roadmap.md">gameplay-roadmap.md</a>
+  與 CHANGELOG 的當期紀錄裡,不是逐字 transcript。
   完整技術紀錄見 <a href="./CHANGELOG.md">CHANGELOG.md</a>。
 </footer>
 
