@@ -2201,3 +2201,31 @@ roadmap 的 P25b 本來就寫著「e2e flaky 清零」——那一格該做的�
 Exit criteria：
 - [ ] 等級看得見（穿在身上）、今日三事是提議且可關、成就定義對齊 P22。
 - [ ] 光源／碰撞／三角不變；存檔純加法可 reset；rubric／playtest／build／e2e 全綠、console error 0。
+
+### P25b0 前置：判準已經量出來了（實作時直接用，不必重新發明）
+
+`props.js` 的 `buildVignettes()`：
+```js
+holder.position.set(v.at[0], terrainHeight(v.at[0], v.at[1]), v.at[1]);   // 整組落在「組中心」的地面
+prop.position.set(offset[0], offset[1] || 0, offset[2]);                  // 組內只有局部位移
+```
+所以 **`offset[1]` 就是「刻意的垂直位移」**——這給了一條乾淨的判準：
+
+| | 件數 | 其中「腳下的地」與「組中心的地」差 > 0.25 m |
+|---|---|---|
+| `offset[1] === 0`（**應該貼地**） | **152** | **44 件**（最大 1.12 m） |
+| `offset[1] !== 0`（刻意抬高／疊著） | 8 | 1 件（0.66 m） |
+
+**修法**：只動 `offset[1] === 0` 的那批 —— 把它的 y 補上
+`terrainHeight(該件的世界 XZ) − terrainHeight(組中心)`。
+`offset[1] !== 0` 的**一件都不要碰**（那 8 件是刻意抬高或疊在別的東西上的）。
+
+最歪的幾件：`tool-yard` 的 crates 埋 1.12／lamp 浮 1.12／cart 浮 0.87／tools 埋 0.77、
+`example-pair` 的 column 埋 0.95、`overflow-trough` 的 column 浮 0.92、
+`untouched-machine` 的 column 埋 0.88／signpost 埋 0.85、`stair-to-nowhere` 的 column 埋 0.82。
+
+**注意**：`tool-yard` 一組就中了四件 —— 那一組跨的地形起伏最大，修完要**單獨看一眼構圖**
+（四件各自貼地之後，原本「擺成一堆」的關係可能散掉）。
+
+**還要守的**：修完加一條稽核（現在沒有任何斷言在管這件事）；
+「靠著／斜倚」的姿態（`rotY` 不為 0 又貼著別件的）硬貼地可能會穿模，逐件看過再說。
