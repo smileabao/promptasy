@@ -787,7 +787,8 @@ export function buildHandle(spec, kit, terrainHeight) {
     innerUpdate(dt, t, kinetic, this.nearAmt);
     const base = this.near ? 0.4 : this.used ? 0.05 : 0.11;
     this.haloMat.opacity = base + Math.sin(t * 1.7 + x * 0.2 + z * 0.11) * 0.025;
-    this.halo.rotation.z = t * (this.near ? 0.34 : 0.08);
+    // v1.2 · P25a：光環的「轉」吃 kinetic（reduce 之下停住）；亮度那一行照舊
+    this.halo.rotation.z = t * (this.near ? 0.34 : 0.08) * kinetic;
   };
 
   return built;

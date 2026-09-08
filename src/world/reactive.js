@@ -885,9 +885,10 @@ export function buildSecret(spec, kit, terrainHeight, lift = 0) {
       this.found = Boolean(v);
     },
     update(dt, t, kinetic) {
-      if (built.spin) built.spin.rotation.z = t * 0.08;
+      // v1.2 · P25a：自轉吃 kinetic（reduce 之下停住；亮度與被找到的回應照舊）
+      if (built.spin) built.spin.rotation.z = t * 0.08 * kinetic;
       if (built.stars) {
-        if (built.stars.isPoints) built.stars.rotation.y = t * 0.045;
+        if (built.stars.isPoints) built.stars.rotation.y = t * 0.045 * kinetic;
         /*
          * 起伏要繞著**它自己被擺在哪裡**擺，不是繞著一個寫死的 0.62 ——
          * 那會把掛在柱子頂端的風片（y=1.9）整組拉到柱腳、

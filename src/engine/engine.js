@@ -382,6 +382,16 @@ const GradeShader = {
 
 export function createEngine({ container, quality = 'high' }) {
   const highStart = quality === 'high';
+  /*
+   * v1.2 · P25a：`prefers-reduced-motion` 之下極光那幾道不再繞著天空漂。
+   * 停掉的只有「漂」—— 顏色、濃淡、星星的明滅、`pulse()` 那一下亮度湧升全部照舊
+   * （WORLD.md §2.4：拿掉的是動，不是回應；天空仍然是進度的外顯）。
+   * 這裡自己問一次 matchMedia（同 `prompt/palm.js`）：引擎比 main.js 那個旗標早建立。
+   */
+  const auroraDrift =
+    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+      ? 0
+      : 1;
 
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -589,7 +599,7 @@ export function createEngine({ container, quality = 'high' }) {
     for (const fn of updaters) fn(dt, t);
 
     stars.material.uniforms.uTime.value = t;
-    for (const band of aurora.children) band.rotation.y += band.userData.drift * dt;
+    for (const band of aurora.children) band.rotation.y += band.userData.drift * dt * auroraDrift;
     swell = Math.max(0, swell - dt * 0.85);
     applyMood(dt);
 
@@ -664,6 +674,11 @@ export function createEngine({ container, quality = 'high' }) {
     /** 一瞬間的光湧（跨區、解鎖、精通時用）。 */
     pulse(amount = 0.6) {
       swell = Math.max(swell, Math.min(1.2, amount));
+    },
+
+    /** v1.2 · P25a：極光現在漂不漂（1 ＝ 漂、0 ＝ reduce 之下停住）。測試會看。 */
+    get auroraDrift() {
+      return auroraDrift;
     },
 
     /** 目前的畫質。 */

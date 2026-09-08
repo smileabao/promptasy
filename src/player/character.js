@@ -108,8 +108,15 @@ const mix = (pair, k) => pair[0] + (pair[1] - pair[0]) * k;
  * @returns {{root: THREE.Group, joints: object, lanternLight: THREE.PointLight,
  *            update: Function, celebrate: Function, dispose: Function}}
  */
-export function createCharacter({ quality = 'high' } = {}) {
+export function createCharacter({ quality = 'high', reducedMotion = false } = {}) {
   const shadow = quality === 'high';
+  /*
+   * v1.2 · P25a：`prefers-reduced-motion` 只關掉「站著也一直在動」的那一層 ——
+   * 呼吸、重心左右移、圍巾與提燈的閒置擺盪。走路 / 奔跑 / 慶祝 / 坐下都不受影響
+   * （那些是玩家自己按出來的動作，關掉會少掉資訊），提燈與光點的亮度也照舊
+   * （WORLD.md §2.4：拿掉的是動，不是回應）。
+   */
+  const calm = reducedMotion ? 0 : 1;
   const P = CHARACTER_PALETTE;
 
   const materials = [];
@@ -492,8 +499,8 @@ export function createCharacter({ quality = 'high' } = {}) {
     const bob = Math.abs(Math.sin(p)) * mix(GAIT.bob, run) * move;
     // 吸氣比吐氣慢 → 把正弦丟進 pow 做不對稱化
     const raw = Math.sin(t * BREATH_OMEGA) * 0.5 + 0.5;
-    const breath = (Math.pow(raw, 1.3) * 2 - 1) * idle;
-    const shift = Math.sin(t * IDLE_SHIFT_OMEGA) * idle;
+    const breath = (Math.pow(raw, 1.3) * 2 - 1) * idle * calm;
+    const shift = Math.sin(t * IDLE_SHIFT_OMEGA) * idle * calm;
 
     body.position.y = bob + breath * 0.02;
     body.rotation.x = mix(GAIT.lean, run) * move;
@@ -504,7 +511,8 @@ export function createCharacter({ quality = 'high' } = {}) {
     torso.rotation.y = -Math.sin(p) * mix(GAIT.chestTwist, run) * move;
     torso.rotation.x = -cheer * 0.16;
     // 呼吸的階梯延遲：胸口 → 肩膀 → 頭，各慢 0.15 秒
-    const breathLag = (Math.pow(Math.sin((t - 0.15) * BREATH_OMEGA) * 0.5 + 0.5, 1.3) * 2 - 1) * idle;
+    const breathLag =
+      (Math.pow(Math.sin((t - 0.15) * BREATH_OMEGA) * 0.5 + 0.5, 1.3) * 2 - 1) * idle * calm;
     chest.scale.set(1 + breath * 0.02, 1 + breath * 0.03, 1 + breath * 0.02);
     armL.shoulder.position.y = 0.46 + breathLag * 0.008;
     armR.shoulder.position.y = 0.46 + breathLag * 0.008;
@@ -517,7 +525,7 @@ export function createCharacter({ quality = 'high' } = {}) {
 
     /* --- 布料：圍巾尾巴與背包跟著慣性甩 --- */
     scarfTail.rotation.x = -0.12 - move * 0.5 - Math.sin(p * 2 + 0.7) * 0.14 * move - breath * 0.04;
-    scarfTail.rotation.z = Math.sin(t * 1.3 + p * 0.5) * (0.08 + move * 0.12);
+    scarfTail.rotation.z = Math.sin(t * 1.3 + p * 0.5) * (0.08 * calm + move * 0.12);
     satchel.rotation.x = Math.sin(p + 0.9) * 0.13 * move;
 
     /* --- 等級光點：平時慢慢呼吸，多一格或過關那一下整圈亮起來 --- */
@@ -527,7 +535,7 @@ export function createCharacter({ quality = 'high' } = {}) {
 
     /* --- 提燈：走路時晃、站著時慢慢擺；燈光呼吸 --- */
     lanternPivot.rotation.x = -arms[1].shoulder.rotation.x * 0.75 + Math.sin(p + 0.4) * 0.12 * move;
-    lanternPivot.rotation.z = Math.sin(t * 1.1 + p * 0.5) * (0.1 + move * 0.16);
+    lanternPivot.rotation.z = Math.sin(t * 1.1 + p * 0.5) * (0.1 * calm + move * 0.16);
     lanternLight.intensity = 4.8 + Math.sin(t * 3.1) * 0.6 + move * 1.1 + cheer * 2.4;
 
     /* --- 坐姿：疊在最上面，把既有的姿勢往「坐在凳子上」推 --- */

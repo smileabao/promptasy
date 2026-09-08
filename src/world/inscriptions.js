@@ -183,10 +183,11 @@ export function buildInscription(spec, kit, terrainHeight) {
       this.found = Boolean(v);
       if (this.found) carve.color.set(PALETTE.warm);
     },
-    update(dt, t) {
+    update(dt, t, kinetic = 1) {
       const base = this.near ? 0.5 : this.found ? 0.09 : 0.2;
       carve.opacity = base + Math.sin(t * 1.9 + x * 0.3 + z * 0.17) * 0.045;
-      mark.rotation.z = t * (this.near ? 0.5 : 0.14);
+      // v1.2 · P25a：轉吃 kinetic（reduce 之下停住）；上面那行「亮度呼吸」是回應，照舊
+      mark.rotation.z = t * (this.near ? 0.5 : 0.14) * kinetic;
     },
   };
 }

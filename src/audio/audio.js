@@ -657,7 +657,7 @@ export const BGM_TRACKS = Object.freeze({
   wards: Object.freeze({
     region: 'wards',
     file: 'bgm_wards.m4a',
-    peak: -3.7,
+    peak: -3.2,
     title: 'The Unclosing Door',
     mode: 'A Phrygian',
     lufs: -13.2,

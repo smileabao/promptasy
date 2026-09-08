@@ -85,8 +85,14 @@ ffmpeg -i <delivery>.wav -vn -c:a aac -b:a 128k public/audio/<file>.m4a
 | `bgm_refinery.m4a` | v2（raw） | −15.1 | −3.7 | −4.9 | 0.5689 | −8.6 |
 | `bgm_sight.m4a` | v2（raw） | −14.0 | −3.5 | −6.0 | 0.5012 | −9.5 |
 | `bgm_divergence.m4a` | v2（raw） | −14.1 | −4.0 | −5.9 | 0.5070 | −9.9 |
+| `bgm_wards.m4a` | v2（raw） | −13.2 | −3.2 | −6.8 | 0.4571 | −10.0 |
 
 v1 六首量出來剛好是 −20.0 / −20.1 → gain ≈ 1.0，證實它們當年就是烘在 −20 的（校準沒有動到它們）。
+
+> **護欄崗那一首（第 13 支）是 v1.2 · P25a 才補進這張表的。** 它在 issue #3 之後才交付，
+> 當時只寫進 `audio.js` 沒有寫進這裡 —— 於是資料層那個 true peak（−3.7）沒有第二個地方可以對，
+> 一直到 P25a 逐檔重量才發現它其實是 **−3.2**（integrated LUFS −13.2 是對的，所以 gain 沒有變）。
+> 現在 `npm run test:rubric` 會把這張表與 `audio.js` 逐檔逐值對一次，同一種漏不會再發生。
 
 ## 音效（目標 −19 LUFS ＋ trim）
 

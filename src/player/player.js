@@ -131,7 +131,8 @@ export function createPlayer({
   group.name = 'player';
 
   // 旅人本體：有骨節的人形角色（見 character.js）。走路 / 呼吸 / 慶祝都在那一層算。
-  const character = createCharacter({ quality });
+  // v1.2 · P25a：reduce 之下角色只停掉「站著也一直在動」的閒置擺盪（見 character.js）
+  const character = createCharacter({ quality, reducedMotion });
   group.add(character.root);
 
   // 腳下的軟陰影（沒開 shadow map 時也有落地感）

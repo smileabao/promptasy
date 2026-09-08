@@ -282,7 +282,7 @@ promptasy/
 - **Subagent 分工**：大型實作交給 subagent（一個 phase 一個 agent、附完整 brief：現狀、目標、驗證要求、禁區）；研究類（抓文件）可多個並行，但**寫程式的不要並行**（會互踩檔案）；並行 agent 一律指定「不要碰 CLAUDE.md」，changelog 由 orchestrator 統一補。
 - **中文字串 → `npm run fonts`**：CJK 子集是掃描全部 `src/**` 與 `src/data/*.json` 的語料切出來的；漏跑會被指紋測試攔下。
 - **內容正確性（護欄 2）是紅線**：`curriculum.json` 一個位元組都不能動；遊戲自撰的翻譯/教學一律放獨立的 `authored: "game"` 資料層，並附真實官方連結；官方文件過時要用「時代註記」層標注，不改原文。
-- **音檔後製慣例**：BGM 統一 -20 LUFS、SFX 峰值 -6 dBFS、AAC(m4a) 進 `public/audio/`，授權逐檔登記 `public/LICENSE.md`；檔案缺席時合成音自動後備（離線護欄）。
+- **音檔後製慣例**：配樂床 -20 LUFS、音效 -19 LUFS、套上 gain 之後的峰值上限 -3 dBFS、AAC(m4a) 進 `public/audio/`，授權逐檔登記 `public/LICENSE.md`；檔案缺席時合成音自動後備（離線護欄）。
 - **e2e 的埠**：測試 harness 用自己的 port（5198/5199/9333…），跑完殺掉整個 process group；殘留的無頭 Chrome 會佔 CDP 埠讓下一輪測試接錯瀏覽器。
 
 ---

@@ -26666,6 +26666,314 @@ console.log('▸ 小景零件貼地（v1.2 · P25b0）');
 }
 
 
+/* ================================================================== *
+ * 打磨：響度文件 ＋ 逐檔對表 ＋ reduced-motion 逐項（v1.2 · P25a）
+ *
+ * 這一節守三件事：
+ *   ① **文件與實作講同一組數字**（`CLAUDE.md` 曾經寫著一組舊的響度）。
+ *   ② **資料層記的量測值有第二個地方可以對**（`audio-loudness.md` 那兩張表）——
+ *      護欄崗那一首當年只寫進 `audio.js` 沒有寫進表裡，於是它的 true peak
+ *      錯了 0.5 dB 也沒有人會發現。現在兩邊逐檔逐值比。
+ *   ③ **`prefers-reduced-motion` 之下該停的停、該留的留**：位移／自轉停住，
+ *      亮度／顏色／不透明度照舊（那是資訊，關掉就少一格）。
+ * ================================================================== */
+console.log('▸ 打磨：響度文件 ＋ reduced-motion（v1.2 · P25a）');
+{
+  const dash = (s) => s.replace(/−/g, '-'); // 文件用的是數學減號，程式用的是 ASCII
+
+  /* --- ① 兩份文件與實作講同一組數字 --------------------------------- */
+  {
+    const claudeMd = dash(readFileSync(resolve(root, 'CLAUDE.md'), 'utf8'));
+    const worldMd = dash(readFileSync(resolve(root, 'WORLD.md'), 'utf8'));
+    const { MUSIC_TARGET_LUFS, SFX_TARGET_LUFS, SFX_PEAK_CEILING } = Audio;
+
+    const mixLine = claudeMd.split('\n').find((l) => l.includes('音檔後製慣例')) || '';
+    ok(Boolean(mixLine), 'CLAUDE.md 寫得出音檔後製慣例');
+    ok(
+      mixLine.includes(`${MUSIC_TARGET_LUFS} LUFS`),
+      `CLAUDE.md 的配樂床 ＝ MUSIC_TARGET_LUFS（${MUSIC_TARGET_LUFS}）`,
+      mixLine
+    );
+    ok(
+      mixLine.includes(`${SFX_TARGET_LUFS} LUFS`),
+      `CLAUDE.md 的音效目標 ＝ SFX_TARGET_LUFS（${SFX_TARGET_LUFS}）`,
+      mixLine
+    );
+    ok(
+      mixLine.includes(`${SFX_PEAK_CEILING} dBFS`),
+      `CLAUDE.md 的峰值上限 ＝ SFX_PEAK_CEILING（${SFX_PEAK_CEILING}）`,
+      mixLine
+    );
+    // 舊的那一句寫「SFX 峰值 -6 dBFS」—— 實作從來不是那個數字
+    ok(!/SFX 峰值/.test(claudeMd), 'CLAUDE.md 不再有「SFX 峰值」那個舊說法');
+    ok(!/-6 dBFS/.test(claudeMd), 'CLAUDE.md 不再出現 -6 dBFS');
+
+    const s65 = worldMd.slice(worldMd.indexOf('### 6.5'), worldMd.indexOf('## 七、'));
+    ok(s65.length > 500, '（前提）切得出 WORLD.md §6.5');
+    ok(s65.includes(`${MUSIC_TARGET_LUFS} LUFS`), 'WORLD.md §6.5 的配樂床與常數相同');
+    ok(s65.includes(`${SFX_TARGET_LUFS} LUFS`), 'WORLD.md §6.5 的音效目標與常數相同');
+    ok(s65.includes(`${SFX_PEAK_CEILING} dBFS`), 'WORLD.md §6.5 的峰值上限與常數相同');
+    // 兩份文件不准各講各的
+    for (const num of [`${MUSIC_TARGET_LUFS} LUFS`, `${SFX_TARGET_LUFS} LUFS`, `${SFX_PEAK_CEILING} dBFS`]) {
+      ok(mixLine.includes(num) === s65.includes(num), `CLAUDE.md 與 WORLD.md 都寫得出 ${num}`);
+    }
+
+    /* 音檔數量：§6.5 那一行與 manifest 逐值相同（護欄崗補齊之後那行漏改了一次） */
+    const nBgm = AUDIO_MANIFEST.bgm.length;
+    const nSfx = AUDIO_MANIFEST.sfx.length;
+    ok(s65.includes(`${nBgm} 支配樂`), `WORLD.md §6.5 的配樂支數 ＝ manifest（${nBgm}）`, s65.slice(0, 160));
+    ok(s65.includes(`${nSfx} 支音效`), `WORLD.md §6.5 的音效支數 ＝ manifest（${nSfx}）`);
+    eq(Audio.SYNTH_ONLY_REGIONS.length, 0, '（前提）目前沒有任何一區只有合成 pad');
+    ok(
+      /SYNTH_ONLY_REGIONS = \[\]/.test(s65),
+      'WORLD.md §6.5 說得出這份清單現在是空的（不再說護欄崗還沒有音檔）'
+    );
+    ok(
+      !/這一區也沒有配樂音檔/.test(worldMd),
+      'WORLD.md 不再有「這一區也沒有配樂音檔」（十二區全部補齊了）'
+    );
+  }
+
+  /* --- ② `audio-loudness.md` 的兩張表 ↔ `audio.js` 的資料層，逐檔逐值 --- */
+  {
+    const md = dash(readFileSync(resolve(root, 'docs/design/audio-loudness.md'), 'utf8'));
+    const rows = md
+      .split('\n')
+      .filter((l) => l.trim().startsWith('|'))
+      .map((l) => l.split('|').slice(1, -1).map((c) => c.trim().replace(/`/g, '')));
+    const docBgm = new Map();
+    const docSfx = new Map();
+    for (const r of rows) {
+      // 配樂表：檔名 | 交付狀態 | I | true peak | gain dB | gain 線性 | 套上後的峰值
+      if (r.length === 7 && /^bgm_.*\.m4a$/.test(r[0])) {
+        docBgm.set(r[0], { lufs: Number(r[2]), peak: Number(r[3]), gain: Number(r[5]) });
+      }
+      // 音效表：cue | 檔名 | I | true peak | trim | 目標 | gain dB | gain 線性 | 套上後的峰值 | 上限
+      if (r.length === 10 && /^sfx_.*\.m4a$/.test(r[1])) {
+        docSfx.set(r[0].replace(/\s+/g, ''), {
+          file: r[1],
+          lufs: Number(r[2]),
+          peak: Number(r[3]),
+          trim: Number(r[4]),
+          gain: Number(r[7]),
+          clamped: /clamp/.test(r[9] || ''),
+        });
+      }
+    }
+    ok(docBgm.size > 0 && docSfx.size > 0, '（前提）解析得出 audio-loudness.md 的兩張表', `${docBgm.size} / ${docSfx.size}`);
+    eq(docBgm.size, Object.keys(Audio.BGM_TRACKS).length, '配樂表的列數 ＝ BGM_TRACKS 的條目數');
+
+    for (const [id, t] of Object.entries(Audio.BGM_TRACKS)) {
+      const d = docBgm.get(t.file);
+      ok(Boolean(d), `配樂 ${id} 在 audio-loudness.md 有一列（量測值有第二個地方可以對）`, t.file);
+      if (!d) continue;
+      eq(d.lufs, t.lufs, `配樂 ${id} 的 integrated LUFS 與表相同`);
+      eq(d.peak, t.peak, `配樂 ${id} 的 true peak 與表相同`);
+      ok(Math.abs(d.gain - t.gain) < 1e-4, `配樂 ${id} 的 gain 與表相同`, `${d.gain} vs ${t.gain}`);
+    }
+
+    const codeSfx = [];
+    for (const [kind, spec] of Object.entries(Audio.SFX_FILES)) {
+      codeSfx.push([kind, spec]);
+      if (spec.layer) codeSfx.push([`${kind}/layer`, spec.layer]);
+      if (spec.alt) codeSfx.push([`${kind}/alt`, spec.alt]);
+    }
+    eq(docSfx.size, codeSfx.length, '音效表的列數 ＝ SFX_FILES（含 layer／alt）的條目數');
+    for (const [label, spec] of codeSfx) {
+      const d = docSfx.get(label);
+      ok(Boolean(d), `音效 ${label} 在 audio-loudness.md 有一列`, spec.file);
+      if (!d) continue;
+      eq(d.file, spec.file, `音效 ${label} 的檔名與表相同`);
+      eq(d.lufs, spec.lufs, `音效 ${label} 的 integrated LUFS 與表相同`);
+      eq(d.peak, spec.peak, `音效 ${label} 的 true peak 與表相同`);
+      eq(d.trim, spec.trim, `音效 ${label} 的 trim 與表相同`);
+      ok(Math.abs(d.gain - spec.gain) < 1e-4, `音效 ${label} 的 gain 與表相同`, `${d.gain} vs ${spec.gain}`);
+      eq(d.clamped, Boolean(spec.clamped), `音效 ${label} 的 clamp 標記與表相同`);
+    }
+  }
+
+  /* --- ②b public/audio/ 零孤兒（manifest 以外的檔案不會被任何一條路播到） --- */
+  {
+    const { readdirSync } = await import('node:fs');
+    const onDisk = readdirSync(resolve(root, 'public', Audio.AUDIO_DIR)).filter((f) => f.endsWith('.m4a'));
+    const listed = new Set([...AUDIO_MANIFEST.bgm, ...AUDIO_MANIFEST.sfx]);
+    const orphans = onDisk.filter((f) => !listed.has(f));
+    eq(orphans.length, 0, 'public/audio/ 沒有孤兒音檔（磁碟上每一支都掛得到一個 cue）');
+    eq(onDisk.length, listed.size, `磁碟上的音檔數 ＝ manifest（${listed.size}）`);
+  }
+
+  /* --- ③ reduced-motion：旅人自己 -------------------------------------
+   * 停的是「站著也一直在動」那一層；走路、慶祝、光點的亮度全部留著。
+   * ------------------------------------------------------------------ */
+  {
+    const { createCharacter } = await import('../src/player/character.js');
+    const normal = createCharacter({ quality: 'low' });
+    const calm = createCharacter({ quality: 'low', reducedMotion: true });
+    const idle = { dt: 0.016, t: 3.7, walkPhase: 0, speedRatio: 0, runRatio: 0, lean: 0 };
+    normal.update(idle);
+    calm.update(idle);
+
+    ok(Math.abs(normal.joints.body.position.y) > 1e-4, '（對照）平常站著會呼吸（軀幹上下）');
+    eq(calm.joints.body.position.y, 0, 'reduce：站著不呼吸（軀幹不上下）');
+    ok(Math.abs(normal.joints.hips.position.x) > 1e-4, '（對照）平常站著重心會左右移');
+    eq(calm.joints.hips.position.x, 0, 'reduce：重心不左右移');
+    ok(Math.abs(normal.joints.scarfTail.rotation.z) > 1e-4, '（對照）平常圍巾會擺');
+    eq(calm.joints.scarfTail.rotation.z, 0, 'reduce：站著圍巾不擺');
+    ok(Math.abs(normal.joints.lantern.rotation.z) > 1e-4, '（對照）平常提燈會晃');
+    eq(calm.joints.lantern.rotation.z, 0, 'reduce：站著提燈不晃');
+
+    // 走路那一層一個位元組都不准少 —— 那是玩家自己按出來的，關掉會少掉資訊
+    const walk = { dt: 0.016, t: 3.7, walkPhase: 1.1, speedRatio: 1, runRatio: 0, lean: 0 };
+    normal.update(walk);
+    calm.update(walk);
+    eq(calm.joints.hipL.rotation.x, normal.joints.hipL.rotation.x, 'reduce：走路的腿一模一樣');
+    eq(calm.joints.kneeL.rotation.x, normal.joints.kneeL.rotation.x, 'reduce：走路的膝一模一樣');
+    eq(calm.joints.body.position.y, normal.joints.body.position.y, 'reduce：走路的起伏一模一樣');
+    ok(Math.abs(calm.joints.body.position.y) > 1e-4, 'reduce：走起來真的有起伏（不是兩邊都 0 的空過）');
+
+    // 慶祝與等級光點是「回應」：reduce 之下照樣有
+    eq(calm.celebrate(), true, 'reduce：過關照樣舉手（那是回應）');
+    ok(calm.celebrating, 'reduce：慶祝真的在跑');
+    eq(calm.setLevel(4), true, 'reduce：等級照樣穿得上去');
+    eq(calm.levelPips, 4, 'reduce：光點格數 ＝ 等級');
+    ok(calm.pipFlash > 0, 'reduce：多一格照樣亮一下（亮度是回應，不是動）', String(calm.pipFlash));
+    normal.dispose?.();
+    calm.dispose?.();
+  }
+
+  /* --- ③b reduced-motion：世界的氛圍動作層 ---------------------------
+   * 逐項比「平常會動 / reduce 不動」，同一批東西的**亮度**再比一次「照樣會變」。
+   * ------------------------------------------------------------------ */
+  {
+    const { buildWorld, worldOptions: rmWorldOptions } = await import('./world-harness.mjs');
+    const rmBase = await rmWorldOptions();
+    /** 蓋一個世界、跑 21 幀（8 秒），回傳前後兩份讀數。 */
+    const sample = async (reducedMotion) => {
+      const { world, tick } = await buildWorld({ base: rmBase, reducedMotion });
+      const m = world.markers[0];
+      const tab = world.tablets[0];
+      const px = m.position.x;
+      const pz = m.position.z;
+      const moved = () => ({
+        '石座的浮片（自轉）': m.shard.rotation.y,
+        '石座的浮片（翻轉）': m.shard.rotation.x,
+        '石座的浮片（上下浮）': m.shard.position.y,
+        '石座腳下的圈': m.ring.rotation.z,
+        '石座的光柱': m.beacon.rotation.y,
+        '石座的光環': m.halo.rotation.z,
+        '刻文石板的光環': tab.halo.rotation.z,
+        '刻文石板的火星': tab.spark.position.y,
+        '起始祭壇的火心（浮）': world.shrine.ember.position.y,
+        '起始祭壇的火心（轉）': world.shrine.ember.rotation.y,
+        '起始祭壇的光環': world.shrine.ring.rotation.z,
+        '貼地霧氣（轉）': world.mist.children[0].rotation.z,
+        '貼地霧氣（起伏）': world.mist.children[0].position.y,
+        '空中的塵': world.motes.geometry.attributes.position.array[1],
+      });
+      const lit = () => ({
+        '石座腳下那圈的濃淡': m.ring.material.opacity,
+        '石座浮片的亮度': m.shardMat.emissiveIntensity,
+        '刻文石板光環的濃淡': tab.halo.material.opacity,
+        '起始祭壇的燈': world.shrine.light.intensity,
+      });
+      tick(0.016, 0, px, pz);
+      const before = { moved: moved(), lit: lit() };
+      for (let i = 0; i < 20; i += 1) tick(0.4, 0.4 * (i + 1), px, pz);
+      return { before, after: { moved: moved(), lit: lit() } };
+    };
+    const busy = await sample(false);
+    const still = await sample(true);
+    const keys = Object.keys(busy.before.moved);
+    ok(keys.length === 14, '（前提）量了 14 件會動的東西', String(keys.length));
+    for (const k of keys) {
+      const dBusy = Math.abs(busy.after.moved[k] - busy.before.moved[k]);
+      const dStill = Math.abs(still.after.moved[k] - still.before.moved[k]);
+      ok(dBusy > 1e-4, `（對照）平常 ${k} 真的會動`, String(dBusy));
+      eq(dStill, 0, `reduce：${k} 停住`);
+    }
+    for (const k of Object.keys(busy.before.lit)) {
+      const dStill = Math.abs(still.after.lit[k] - still.before.lit[k]);
+      ok(dStill > 1e-4, `reduce：${k} 照樣會變（拿掉的是動，不是回應）`, String(dStill));
+    }
+  }
+
+  /* --- ③c 沒有第二個地方可以在 node 裡量的兩處，用原始碼守 ------------- */
+  {
+    const engineSrc = readFileSync(resolve(root, 'src/engine/engine.js'), 'utf8');
+    ok(
+      /const auroraDrift =[\s\S]{0,200}prefers-reduced-motion/.test(engineSrc),
+      '引擎自己問一次 prefers-reduced-motion（極光漂不漂）'
+    );
+    ok(
+      /band\.rotation\.y \+= band\.userData\.drift \* dt \* auroraDrift;/.test(engineSrc),
+      '極光那幾道的漂吃 auroraDrift（reduce 之下停住）'
+    );
+    ok(
+      /stars\.material\.uniforms\.uTime\.value = t;/.test(engineSrc),
+      '星星的明滅**不**吃 reduce（那是亮度，不是位移）'
+    );
+    const worldSrc = readFileSync(resolve(root, 'src/world/world.js'), 'utf8');
+    ok(
+      /const kineticWorld = reducedMotion \? 0 : 1;/.test(worldSrc),
+      '世界的氛圍動作層有一個總開關（reduce → 0，不是打折）'
+    );
+    ok(
+      /arch\.rotation\.z = Math\.sin\(t \* 0\.3\) \* 0\.03 \* kinetic;/.test(worldSrc),
+      '閘門的拱在 reduce 之下不再左右晃'
+    );
+    /*
+     * 焦點鎖的清單不准收「畫不出來的東西」——收起來的 `<details>` 裡的東西
+     * `offsetParent` 還在（content-visibility），`focus()` 卻是空包彈，
+     * 於是「Tab 走到底再按一次」焦點原地不動（e2e 實測圖鑑那 446 顆的最後一顆
+     * 正是這種）。同一支檔案裡的方向鍵導覽早就這樣問了，`focusableIn()` 跟上。
+     */
+    /* 規則寫進 WORLD.md §2.4（沒寫下來的規則下一個人不會知道） */
+    {
+      const wmd = readFileSync(resolve(root, 'WORLD.md'), 'utf8');
+      const s24 = wmd.slice(wmd.indexOf('### 2.4 動態'), wmd.indexOf('### 2.5'));
+      ok(s24.length > 300, '（前提）切得出 WORLD.md §2.4');
+      ok(s24.includes('kineticWorld'), '§2.4 寫得出世界層的那個總開關');
+      ok(s24.includes('auroraDrift'), '§2.4 寫得出天空那一個');
+      ok(/0\.12/.test(s24), '§2.4 說得出為什麼有些層是 0.12 不是 0');
+      ok(s24.includes('P25a'), '§2.4 記下這一格');
+    }
+
+    const domSrc = readFileSync(resolve(root, 'src/ui/dom.js'), 'utf8');
+    const focusableFn = domSrc.slice(
+      domSrc.indexOf('export function focusableIn'),
+      domSrc.indexOf('export function initialFocusIn')
+    );
+    ok(focusableFn.length > 100, '（前提）切得出 focusableIn()');
+    ok(
+      /getClientRects\(\)\.length > 0/.test(focusableFn),
+      '焦點鎖的清單問過 getClientRects（只看 offsetParent 會收進沒有版面的東西）'
+    );
+    ok(
+      /hiddenByClosedDetails\(node\)/.test(focusableFn),
+      '焦點鎖的清單擋掉收起來的 details 裡的東西（那一種 offsetParent 與 getClientRects 都騙得過）'
+    );
+    const focusableSel = domSrc.slice(domSrc.indexOf('const FOCUSABLE'), domSrc.indexOf('export function focusableIn'));
+    ok(!/summary, details,/.test(focusableSel), '焦點鎖的選擇器不再收 <details> 本身（它 focus 不到，只有 <summary> 收得到焦點）');
+    ok(/summary,/.test(focusableSel), '<summary> 仍然留著（收起來的時候它照樣收得到焦點）');
+    ok(
+      /function hiddenByClosedDetails/.test(domSrc) && /':scope > summary'/.test(domSrc),
+      '收起來的 details 那一條有把 <summary> 當例外'
+    );
+    ok(
+      /wireArrowNav|getClientRects/.test(domSrc.slice(0, domSrc.indexOf('export function focusableIn'))),
+      '（對照）方向鍵導覽本來就是這樣問的'
+    );
+
+    const charSrc = readFileSync(resolve(root, 'src/player/character.js'), 'utf8');
+    ok(/const calm = reducedMotion \? 0 : 1;/.test(charSrc), '旅人有一個閒置動作的開關');
+    ok(
+      /pipMat\.emissiveIntensity = 1\.5 \+ Math\.sin\(t \* 1\.7\) \* 0\.14 \+ Math\.max\(cheer, pipFlash\) \* 2\.4;/.test(charSrc),
+      '披肩光點的亮度**不**吃 calm（等級與升等那一下是資訊）'
+    );
+  }
+}
+
+
 if (failures.length) {
   console.error(`✗ ${failures.length} 個測試失敗（通過 ${passCount}）：\n`);
   for (const f of failures) console.error(`  • ${f}`);

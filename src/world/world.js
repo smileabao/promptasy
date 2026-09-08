@@ -3756,18 +3756,20 @@ function buildShrine(spec, quality) {
     setActive(v) {
       active = Boolean(v);
     },
-    update(dt, t) {
+    // v1.2 · P25a：`kinetic` 0 ＝ reduce —— 火心不浮不轉、光環與光柱不轉；
+    // 呼吸的**亮度**（emissive／燈強／不透明度）全部照舊（拿掉的是動，不是回應）。
+    update(dt, t, kinetic = 1) {
       const breathe = 1 + Math.sin(t * 1.1) * (active ? 0.28 : 0.08);
       emberMat.emissiveIntensity = (active ? 1.9 : 0.9) * breathe;
       light.intensity = (active ? 5.2 : 1.8) * breathe;
-      ember.position.y = 1.95 + Math.sin(t * 0.9) * 0.12;
-      ember.rotation.y += dt * (active ? 0.9 : 0.25);
+      ember.position.y = 1.95 + Math.sin(t * 0.9) * 0.12 * kinetic;
+      ember.rotation.y += dt * (active ? 0.9 : 0.25) * kinetic;
       const wantRing = active ? 0.15 + Math.sin(t * 1.5) * 0.05 : 0.045;
       ring.material.opacity += (wantRing - ring.material.opacity) * Math.min(1, dt * 3);
-      ring.rotation.z += dt * 0.06;
+      ring.rotation.z += dt * 0.06 * kinetic;
       const wantCol = active ? 0.05 : 0.016;
       column.material.opacity += (wantCol - column.material.opacity) * Math.min(1, dt * 2);
-      column.rotation.y += dt * 0.05;
+      column.rotation.y += dt * 0.05 * kinetic;
     },
   };
 }
@@ -4130,7 +4132,9 @@ function buildMarker(challenge, quality, accent) {
       this.label = newLabel;
       batchDirty = true;
     },
-    update(dt, t, camera) {
+    // v1.2 · P25a：`kinetic` 0 ＝ reduce —— 浮在上面那一片不轉不浮、光環與光柱不轉；
+    // 三態的亮度／顏色／腳下那圈的濃淡全部照舊（那是「這一關解了沒」的資訊）。
+    update(dt, t, camera, kinetic = 1) {
       /*
        * v1.2 · P22b：分帶。
        *
@@ -4184,13 +4188,13 @@ function buildMarker(challenge, quality, accent) {
         return;
       }
       if (labelOn) fitLabel(this.label, camera, this.position);
-      shard.rotation.y += dt * (this.near ? 1.5 : 0.7);
-      shard.rotation.x = Math.sin(t * 0.6) * 0.18;
-      const bob = Math.sin(t * 1.4 + x * 0.3) * 0.22;
+      shard.rotation.y += dt * (this.near ? 1.5 : 0.7) * kinetic;
+      shard.rotation.x = Math.sin(t * 0.6) * 0.18 * kinetic;
+      const bob = Math.sin(t * 1.4 + x * 0.3) * 0.22 * kinetic;
       shard.position.y = 2.5 + bob;
       glow.position.y = 2.5 + bob;
       glow.worldY = y + 2.5 + bob;
-      ring.rotation.z += dt * 0.15;
+      ring.rotation.z += dt * 0.15 * kinetic;
 
       // 三種狀態讀得出來：未解 = 呼吸式脈動、走近 = 亮起、已解 = 安靜的暖金
       const pulse = this.cleared ? 0.16 : 0.26 + Math.sin(t * 1.8 + z * 0.2) * 0.1;
@@ -4223,7 +4227,7 @@ function buildMarker(challenge, quality, accent) {
         (this.spotlight ? 2.6 : 1) *
         (1 + Math.sin(t * 0.9 + x * 0.11) * 0.16);
       beacon.material.opacity += (wanted - beacon.material.opacity) * Math.min(1, dt * 4);
-      beacon.rotation.y += dt * 0.08;
+      beacon.rotation.y += dt * 0.08 * kinetic;
 
       // amber（先行前往）：腳下的圈有一圈很淡的琥珀底光，遠處就讀得出
       const amberBase = this.regionState === 'amber' && !this.cleared ? 0.06 + Math.sin(t * 1.2 + z * 0.17) * 0.02 : 0;
@@ -4234,7 +4238,7 @@ function buildMarker(challenge, quality, accent) {
             ? 0.09 + Math.sin(t * 1.6) * 0.045
             : amberBase) * dim;
       halo.material.opacity += (haloWanted - halo.material.opacity) * Math.min(1, dt * 6);
-      halo.rotation.z += dt * (this.near ? 0.5 : 0.12);
+      halo.rotation.z += dt * (this.near ? 0.5 : 0.12) * kinetic;
 
       syncBatch();
     },
@@ -4508,8 +4512,9 @@ function buildGate(corridor, region, color, unlocked, infoText) {
       this.setVisualState('lit');
       this.setLabel('已開啟 · 往前走吧');
     },
-    update(dt, t) {
-      arch.rotation.z = Math.sin(t * 0.3) * 0.03;
+    // v1.2 · P25a：`kinetic` 0 ＝ reduce —— 拱不再左右晃；三態的顏色與屏障照舊
+    update(dt, t, kinetic = 1) {
+      arch.rotation.z = Math.sin(t * 0.3) * 0.03 * kinetic;
       // v1.2 · P06：三態平滑（只在還沒到位時 lerp；離目標 < 1e-3 就貼上；到位後零工作）
       if (visualState && !visualSettled) {
         const k = Math.min(1, dt * 2.5);
@@ -5492,15 +5497,24 @@ export function createWorld({
   const floatPos = new THREE.Vector3();
   const floatScale = new THREE.Vector3(1, 1, 1);
 
+  /*
+   * v1.2 · P25a：`prefers-reduced-motion` 之下**整個氛圍動作層停住**（`kineticWorld` ＝ 0）——
+   * 自轉、上下浮、左右晃、飄的粒子、霧氣的轉。停的只有「動」：
+   * 亮度／顏色／不透明度（＝哪一關解了、走沒走近、哪一區亮著）一律照舊，
+   * 一格資訊都不會消失（WORLD.md §2.4）。0 而不是 0.12：這些是**永遠不停**的迴圈，
+   * 打一折仍然是永遠在動，那不叫讓步。
+   */
+  const kineticWorld = reducedMotion ? 0 : 1;
+
   engine.onUpdate((dt, t) => {
-    for (const m of markers) m.update(dt, t, engine.camera);
+    for (const m of markers) m.update(dt, t, engine.camera, kineticWorld);
     updateMarkerLights();
     detailCull.update(engine.camera);
-    for (const g of gates) g.update(dt, t);
-    for (const tab of tablets) tab.update(dt, t);
-    for (const ins of inscriptionObjs) ins.update(dt, t);
-    for (const lt of letterObjs) lt.update(dt, t);
-    if (shrineObj) shrineObj.update(dt, t);
+    for (const g of gates) g.update(dt, t, kineticWorld);
+    for (const tab of tablets) tab.update(dt, t, kineticWorld);
+    for (const ins of inscriptionObjs) ins.update(dt, t, kineticWorld);
+    for (const lt of letterObjs) lt.update(dt, t, kineticWorld);
+    if (shrineObj) shrineObj.update(dt, t, kineticWorld);
 
     // 故事小景裡「還在動的東西」：燈火搖曳、懸浮的階梯、刻度盤的指針、吊車的載重
     for (const a of propAnimations) {
@@ -5515,41 +5529,41 @@ export function createWorld({
           floatMtx.decompose(floatPos, floatQuat, floatScale);
           if (mesh.userData.baseY === undefined) mesh.userData.baseY = [];
           if (mesh.userData.baseY[i] === undefined) mesh.userData.baseY[i] = floatPos.y;
-          floatPos.y = mesh.userData.baseY[i] + Math.sin(t * 0.7 + i * 0.8 + (a.seed || 0)) * 0.22;
+          floatPos.y = mesh.userData.baseY[i] + Math.sin(t * 0.7 + i * 0.8 + (a.seed || 0)) * 0.22 * kineticWorld;
           mesh.setMatrixAt(i, floatMtx.compose(floatPos, floatQuat, floatScale));
         }
         mesh.instanceMatrix.needsUpdate = true;
       } else if (a.kind === 'pointer') {
         // 刻度盤的指針繞著盤面慢慢走（旋鈕會自己動 —— 參數是活的）
-        const ang = Math.sin(t * 0.22) * 2.4;
+        const ang = Math.sin(t * 0.22) * 2.4 * kineticWorld;
         a.mesh.position.set(Math.sin(ang) * 0.35, a.mesh.position.y, Math.cos(ang) * 0.35);
         a.mesh.rotation.y = ang;
       } else if (a.kind === 'landmark') {
-        if (a.data.load) a.data.load.rotation.y = Math.sin(t * 0.18) * 0.25;
-        if (a.data.gear) a.data.gear.rotation.y += dt * 0.18;
-        if (a.data.leaves) a.data.leaves.rotation.y = Math.sin(t * 0.09) * 0.06;
+        if (a.data.load) a.data.load.rotation.y = Math.sin(t * 0.18) * 0.25 * kineticWorld;
+        if (a.data.gear) a.data.gear.rotation.y += dt * 0.18 * kineticWorld;
+        if (a.data.leaves) a.data.leaves.rotation.y = Math.sin(t * 0.09) * 0.06 * kineticWorld;
       }
     }
 
     const arr = motes.geometry.attributes.position;
     for (let i = 0; i < motePhases.length; i += 1) {
-      arr.array[i * 3 + 1] = moteBaseY[i] + Math.sin(t * 0.5 * moteDrift[i] + motePhases[i]) * 1.1;
+      arr.array[i * 3 + 1] = moteBaseY[i] + Math.sin(t * 0.5 * moteDrift[i] + motePhases[i]) * 1.1 * kineticWorld;
     }
     arr.needsUpdate = true;
     drifts.update(dt, t, engine.camera);
-    beacon.rotation.y = t * 0.06;
+    beacon.rotation.y = t * 0.06 * kineticWorld;
 
     // 貼地霧氣：慢慢轉、慢慢起伏
     for (const plane of mist.children) {
-      plane.rotation.z += plane.userData.spin * dt;
-      plane.position.y = plane.userData.baseY + Math.sin(t * 0.22 + plane.userData.phase) * 0.35;
+      plane.rotation.z += plane.userData.spin * dt * kineticWorld;
+      plane.position.y = plane.userData.baseY + Math.sin(t * 0.22 + plane.userData.phase) * 0.35 * kineticWorld;
     }
 
     // 工坊的齒輪會轉
     for (const rig of gearRigs) {
       rig.data.forEach((g, i) => {
         gearPos.set(g.x, g.y, g.z);
-        gearQuat.setFromEuler(new THREE.Euler(Math.PI / 2, 0, g.tilt + t * g.spin));
+        gearQuat.setFromEuler(new THREE.Euler(Math.PI / 2, 0, g.tilt + t * g.spin * kineticWorld));
         gearScale.set(g.scale, g.scale, g.scale);
         rig.mesh.setMatrixAt(i, gearMatrix.compose(gearPos, gearQuat, gearScale));
       });

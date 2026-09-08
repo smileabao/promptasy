@@ -104,9 +104,10 @@ export async function worldOptions() {
  * @param {'high'|'low'} [opts.quality]
  * @param {object} [opts.screens] 中觀層的替代資料 `{ bands, motifs, bends }`（搜尋迴圈用）
  * @param {object} [opts.base] 已經讀好的 `worldOptions()`（連續蓋很多次時省掉重讀 json）
+ * @param {boolean} [opts.reducedMotion] v1.2 · P25a：蓋一個「氛圍動作層停住」的世界（測試用）
  * @returns {Promise<{scene:object, world:object, THREE:object}>}
  */
-export async function buildWorld({ quality = 'high', screens = null, base = null } = {}) {
+export async function buildWorld({ quality = 'high', screens = null, base = null, reducedMotion = false } = {}) {
   const restore = installCanvasStub();
   try {
     const THREE = await import('three');
@@ -127,6 +128,7 @@ export async function buildWorld({ quality = 'high', screens = null, base = null
       engine,
       quality,
       screens,
+      reducedMotion,
       ...opts,
     });
     const camera = new THREE.PerspectiveCamera(55, 16 / 9, 0.1, 900);

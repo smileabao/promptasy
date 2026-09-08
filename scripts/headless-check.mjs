@@ -23041,6 +23041,232 @@ async function main() {
     ok(fit.worstGrounded <= 0.05, 'P25b0：貼地那 152 件最糟的一件也在門檻內', String(fit.worstGrounded));
   }
 
+  /* ================================================================
+   * v1.2 · P25a：`prefers-reduced-motion` 走一段路 ＋ 焦點順序
+   *
+   * 三件事，全部在**真的跑起來的那一份**上量：
+   *   ① 氛圍動作層真的停住（位移／自轉），而**亮度照樣在變** ——
+   *      只驗「停住」會被「每幀迴圈根本沒在跑」整段空過，所以兩邊都要驗。
+   *   ② 旅人站著不呼吸、走起來照樣有步態（關掉的是閒置擺盪，不是玩法）。
+   *   ③ 面板的焦點鎖：Tab 走得完、走到底會繞回第一顆，不會掉到 3D 畫布上。
+   * 全部用輪詢等條件成立，不用固定 sleep 對齊牆鐘。
+   * ================================================================ */
+  console.log('▸ 打磨：reduced-motion ＋ 焦點順序（v1.2 · P25a）');
+  {
+    await cdp.send(
+      'Emulation.setEmulatedMedia',
+      { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] },
+      sessionId
+    );
+    await reloadPage('P25a 重新載入（reduced-motion）');
+    await key('Enter', 'Enter', { vk: 13 });
+    await sleep(400);
+
+    const calm = await evaluate(`
+      const g = window.__promptasy;
+      const m = g.world.markers[0];
+      const tab = g.world.tablets[0];
+      const ch = g.player.character;
+      // 站到石座旁邊：遠處的石座走的是合批那條路（本來就不更新），量它會空過
+      g.player.teleport(m.position.x + 4, m.position.z + 4);
+      await new Promise((r) => setTimeout(r, 500));
+      const moved = () => [
+        m.shard.rotation.y, m.shard.rotation.x, m.shard.position.y,
+        m.ring.rotation.z, m.beacon.rotation.y, m.halo.rotation.z,
+        tab.halo.rotation.z, tab.spark.position.y,
+        g.world.mist.children[0].rotation.z, g.world.mist.children[0].position.y,
+        g.world.motes.geometry.attributes.position.array[1],
+        ch.joints.body.position.y, ch.joints.hips.position.x,
+        ch.joints.scarfTail.rotation.z, ch.joints.lantern.rotation.z,
+      ];
+      const lit = () => [
+        m.ring.material.opacity, m.shardMat.emissiveIntensity,
+        tab.halo.material.opacity, ch.lanternLight.intensity,
+      ];
+      const first = moved();
+      const firstLit = lit();
+      let frames = 0;
+      let litChanged = 0;
+      let worstMoved = 0;
+      // 軟體渲染一幀要好幾百毫秒 —— 門檻訂在「20 幀 ＋ 亮度真的變過」，時間開大一點
+      const until = performance.now() + 20000;
+      while (performance.now() < until && !(litChanged > 0 && frames >= 20)) {
+        await new Promise((r) => requestAnimationFrame(r));
+        frames += 1;
+        const nowMoved = moved();
+        for (let i = 0; i < first.length; i += 1) {
+          const d = Math.abs(nowMoved[i] - first[i]);
+          if (d > worstMoved) worstMoved = d;
+        }
+        const nowLit = lit();
+        litChanged = nowLit.filter((v, i) => Math.abs(v - firstLit[i]) > 1e-4).length;
+      }
+      return {
+        reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+        titleOpen: g.title.isOpen,
+        auroraDrift: g.engine.auroraDrift,
+        frames,
+        litChanged,
+        worstMoved,
+        bodyY: ch.joints.body.position.y,
+      };
+    `);
+    eq(calm.reduced, true, '（前提）P25a：reduced-motion 模擬有生效');
+    eq(calm.titleOpen, false, '（前提）P25a：標題卡已收掉（世界的每幀迴圈在跑）');
+    eq(calm.auroraDrift, 0, 'P25a：reduce 之下極光不再繞著天空漂');
+    ok(calm.frames >= 20, '（前提）P25a：真的跑過 20 幀以上（每幀迴圈在跑，零位移不是空過）', String(calm.frames));
+    ok(calm.litChanged >= 3, 'P25a：亮度照樣在變（拿掉的是動，不是回應）', String(calm.litChanged));
+    eq(calm.worstMoved, 0, 'P25a：15 件會動的東西整段一格都沒動');
+    eq(calm.bodyY, 0, 'P25a：站著的旅人不呼吸（軀幹不上下）');
+
+    // 走起來照樣有步態 —— 關掉的是閒置擺盪，不是玩法
+    const walk = await evaluate(`
+      const g = window.__promptasy;
+      const ch = g.player.character;
+      const before = ch.joints.hipL.rotation.x;
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' }));
+      let moved = 0;
+      let bodyMoved = 0;
+      const until = performance.now() + 6000;
+      while (performance.now() < until && (moved < 0.05 || bodyMoved < 0.005)) {
+        await new Promise((r) => requestAnimationFrame(r));
+        moved = Math.max(moved, Math.abs(ch.joints.hipL.rotation.x - before));
+        bodyMoved = Math.max(bodyMoved, Math.abs(ch.joints.body.position.y));
+      }
+      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }));
+      await new Promise((r) => setTimeout(r, 260));
+      return { moved, bodyMoved };
+    `);
+    ok(walk.moved > 0.05, 'P25a：reduce 之下走路的腿照樣擺', String(walk.moved));
+    ok(walk.bodyMoved > 0.005, 'P25a：reduce 之下走路照樣有起伏（步態沒被關掉）', String(walk.bodyMoved));
+
+    // reduce 之下照樣過得了一關（刻碑那條路走完，評價拿得到）
+    const pass = await evaluate(`
+      const g = window.__promptasy;
+      const c = g.content.challenges[0];
+      g.promptConsole.open(c);
+      await new Promise((r) => setTimeout(r, 400));
+      if (g.promptConsole.mode !== 'free') g.promptConsole.setMode('free');
+      g.promptConsole.goAct(3, { force: true });
+      await new Promise((r) => setTimeout(r, 200));
+      document.querySelector('.prompt-input').value = c.sample;
+      document.querySelector('#prompt-console [data-submit]').click();
+      await new Promise((r) => setTimeout(r, 600));
+      const grade = document.querySelector('#prompt-console .grade__mark');
+      const out = { grade: grade ? grade.textContent.trim() : '', best: g.progression.bestGrade(c.id) };
+      g.promptConsole.close();
+      await new Promise((r) => setTimeout(r, 300));
+      return out;
+    `);
+    ok(/^[SABC]$/.test(pass.grade), 'P25a：reduce 之下照樣過得了一關（拿得到評價）', pass.grade);
+    ok(/^[SABC]$/.test(String(pass.best)), 'P25a：reduce 之下評價真的寫進存檔', String(pass.best));
+
+    // 焦點順序：Tab 走得完、走到底繞回第一顆、永遠掉不出面板
+    const focus = await evaluate(`
+      const g = window.__promptasy;
+      g.codex.open();
+      /*
+       * 焦點是在 requestAnimationFrame 裡移進去的，而軟體渲染一幀要好幾百毫秒 ——
+       * 固定 sleep 會偶發地量在「還沒移進去」那一拍（實測就紅過一次）。輪詢到成立為止。
+       */
+      const panel = await (async () => {
+        const until = performance.now() + 8000;
+        let p = null;
+        while (performance.now() < until) {
+          p = document.querySelector('#codex .panel');
+          if (p && p.contains(document.activeElement)) return p;
+          await new Promise((r) => setTimeout(r, 60));
+        }
+        return p;
+      })();
+      const inside = () => panel.contains(document.activeElement);
+      const startedInside = inside();
+      // 直接跟焦點鎖用**同一支函式**（自己抄一份選擇器只會漂掉）
+      const { focusableIn } = await import('/src/ui/dom.js');
+      const items = focusableIn(panel);
+      // 清單上每一顆都必須真的 focus 得到，否則「第一顆 / 最後一顆」會是誰也不是
+      let unfocusable = 0;
+      const unfocusableTags = [];
+      for (const n of items) {
+        n.focus();
+        if (document.activeElement !== n) {
+          unfocusable += 1;
+          if (unfocusableTags.length < 3) unfocusableTags.push(n.tagName.toLowerCase());
+        }
+      }
+      const overlayEl = panel.closest('.overlay');
+      const tab = (shiftKey) =>
+        overlayEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true }));
+      const last = items[items.length - 1];
+      /*
+       * P25a 之前圖鑑這一面 76 顆候選裡有 48 顆 focus 不到（24 顆是 details 本身、
+       * 24 顆是收起來的 details 裡的出處連結）——最後一顆正是其中之一，
+       * 於是「Tab 走到底再按一次」焦點原地不動。修完之後清單上一顆都不會 focus 不到。
+       */
+      last.focus();
+      const atLast = document.activeElement === last;
+      tab(false);
+      await new Promise((r) => setTimeout(r, 120));
+      const wrapped = document.activeElement === items[0];
+      const insideAfterTab = inside();
+      // 反方向：站在第一顆按 Shift+Tab
+      items[0].focus();
+      tab(true);
+      await new Promise((r) => setTimeout(r, 120));
+      const insideAfterShiftTab = inside();
+      const stillInside = insideAfterTab && insideAfterShiftTab;
+      const lastTag = last.tagName.toLowerCase();
+      const role = overlayEl.getAttribute('role');
+      const modal = overlayEl.getAttribute('aria-modal');
+      const labelledby = overlayEl.getAttribute('aria-labelledby');
+      const titleId = panel.querySelector('.panel__title')?.id || '';
+      g.codex.close();
+      await new Promise((r) => setTimeout(r, 300));
+      return { startedInside, count: items.length, unfocusable, unfocusableTags, atLast, wrapped, stillInside, insideAfterTab, insideAfterShiftTab, lastTag, role, modal, labelledby, titleId };
+    `);
+    eq(focus.startedInside, true, 'P25a：面板一打開焦點就落在面板裡');
+    ok(focus.count >= 3, '（前提）P25a：面板裡有好幾顆可以 Tab 的東西', String(focus.count));
+    console.log(
+      `    \u21b3 P25a 焦點鎖：清單 ${focus.count} 顆、focus 不到的 ${focus.unfocusable} 顆、最後一顆是 <${focus.lastTag}>`
+    );
+    eq(
+      focus.unfocusable,
+      0,
+      'P25a：焦點鎖清單上每一顆都真的 focus 得到（沒有 details 本身、沒有收起來的 details 裡的東西）'
+    );
+    eq(focus.insideAfterTab, true, 'P25a：走到底再按 Tab，焦點仍在面板裡（掉不到 3D 畫布上）');
+    eq(focus.insideAfterShiftTab, true, 'P25a：站在第一顆按 Shift+Tab，焦點仍在面板裡');
+    eq(focus.stillInside, true, 'P25a：兩個方向都掉不出面板');
+    eq(focus.atLast, true, 'P25a：焦點真的移到清單最後一顆');
+    eq(focus.wrapped, true, 'P25a：走到最後一顆再按 Tab 會繞回第一顆');
+    eq(focus.role, 'dialog', 'P25a：面板是 dialog');
+    eq(focus.modal, 'true', 'P25a：面板標成 aria-modal');
+    eq(focus.labelledby, focus.titleId, 'P25a：aria-labelledby 指到面板自己的標題');
+
+    await cdp.send('Emulation.setEmulatedMedia', { features: [] }, sessionId);
+    await reloadPage('P25a 重新載入（回到一般動態）');
+    await key('Enter', 'Enter', { vk: 13 });
+    await sleep(400);
+    const busy = await evaluate(`
+      const g = window.__promptasy;
+      const m = g.world.markers[0];
+      g.player.teleport(m.position.x + 4, m.position.z + 4);
+      await new Promise((r) => setTimeout(r, 500));
+      const first = [m.shard.rotation.y, m.ring.rotation.z, g.world.mist.children[0].rotation.z];
+      let worst = 0;
+      const until = performance.now() + 8000;
+      while (performance.now() < until && worst < 0.01) {
+        await new Promise((r) => requestAnimationFrame(r));
+        const now = [m.shard.rotation.y, m.ring.rotation.z, g.world.mist.children[0].rotation.z];
+        worst = Math.max(...now.map((v, i) => Math.abs(v - first[i])));
+      }
+      return { reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, worst, auroraDrift: g.engine.auroraDrift };
+    `);
+    eq(busy.reduced, false, '（前提）P25a：reduced-motion 模擬已關');
+    eq(busy.auroraDrift, 1, '（對照）P25a：一般模式極光照樣漂');
+    ok(busy.worst > 0.01, '（對照）P25a：一般模式那幾件真的會動（上面那條零位移不是空過）', String(busy.worst));
+  }
+
   await sleep(600);
   const realErrors = consoleErrors.filter((e) => !/favicon|DevTools|Autofill/i.test(e));
   eq(realErrors.length, 0, '全程零 console error', realErrors.slice(0, 6).join('\n      '));

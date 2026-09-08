@@ -182,10 +182,11 @@ export function buildLetter(spec, kit, terrainHeight) {
       this.found = Boolean(v);
       if (this.found) mark.color.set(PALETTE.warm);
     },
-    update(dt, t) {
+    update(dt, t, kinetic = 1) {
       const base = this.near ? 0.46 : this.found ? 0.08 : 0.18;
       mark.opacity = base + Math.sin(t * 1.6 + x * 0.21 + z * 0.13) * 0.04;
-      edge.rotation.z = t * (this.near ? 0.42 : 0.11);
+      // v1.2 · P25a：轉吃 kinetic（reduce 之下停住）；上面那行「亮度呼吸」是回應，照舊
+      edge.rotation.z = t * (this.near ? 0.42 : 0.11) * kinetic;
     },
   };
 }

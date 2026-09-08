@@ -2273,11 +2273,12 @@ export function buildTablet(tablet, kit, terrainHeight) {
       this.read = Boolean(v);
       if (this.read) spark.material = glow(PALETTE.accent, 0.7);
     },
-    update(dt, t) {
+    // v1.2 · P25a：`kinetic` 0 ＝ reduce —— 光環不轉、火星不上下浮；亮度全部照舊（那是回應）
+    update(dt, t, kinetic = 1) {
       const wanted = (this.near ? 0.36 : this.read ? 0.06 : 0.14) + Math.sin(t * 1.6 + x * 0.2) * 0.03;
       halo.material.opacity += (wanted - halo.material.opacity) * Math.min(1, dt * 5);
-      halo.rotation.z += dt * (this.near ? 0.5 : 0.1);
-      spark.position.y = 2.05 + Math.sin(t * 1.3 + z * 0.2) * 0.08;
+      halo.rotation.z += dt * (this.near ? 0.5 : 0.1) * kinetic;
+      spark.position.y = 2.05 + Math.sin(t * 1.3 + z * 0.2) * 0.08 * kinetic;
     },
   };
 }
