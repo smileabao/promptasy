@@ -2229,3 +2229,23 @@ prop.position.set(offset[0], offset[1] || 0, offset[2]);                  // 組
 
 **還要守的**：修完加一條稽核（現在沒有任何斷言在管這件事）；
 「靠著／斜倚」的姿態（`rotY` 不為 0 又貼著別件的）硬貼地可能會穿模，逐件看過再說。
+
+### P25a 前置：那條音訊文件矛盾，正確的一邊是哪一邊
+
+- `CLAUDE.md:285` 寫：「BGM 統一 -20 LUFS、**SFX 峰值 -6 dBFS**」
+- `WORLD.md:2408-2411` 寫：配樂床 **−20 LUFS**、音效 **−19 LUFS**，**套上去的峰值不准超過 −3 dBFS**
+- `src/audio/audio.js` 的 `SFX_FILES` 逐檔記著 `peak` / `lufs` / `gain` / `clamped`，
+  而 `clamped` 的定義就是「套下去會超過 `SFX_PEAK_CEILING`」
+
+**實作與 WORLD.md 一致，CLAUDE.md 那一句是舊的。** P25a 要改的是 `CLAUDE.md:285`
+（把「SFX 峰值 -6 dBFS」改成「SFX −19 LUFS、峰值上限 −3 dBFS」），
+**不是**去改實作或 WORLD.md。改完順手確認 `SFX_PEAK_CEILING` 的實際值與文件相符。
+
+### P25b 前置：對外數字要同步哪幾處
+
+`README.md:407` 目前寫「142 個關卡（130 座教學神廟 ＋ 12 座應用試煉）· 12 片土地 · 130 條技能」——
+**這些數字沒有因為 v1.2 而改變**（v1.2 加的是遭遇／捷徑／終局，不是課程量），所以那一行大致還對。
+真正要同步的是：
+- `WORLD.md` §6.1 的預算表（P22b／P22c 已經逐項改過，發版前再跑一次 `npm run audit:perf` 核對）
+- `CLAUDE.md` 的「狀態」段落（現在寫 v1.1 已上線、12 區／142 關／130 技能）→ 補 v1.2
+- `docs/history/prompts.html` 補 v1.2 的 goal 與達成效果
