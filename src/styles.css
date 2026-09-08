@@ -3812,6 +3812,29 @@ select option:disabled {
   color: var(--paper-4);
 }
 
+/* v1.2 · P23 · 今日三事：圖鑑最上面那三個**提議**。
+   刻意跟「走出來的收集」（.finds）長得一樣安靜 —— 它不是待辦清單，
+   所以沒有勾選框、沒有進度條、沒有任何在倒數的東西。
+   做過了的那一件只是把記號換成 ✓ 並且退到背景，不會被強調。 */
+.daily {
+  margin: var(--s6) 0 0;
+}
+.daily__lead {
+  margin: 0 0 var(--s2);
+  font-size: var(--t-micro);
+}
+.daily__list i {
+  color: var(--gold);
+}
+.daily__list span {
+  font-family: inherit;
+  color: var(--paper-4);
+}
+.daily__item.is-done b,
+.daily__item.is-done i {
+  color: var(--paper-4);
+}
+
 /* v1.2 · P02 · 濁言與正言：圖鑑第四列下面可展開的清單。
    安撫過的：濁言（弱、灰、斜體）→ 最佳評價 → 範例（強、金邊）→ 技法 → 官方出處；
    還沒安撫的：只留名字＋「還沒聽懂」。跟上面「走出來的收集」同一個字級，一樣安靜。 */

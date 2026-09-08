@@ -22844,6 +22844,153 @@ async function main() {
   eq(bootRestore.firstPrompt, '', 'P22：（前提）這份存檔連 firstPrompt 都沒有（＝舊存檔在硬碟上的樣子）');
   eq(bootRestore.sayMode, 'best', 'P22：舊存檔重整之後照樣走得到退路');
 
+
+  /* ================================================================ *
+   * v1.2 · P23：等級穿在身上 ＋ 今日三事可以關掉
+   * ================================================================ */
+  const pipsNow = await evaluate(`
+    const g = window.__promptasy;
+    g.codex.close(); g.settings.close(); g.finale.close();
+    return {
+      level: g.progression.levelInfo().level,
+      pips: g.levelPips(),
+      count: g.player.character.pipMesh.count,
+      max: g.player.character.pipMesh.instanceMatrix.count,
+      lights: (() => { let n = 0; g.player.character.root.traverse((o) => { if (o.isLight) n += 1; }); return n; })(),
+    };
+  `);
+  eq(pipsNow.pips, pipsNow.level, 'P23：披肩上亮著的格數就是現在的等級');
+  eq(pipsNow.count, pipsNow.level, 'P23：場景圖上那一圈真的只畫了這麼多格');
+  eq(pipsNow.max, 99, 'P23：整圈排滿 99 格（＝等級上限）');
+  eq(pipsNow.lights, 1, 'P23：整隻角色仍然只有提燈那一盞光源');
+
+  /*
+   * 升等：把 XP 補到剛好差一級，再走**真的那條落盤的路**（setFlag → onChange）。
+   * 之後**輪詢到披肩真的多一格為止** —— 不用固定 sleep 對齊牆鐘時間
+   * （這台機器一幀 0.2 秒，固定等待本來就對不準）。
+   */
+  const levelUp = await evaluate(`
+    const g = window.__promptasy;
+    const before = { level: g.progression.levelInfo().level, pips: g.levelPips() };
+    const lv = g.progression.levelInfo();
+    g.progression.state.xp += lv.need - lv.into;
+    g.progression.setFlag('p23Probe', true);
+    let pips = g.levelPips();
+    for (let i = 0; i < 120 && pips === before.pips; i += 1) {
+      await new Promise((r) => requestAnimationFrame(r));
+      pips = g.levelPips();
+    }
+    return { before, after: { level: g.progression.levelInfo().level, pips, count: g.player.character.pipMesh.count } };
+  `);
+  eq(levelUp.after.level, levelUp.before.level + 1, 'P23：（前提）真的升了一級');
+  eq(levelUp.after.pips, levelUp.before.pips + 1, 'P23：**升等時披肩上的光點真的多了一格**');
+  eq(levelUp.after.pips, levelUp.after.level, 'P23：而且格數還是等於等級');
+  eq(levelUp.after.count, levelUp.after.level, 'P23：場景圖上那一圈也跟著多一格');
+
+  /* --- 今日三事：畫得出來、掃不到催人的字、關掉之後整區不見 --- */
+  const dailyOn = await evaluate(`
+    const g = window.__promptasy;
+    g.codex.open();
+    let block = null;
+    for (let i = 0; i < 120 && !block; i += 1) {
+      await new Promise((r) => requestAnimationFrame(r));
+      block = document.querySelector('#codex [data-daily]');
+    }
+    const rows = block ? [...block.querySelectorAll('[data-daily-offer]')] : [];
+    const text = block ? block.textContent : '';
+    const st = g.daily();
+    g.codex.close();
+    return {
+      has: !!block,
+      rows: rows.length,
+      ids: rows.map((r) => r.getAttribute('data-daily-offer')),
+      text,
+      enabled: st.enabled,
+      reported: Array.isArray(st.report) ? st.report.length : -1,
+      day: st.state.day,
+      saved: (JSON.parse(localStorage.getItem('promptasy.v1.save')) || {}).daily || null,
+    };
+  `);
+  eq(dailyOn.has, true, 'P23：圖鑑最上面真的有「今日三事」那一區');
+  eq(dailyOn.enabled, true, 'P23：（前提）它預設是開著的');
+  ok(dailyOn.rows >= 1 && dailyOn.rows <= 3, 'P23：那一區最多三件（也可能少於三件，不會湊數）', String(dailyOn.rows));
+  eq(dailyOn.rows, dailyOn.reported, 'P23：畫出來的件數與進程層說的一樣');
+  eq(new Set(dailyOn.ids).size, dailyOn.ids.length, 'P23：三件彼此不同');
+  ok(/^\d{4}-\d{2}-\d{2}$/.test(dailyOn.day), 'P23：存檔記下的是今天（本地日期）', dailyOn.day);
+  eq(dailyOn.saved && dailyOn.saved.day, dailyOn.day, 'P23：而且真的落盤了');
+  {
+    // 一個催人的字都不准出現在玩家看得到的地方
+    const banned = ['過期', '逾期', '期限', '倒數', '截止', '連續', '錯過', '失敗', '懲罰', '限時'];
+    const hit = banned.filter((w) => dailyOn.text.includes(w));
+    eq(hit.join('、'), '', 'P23：**畫面上掃不到一個催人的字**', hit.join('、'));
+    ok(dailyOn.text.includes('不是任務'), 'P23：它自己講明了不是任務', dailyOn.text.slice(0, 60));
+  }
+
+  const dailyOff = await evaluate(`
+    const g = window.__promptasy;
+    g.settings.open();
+    let box = null;
+    for (let i = 0; i < 120 && !box; i += 1) {
+      await new Promise((r) => requestAnimationFrame(r));
+      box = document.querySelector('#settings [data-daily]');
+    }
+    const rowText = box ? box.closest('.settings__row').textContent : '';
+    box.checked = false;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+    g.settings.close();
+    g.codex.open();
+    let gone = false;
+    for (let i = 0; i < 120 && !gone; i += 1) {
+      await new Promise((r) => requestAnimationFrame(r));
+      gone = !document.querySelector('#codex [data-daily]');
+    }
+    const st = g.daily();
+    const beforeVisit = JSON.stringify((JSON.parse(localStorage.getItem('promptasy.v1.save')) || {}).daily);
+    g.progression.noteRegionVisit('reasoning');
+    const afterVisit = JSON.stringify((JSON.parse(localStorage.getItem('promptasy.v1.save')) || {}).daily);
+    g.codex.close();
+    return {
+      hasRow: !!box,
+      rowText,
+      gone,
+      enabled: st.enabled,
+      report: st.report,
+      beforeVisit,
+      afterVisit,
+      codexStillWorks: document.querySelectorAll('#codex .codex .tech').length,
+    };
+  `);
+  eq(dailyOff.hasRow, true, 'P23：設定頁有「今日三事」那一格');
+  ok(dailyOff.rowText.includes('不是任務'), 'P23：設定頁那一格也講明了它不是任務', dailyOff.rowText.slice(0, 60));
+  eq(dailyOff.gone, true, 'P23：**關掉之後圖鑑那一區整塊不再出現**');
+  eq(dailyOff.enabled, false, 'P23：關掉了就是關掉了');
+  eq(dailyOff.report, null, 'P23：關掉之後進程層交不出東西（不是交出一份空的）');
+  eq(dailyOff.afterVisit, dailyOff.beforeVisit, 'P23：關掉之後走一趟也不會再寫存檔（與從來沒有這個功能一樣）');
+  ok(dailyOff.codexStillWorks > 0, 'P23：關掉之後圖鑑其他部分照樣在', String(dailyOff.codexStillWorks));
+
+  const dailyBack = await evaluate(`
+    const g = window.__promptasy;
+    g.settings.open();
+    let box = null;
+    for (let i = 0; i < 120 && !box; i += 1) {
+      await new Promise((r) => requestAnimationFrame(r));
+      box = document.querySelector('#settings [data-daily]');
+    }
+    box.checked = true;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+    g.settings.close();
+    g.codex.open();
+    let back = false;
+    for (let i = 0; i < 120 && !back; i += 1) {
+      await new Promise((r) => requestAnimationFrame(r));
+      back = !!document.querySelector('#codex [data-daily]');
+    }
+    g.codex.close();
+    return { back, enabled: g.daily().enabled };
+  `);
+  eq(dailyBack.back, true, 'P23：再打開它就回來了（關掉不是刪掉）');
+  eq(dailyBack.enabled, true, 'P23：設定也跟著回來');
+
   await key('Escape', 'Escape', { vk: 27 });
 
   await sleep(600);

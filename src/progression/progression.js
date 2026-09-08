@@ -6,7 +6,36 @@
 import { betterGrade, gradeForRatio, xpForGrade } from '../challenges/rubric.js';
 import { createCatalog } from '../challenges/catalog.js';
 import { WATCH_TOPICS } from './watchtalk.js';
+import * as Daily from './daily.js';
+import { shrineOpen } from '../world/turning.js';
 import * as SaveIO from '../save/save.js';
+
+/**
+ * v1.2 · P23：一宿要幾顆星（＝隱藏成就每一部原典要幾個標記）。
+ *
+ * 這個數字在畫面那一層叫 `MANSION_TARGET`（`src/ui/starmap.js`）。這裡另寫一份
+ * 是因為**進程層不准 import 畫面層**；`test:rubric` 逐值比對兩邊，對不上就紅。
+ */
+export const BADGE_TARGET = 5;
+
+/**
+ * v1.2 · P23：「隱藏成就達成過了」的旗標。
+ *
+ * 它只往一個方向走：一旦記上就不會再被抹掉。**課程會長**（68 → 130 → …），
+ * 門檻跟著長；沒有這一格的話，今天達成的人明天會被新內容打回「還沒達成」。
+ * 這與 P22 那一課同源：殼散掉了就不准因為門檻變了又長回來。
+ */
+export const ACHIEVEMENT_FLAG = 'achievementDone';
+
+/**
+ * v1.2 · P23：門檻對齊那一次性遷移的憑證。
+ *
+ * 對齊之前，隱藏成就算的是「68 條舊技巧全收 ＋ 四廠徽章」；P22 的終局門檻算的是
+ * 「130 條技法全收 ＋ 四宿全亮」——兩個「全部完成」不是同一件事。這一格把成就
+ * 對齊到 P22 那一套，而**已經用舊尺達成過的存檔不准倒退**：開機時用舊尺量一次、
+ * 記成 `ACHIEVEMENT_FLAG`，然後把這個旗標插上 —— 插上之後就不再回頭用舊尺量。
+ */
+export const ALIGNED_FLAG = 'p23Aligned';
 
 /** 升到下一級所需 XP：100, 160, 220, 280 … */
 export function xpToNextLevel(level) {
@@ -166,6 +195,12 @@ export function createProgression({
   catalog = null,
   curriculum = null,
   challenges,
+  /**
+   * v1.2 · P23：今日三事會提「去找一處還沒找到的線索」，所以要看得到那三份資料
+   * （祕境／殘頁／刻文）。每一筆只讀 `id` 與 `region`，一個字都不改。
+   * 不給就是沒有那一種提議 —— 舊呼叫端（測試腳本）行為完全不變。
+   */
+  clues = null,
   io = SaveIO,
   onChange = null,
 }) {
@@ -209,13 +244,127 @@ export function createProgression({
     if (added > 0) io.save(state);
   }
 
+  /* ------------------------------------------------------------------ *
+   * v1.2 · P23：隱藏成就的門檻對齊 P22（130 條技法全收 ＋ 四宿全亮）
+   *
+   * **一次性**：舊尺（68 條舊技巧全收 ＋ 四廠徽章）只在這裡量最後一次。
+   * 量到就把「達成過了」記上，然後插上 `ALIGNED_FLAG` —— 下一次開機不再回頭量，
+   * 所以這一版之後才走到 68/68 的人吃的是新尺（那才是對齊）。
+   * 純加法、冪等：只加旗標，任何既有欄位一格都不動。
+   * ------------------------------------------------------------------ */
+  {
+    if (!state.flags || typeof state.flags !== 'object') state.flags = {};
+    if (!state.flags[ALIGNED_FLAG]) {
+      const legacyAll = cat.techniques;
+      const legacyDone = legacyAll.length > 0 && legacyAll.every((t) => state.collected.includes(t.id));
+      // 徽章就地重算（存檔裡那一份可能是舊版留下的），不動 `state.badges`
+      const badgeOf = (v) =>
+        state.collected.reduce((n, id) => {
+          const t = techniqueById.get(id);
+          return n + (t && (t.vendors || []).includes(v) ? 1 : 0);
+        }, 0);
+      const vendorsDone = vendorIds.length > 0 && vendorIds.every((v) => badgeOf(v) >= BADGE_TARGET);
+      if (state.flags.finaleSeen || (legacyDone && vendorsDone)) state.flags[ACHIEVEMENT_FLAG] = true;
+      state.flags[ALIGNED_FLAG] = true;
+      io.save(state);
+    }
+    /*
+     * 已經用**新尺**達成的存檔，開機也要把旗標補上 —— 不然「達成過了」這件事
+     * 要等到下一次落盤才成立，中間課程一長就會把人打回未達成。
+     */
+    if (markAchievement()) io.save(state);
+  }
+
   const emit = () => {
     if (typeof onChange === 'function') onChange(state);
   };
 
   function persist() {
+    // 落盤前先問一次「成就是不是剛剛達成」—— 達成過就永遠算達成（見 ACHIEVEMENT_FLAG）
+    markAchievement();
     io.save(state);
     emit();
+  }
+
+  /**
+   * v1.2 · P23：「全部收集」到底在算什麼。
+   *
+   * 正典是 **130 條技法**（`skillsV2`）—— 與 P22 終局的門檻同一把尺。
+   * 只有在 catalog 根本沒有 v2 技法時（測試腳本用 curriculum 就地建的 legacy catalog）
+   * 才退回舊的 68 條：那個世界裡「全部」本來就只有那 68 條。
+   */
+  function achievementTotals() {
+    const skills = cat.skills || [];
+    if (skills.length) {
+      return { total: skills.length, collected: skills.filter((sk) => state.skillsV2.includes(sk.id)).length };
+    }
+    const all = cat.techniques;
+    return { total: all.length, collected: all.filter((t) => state.collected.includes(t.id)).length };
+  }
+
+  /** 四宿現在亮了幾宿（一宿滿 `BADGE_TARGET` 顆就算亮）。 */
+  function mansionsLit(target = BADGE_TARGET) {
+    return vendorIds.filter((v) => (state.badges[v] || 0) >= target).length;
+  }
+
+  /**
+   * 現在這一刻，門檻過得了嗎（**不看旗標**，只看手上的東西）。
+   *
+   * 判定直接呼叫 P22 那一支 `shrineOpen()` —— 成就與終局用的是**同一個函式**，
+   * 不是兩份長得很像的條件（兩份就是等著哪一天只改到其中一份）。
+   */
+  function achievementReached() {
+    const { total, collected } = achievementTotals();
+    return shrineOpen({
+      skills: collected,
+      skillsTotal: total,
+      mansionsLit: mansionsLit(),
+      mansionsTotal: vendorIds.length,
+    });
+  }
+
+  /** 達成了就把旗標記上（只加不減、冪等）。回傳「這一次真的是第一次嗎」。 */
+  function markAchievement() {
+    if (state.flags && state.flags[ACHIEVEMENT_FLAG]) return false;
+    if (!achievementReached()) return false;
+    state.flags = { ...state.flags, [ACHIEVEMENT_FLAG]: true };
+    return true;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * v1.2 · P23：今日三事的三格（存檔驗形的最後一道保險）
+   * ------------------------------------------------------------------ */
+  function dailyBox() {
+    const d = state.daily;
+    if (!d || typeof d !== 'object' || Array.isArray(d)) {
+      state.daily = { day: '', ids: [], visited: [] };
+      return state.daily;
+    }
+    if (!Daily.isDayKey(d.day)) d.day = '';
+    if (!Array.isArray(d.ids)) d.ids = [];
+    if (!Array.isArray(d.visited)) d.visited = [];
+    return d;
+  }
+
+  /** 一條線索找到了嗎（三種各問它原本那一支）。 */
+  function clueFound(kind, id) {
+    if (kind === 'secret') return Array.isArray(state.secretsFound) && state.secretsFound.includes(id);
+    if (kind === 'letter') return Array.isArray(state.lettersFound) && state.lettersFound.includes(id);
+    if (kind === 'ins') return Array.isArray(state.inscriptionsFound) && state.inscriptionsFound.includes(id);
+    return false;
+  }
+
+  /** 今天有哪些做得到的提議（只從已經開了的土地挑、已經做完的不再提）。 */
+  function dailyPool(visited) {
+    return Daily.buildPool({
+      challenges: challenges || [],
+      regions: regionIds,
+      clues: clues || {},
+      isPlayable: (regionId) => api.isRegionPlayable(regionId),
+      bestGrade: (id) => state.bestGrades[id] || null,
+      found: clueFound,
+      visited: visited || [],
+    });
   }
 
   /** 徽章 = 已收集技巧中，標記了該廠的數量（可從 collected 完整重算 → 冪等）。 */
@@ -565,20 +714,43 @@ export function createProgression({
     },
 
     /**
-     * 隱藏成就：68 條技巧全收集 ＋ 四廠徽章都達標。
-     * @param {number} [badgeTarget] 每廠需要的技巧標記數（與圖鑑顯示一致）
+     * 隱藏成就（v1.2 · P23 起與 P22 的終局門檻**同一把尺**）：
+     * **130 條技法全收 ＋ 四宿全亮**。
+     *
+     * 對齊之前這裡算的是「68 條舊技巧全收 ＋ 四廠徽章」——兩個「全部完成」
+     * 不是同一件事，於是小祠開口與成就達成會在不同的時間點發生。現在兩邊都走
+     * `shrineOpen()`，所以它們不可能對不上。
+     *
+     * **達成過就永遠算達成**：`complete` 會 OR 上 `ACHIEVEMENT_FLAG`。
+     * 這一條擋兩件事 —— 對齊那一刻的舊存檔不倒退，以及日後課程再長時不倒退。
+     *
+     * @param {number} [badgeTarget] 一部原典要幾個標記（與圖鑑顯示一致）
      */
-    hiddenAchievement(badgeTarget = 5) {
-      const all = cat.techniques;
-      const collected = all.filter((t) => state.collected.includes(t.id)).length;
+    hiddenAchievement(badgeTarget = BADGE_TARGET) {
+      const { total, collected } = achievementTotals();
       const vendors = (cur.vendors || []).map((v) => ({
         id: v.id,
         name: v.name,
         count: state.badges[v.id] || 0,
         done: (state.badges[v.id] || 0) >= badgeTarget,
       }));
-      const complete = collected === all.length && all.length > 0 && vendors.every((v) => v.done);
-      return { complete, collected, total: all.length, vendors, badgeTarget };
+      const lit = vendors.filter((v) => v.done).length;
+      const reached = shrineOpen({
+        skills: collected,
+        skillsTotal: total,
+        mansionsLit: lit,
+        mansionsTotal: vendors.length,
+      });
+      return {
+        complete: reached || Boolean(state.flags && state.flags[ACHIEVEMENT_FLAG]),
+        reached,
+        collected,
+        total,
+        vendors,
+        badgeTarget,
+        mansionsLit: lit,
+        mansionsTotal: vendors.length,
+      };
     },
 
     /** 已精通（該區技巧全收集）的區域 id 清單。 */
@@ -1520,6 +1692,106 @@ export function createProgression({
       return (cur.builder || [])
         .filter((b) => (map[b.id] || []).some((topic) => topics.has(topic)))
         .map((b) => b.id);
+    },
+
+    /* ---------------------------------------------------------------- *
+     * v1.2 · P23：今日三事（**提議，不是任務**）
+     *
+     * 規則全部住在 `daily.js`（純函式）；這一層只做三件事：
+     * 換日、落盤、把「做完了沒」問出來。
+     *
+     * **關掉之後這一層一個字都不寫**：`dailyEnabled()` 是 false 時，
+     * 底下每一支都在第一行就回去了 —— 存檔裡那三格永遠停在預設值，
+     * 與「從來沒有這個功能」逐值相同。
+     * ---------------------------------------------------------------- */
+
+    /** 今日三事開著嗎（設定；預設開）。 */
+    dailyEnabled() {
+      return state.settings.daily !== false;
+    },
+
+    /** 存檔裡那三格（唯讀複本）。 */
+    dailyState() {
+      const box = dailyBox();
+      return { day: box.day, ids: box.ids.slice(), visited: box.visited.slice() };
+    },
+
+    /**
+     * 今天那三個提議（id）。關掉時回 `null`。
+     *
+     * 換日就重挑一組 —— **不刪任何進度**：這一支碰得到的只有 `state.daily` 那三格。
+     * @param {Date} [now] 測試可以指定「今天是哪一天」
+     * @returns {string[]|null}
+     */
+    dailyOffers(now) {
+      if (state.settings.daily === false) return null;
+      const key = Daily.localDayKey(now);
+      const box = dailyBox();
+      let changed = false;
+      if (box.day !== key) {
+        box.day = key;
+        box.visited = [];
+        box.ids = [];
+        changed = true;
+      }
+      if (!box.ids.length) {
+        const picked = Daily.pickOffers(key, dailyPool(box.visited));
+        if (picked.length) {
+          box.ids = picked;
+          changed = true;
+        }
+      }
+      if (changed) persist();
+      return box.ids.slice();
+    },
+
+    /**
+     * 今天那三件事現在長什麼樣（給圖鑑那一頁畫）。關掉時回 `null`。
+     * @param {Date} [now]
+     * @returns {Array<object>|null}
+     */
+    dailyReport(now) {
+      const ids = api.dailyOffers(now);
+      if (!ids) return null;
+      const visited = dailyBox().visited;
+      return ids
+        .map((id) => {
+          const o = Daily.parseOffer(id);
+          if (!o) return null;
+          const done = Daily.offerDone(id, { bestGrade: api.bestGrade, found: clueFound, visited });
+          // 畫面要說「在哪一片土地」——這裡查出來，畫的那一支就不必再認得資料層
+          if (o.kind === 'find') {
+            const e = ((clues || {})[o.clueKind] || []).find((x) => x && x.id === o.clueId);
+            return { ...o, clueRegion: (e && e.region) || '', done };
+          }
+          if (o.kind === 'polish') {
+            const c = challengeById.get(o.challengeId);
+            return { ...o, challengeRegion: (c && c.region) || '', title: (c && c.title) || o.challengeId, done };
+          }
+          return { ...o, done };
+        })
+        .filter(Boolean);
+    },
+
+    /**
+     * 走進一片土地了。**只記今天走過哪幾片**，不給 XP、不碰任何既有欄位。
+     * @param {string} regionId
+     * @returns {boolean} 這一次真的記下了嗎
+     */
+    noteRegionVisit(regionId) {
+      if (state.settings.daily === false) return false;
+      if (typeof regionId !== 'string' || !regionId) return false;
+      const box = dailyBox();
+      const key = Daily.localDayKey();
+      if (box.day !== key) {
+        box.day = key;
+        box.ids = [];
+        box.visited = [];
+      }
+      if (box.visited.includes(regionId)) return false;
+      box.visited.push(regionId);
+      persist();
+      return true;
     },
 
     updateSettings(patch) {

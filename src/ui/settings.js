@@ -15,6 +15,8 @@ export function createSettings({
   onPerfMonitorChange,
   // v1.2 · P19：螢火指路（外交式導向）的開關
   onGuidesChange,
+  // v1.2 · P23：今日三事（提議，不是任務）的開關
+  onDailyChange,
   onOpenKeyHelp,
 }) {
   const overlay = createOverlay({
@@ -57,6 +59,12 @@ export function createSettings({
           <label for="set-guides">螢火指路</label>
           <input id="set-guides" type="checkbox" data-guides ${s.guides !== false ? 'checked' : ''} />
           <span class="muted">開著的時候，路邊的螢火群會整體往「下一個建議去處」那一側飄。想自己找路就關掉它 —— 關掉之後螢火只會照原本的樣子聚散。</span>
+        </section>
+
+        <section class="settings__row">
+          <label for="set-daily">今日三事</label>
+          <input id="set-daily" type="checkbox" data-daily ${s.daily !== false ? 'checked' : ''} />
+          <span class="muted">開著的時候，圖鑑最上面會有三個今天可以做的提議。它不是任務 —— 做不做都可以，明天會換一批。想自己安靜地走就關掉它。</span>
         </section>
 
         <section class="settings__row">
@@ -143,6 +151,11 @@ export function createSettings({
     overlay.body.querySelector('[data-guides]').addEventListener('change', (e) => {
       progression.updateSettings({ guides: e.target.checked });
       onGuidesChange?.(e.target.checked);
+    });
+
+    overlay.body.querySelector('[data-daily]').addEventListener('change', (e) => {
+      progression.updateSettings({ daily: e.target.checked });
+      onDailyChange?.(e.target.checked);
     });
 
     overlay.body.querySelector('[data-perf]').addEventListener('change', (e) => {

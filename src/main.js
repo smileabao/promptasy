@@ -153,11 +153,26 @@ function boot() {
    * 一夜的時辰是進度的外顯。applyMood 要等引擎建好才存在，所以先掛一個會查的殼。
    */
   let applyMood = null;
+  /**
+   * v1.2 · P23：等級穿在身上 —— 存檔一變就對一次披肩那一圈光點。
+   * 旅人比進程晚建，所以先留一個殼（同 `applyMood` 的寫法）。
+   */
+  let traveller = null;
   const progression = createProgression({
     catalog,
     challenges: content.challenges,
+    /*
+     * v1.2 · P23：今日三事會提「去找一處還沒找到的線索」——
+     * 三份資料只被讀 `id` 與 `region`，一個位元組都不動。
+     */
+    clues: {
+      secret: secretFile.entries || [],
+      letter: letterFile.entries || [],
+      ins: inscriptionFile.entries || [],
+    },
     onChange: () => {
       if (applyMood) applyMood();
+      if (traveller) traveller.setLevel(progression.levelInfo().level);
     },
   });
   const quality = progression.state.settings.quality === 'low' ? 'low' : 'high';
@@ -259,6 +274,12 @@ function boot() {
     // reduce-motion 關掉的是擠壓與塵的飛散，不是跳躍本身（WORLD.md §2.4）
     reducedMotion,
   });
+  /*
+   * v1.2 · P23：開機就把等級穿上去（不用等下一次過關）。
+   * 之後每一次存檔變動走 `progression` 的 `onChange`。
+   */
+  traveller = player;
+  player.setLevel(progression.levelInfo().level);
 
   /* --- 氛圍的單一入口（v1.2 · P05）：區域色盤 × 一夜的時辰 → 引擎的 setMood ---
    * 進區、進程變化、forceHour 都走這一個函式；引擎那邊只有一份 target 在管霧色／月亮／星星／極光。
@@ -399,7 +420,7 @@ function boot() {
     const achievement = progression.hiddenAchievement();
     if (achievement.complete && !progression.state.flags.finaleSeen) {
       progression.setFlag('finaleSeen', true);
-      hud.toast(`✦ 隱藏成就：${achievement.total} 條技巧全數收集，四廠徽章全數點亮`, 'good');
+      hud.toast(`✦ 隱藏成就：${achievement.total} 條技法全數收集，四宿全數點亮`, 'good');
       hud.celebrate(`${achievement.collected} / ${achievement.total} · 全數收集`, 'finale');
       audio.cue('finale');
       engine.pulse(1.2);
@@ -708,6 +729,13 @@ function boot() {
     },
     onPerfMonitorChange: (on) => {
       perfmon.setEnabled(on);
+    },
+    /*
+     * v1.2 · P23：今日三事。馬上生效 —— 關掉之後圖鑑那一區整塊不出現，
+     * 而且存檔那三格再也不會被寫（與從來沒有這個功能一樣）。
+     */
+    onDailyChange: (on) => {
+      hud.toast(on ? '圖鑑最上面會有三個今天的提議。' : '今日三事收起來了 —— 想走哪裡就走哪裡。', 'info');
     },
     // v1.2 · P19：螢火指路。馬上生效 —— 關掉的下一幀螢火群就回到原本的聚散
     onGuidesChange: (on) => {
@@ -1734,6 +1762,8 @@ function boot() {
         // v1.2 · P06：進區時刷新閘門／石座三態（低頻事件；只刷三態、不重做標籤）
         world.refreshVisualStates();
         if (!here.onBridge) {
+          // v1.2 · P23：今日三事的「走一趟」——只記今天走過哪幾片，不給 XP、不碰任何既有欄位
+          progression.noteRegionVisit(here.id);
           engine.pulse(0.55);
           const g = content.group(here.id);
           if (g) hud.toast(`進入 ${g.name} · ${g.nameEn}`, 'info');
@@ -2168,6 +2198,15 @@ function boot() {
   /* --- 啟動 --- */
   // v1.2 · P19：螢火指路照存檔開機（舊存檔沒有這一欄 → 預設開著）
   world.setGuidance?.(progression.state.settings.guides !== false);
+  /*
+   * v1.2 · P23：開機站的那一片土地也算今天走過了。
+   * 迴圈裡那一支只有**跨過區界**才會跑（每幀問一次會在 tick 裡配置 Date 與字串，
+   * 違反 WORLD §6.2「每幀不配置」），所以出生的那一片要在這裡補一次。
+   */
+  {
+    const spawn = world.regionAt(SPAWN_AT[0], SPAWN_AT[1]);
+    if (spawn && !spawn.onBridge) progression.noteRegionVisit(spawn.id);
+  }
   hud.refresh();
   engine.start();
   player.setInputEnabled(false);
@@ -2282,6 +2321,15 @@ function boot() {
     }),
     /** v1.2 · P22：小祠會還給玩家的那一句（測試用：舊存檔走退路）。 */
     finaleSay: () => finalSayFor(progression.firstPrompt()),
+    /** v1.2 · P23：今天那三個提議現在長什麼樣（測試用；關掉時是 null）。 */
+    daily: () => ({
+      enabled: progression.dailyEnabled(),
+      state: progression.dailyState(),
+      report: progression.dailyReport(),
+      block: Boolean(codex.root.querySelector('[data-daily]')),
+    }),
+    /** v1.2 · P23：披肩上現在亮著幾格（測試用：格數 ＝ 等級）。 */
+    levelPips: () => player.levelPips,
     /** v1.2 · P22：存檔變了 → 讓小祠與母碑重新對一次（測試用：與過關那條路走同一支）。 */
     refreshFinale,
     /** v1.2 · P22：現在走近的是終局的哪一件（測試用：仲裁排第一位）。 */

@@ -1,5 +1,5 @@
 /**
- * Promptasy — 隱藏成就：全部技巧收集 ＋ 四宿全亮
+ * Promptasy — 隱藏成就：130 條技法全收 ＋ 四宿全亮（v1.2 · P23 對齊 P22 的終局門檻）
  *
  * 這是整趟旅程的收尾畫面：不給新的東西，只把玩家做到的事情好好講一次，
  * 並留下四部原典的入口（護欄 2：內容可回溯到出處），附上免責句。
@@ -18,7 +18,11 @@ export function createAchievement({ content, progression, onClose, onShare = nul
   function render() {
     const info = progression.hiddenAchievement();
     overlay.setEyebrow('隱藏成就 · 旅程完成');
-    overlay.setTitle('✦ 隱藏成就達成', `全 ${info.total} 條技巧收集完畢 · 四宿全亮`);
+    /*
+     * v1.2 · P23：這裡的數字與 P22 終局的門檻**同一把尺**（130 條技法 ＋ 四宿全亮）。
+     * `hiddenAchievement()` 自己就是呼叫 `shrineOpen()` 算的 —— 不會有兩份數字。
+     */
+    overlay.setTitle('✦ 隱藏成就達成', `全 ${info.total} 條技法收集完畢 · 四宿全亮`);
 
     /*
      * v1.2 · P08：四宿星圖（和圖鑑同一支純函式、同一套畫法）。
@@ -51,7 +55,7 @@ export function createAchievement({ content, progression, onClose, onShare = nul
     overlay.body.innerHTML = `
       <div class="finale">
         <p class="finale__lead">
-          你走完了五片土地，把 ${info.total} 條 prompt 技巧一條一條寫出來、被判定通過、收進圖鑑。
+          你走完了這片高原，把 ${info.total} 條 prompt 技法一條一條寫出來、被判定通過、收進圖鑑。
           從「把話講清楚」開始，一路到示範、推理、脈絡、流程與參數 —— 這些都不是背下來的，是你實際寫過的。
         </p>
         <div class="starmap">${starSky}</div>

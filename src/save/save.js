@@ -28,6 +28,13 @@ export const SAVE_VERSION = 1;
  */
 export const WATCH_TOPICS = Object.freeze(['stuck', 'way', 'lore', 'skill']);
 
+/** v1.2 · P23：今日三事的日期長什麼樣（`YYYY-MM-DD`，玩家本地時間的今天）。 */
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** 一天最多存幾個提議 id（`daily.js` 的 `DAILY_COUNT` 是 3；這裡留一格餘裕給壞存檔）。 */
+const DAILY_IDS_MAX = 4;
+/** 一天最多記幾片走過的土地（世界一共 12 片）。 */
+const DAILY_VISITED_MAX = 16;
+
 /** 全新存檔。 */
 export function defaultSave() {
   return {
@@ -167,6 +174,19 @@ export function defaultSave() {
      * 刻上去之後才會出現在帶得走的那張刻印記錄上。
      */
     motherStele: '',
+    /**
+     * v1.2 · P23：今日三事（提議，不是任務）。
+     *
+     *   day     `YYYY-MM-DD`（**玩家本地時間**的今天；空字串＝還沒挑過）
+     *   ids     今天那三個提議的 id（見 `src/progression/daily.js`）
+     *   visited 今天走過哪幾片土地（「走一趟」那一種提議看它）
+     *
+     * 純加法，而且**一格都不影響進度**：不給 XP、不寫 `bestGrades`、不收技巧、
+     * 不算徽章、不是任何東西的解鎖條件。換日只是換三個提議 ——
+     * 這裡沒有「連著幾天」、沒有「錯過」、沒有任何會讓玩家少一樣東西的欄位。
+     * 設定裡關掉之後，這三格永遠停在預設值（那一層一個字都不寫）。
+     */
+    daily: { day: '', ids: [], visited: [] },
     badges: { openai: 0, anthropic: 0, google: 0, xai: 0 },
     settings: {
       music: 'ambient-01',
@@ -180,6 +200,8 @@ export function defaultSave() {
       perfMonitor: false,
       // v1.2 · P19：螢火指路（螢火群整體流向下一個建議去處）。預設開啟 —— 它是導覽，不是特效
       guides: true,
+      // v1.2 · P23：今日三事。預設開啟 —— 它是提議，不是任務；關掉之後與從來沒有這個功能一樣
+      daily: true,
     },
     flags: { introSeen: false, prologueDone: false },
   };
@@ -331,6 +353,20 @@ export function normalize(raw) {
     }
   }
 
+  /*
+   * v1.2 · P23：今日三事。`day` 驗形（`YYYY-MM-DD`）；**日期壞掉就整筆當成還沒挑過** ——
+   * 沒有日期的三個提議是沒有意義的（不知道它們是哪一天的）。
+   * `ids` / `visited` 只留字串、去重、各自截斷。這一欄沒有任何一條路可以扣掉進度。
+   */
+  const daily = { day: '', ids: [], visited: [] };
+  if (d.daily && typeof d.daily === 'object' && !Array.isArray(d.daily) && DAY_KEY_RE.test(String(d.daily.day || ''))) {
+    daily.day = d.daily.day;
+    const pick = (v, cap) =>
+      [...new Set((Array.isArray(v) ? v : []).filter((x) => typeof x === 'string' && x && x.length <= 96))].slice(0, cap);
+    daily.ids = pick(d.daily.ids, DAILY_IDS_MAX);
+    daily.visited = pick(d.daily.visited, DAILY_VISITED_MAX);
+  }
+
   const settings = { ...base.settings };
   if (d.settings && typeof d.settings === 'object') {
     if (typeof d.settings.music === 'string') settings.music = d.settings.music;
@@ -345,6 +381,8 @@ export function normalize(raw) {
     settings.perfMonitor = d.settings.perfMonitor === true;
     // v1.2 · P19：螢火指路。舊存檔沒有這個欄位 → 預設開啟；**只認得明寫的 false**。
     settings.guides = d.settings.guides !== false;
+    // v1.2 · P23：今日三事。舊存檔沒有這個欄位 → 預設開啟；**只認得明寫的 false**。
+    settings.daily = d.settings.daily !== false;
   }
 
   // flags 一律存布林值；未知的旗標也保留（例如 finaleSeen、各區精通提示）
@@ -410,6 +448,8 @@ export function normalize(raw) {
     guardians,
     // v1.2 · P19：舊存檔沒有 shortcuts → 空物件（純加法；一條都沒推開）
     shortcuts,
+    // v1.2 · P23：舊存檔沒有 daily → 三格都是空的（純加法；今天還沒挑過三件事）
+    daily,
     // v1.2 · P07：舊存檔沒有 firstPrompt → 空字串（純加法）。壞值一律落成空字串。
     firstPrompt: firstPrompt(d.firstPrompt),
     // v1.2 · P22：舊存檔沒有 motherStele → 空字串（純加法）＝ 碑面留白。壞值一律落成空字串。

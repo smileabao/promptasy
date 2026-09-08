@@ -629,6 +629,18 @@ export function createPlayer({
     celebrate() {
       return character.celebrate();
     },
+    /**
+     * v1.2 · P23：等級穿在身上 —— 披肩下緣亮著的光點數 ＝ 等級。
+     * 存檔一變就對一次（`main.js` 的 `onChange`），開機也對一次。
+     * @param {number} level
+     */
+    setLevel(level) {
+      return character.setLevel(level);
+    },
+    /** 現在披肩上亮著幾格（測試會看）。 */
+    get levelPips() {
+      return character.levelPips;
+    },
     /** 目前的水平速度（m/s）—— 給 HUD / 音效判斷用。 */
     get speed() {
       return Math.hypot(velocity.x, velocity.z);

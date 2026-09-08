@@ -60,6 +60,37 @@ const GAIT = Object.freeze({
   lean: [0.07, 0.24],
 });
 
+/* ------------------------------------------------------------------ *
+ * v1.2 · P23：等級穿在身上 —— 披肩下緣那一圈光點
+ *
+ * 格數 ＝ 等級（`levelFromXp()` 封在 99），所以一圈放不下的時候要有規則。
+ * 這裡選的規則是**一圈 33 格、最多三圈**：33 × 3 ＝ 99，剛好等於等級上限，
+ * 所以「格數 ＝ 等級」在整個定義域上都成立 —— 永遠不必用「超過就不畫」
+ * 這種會說謊的收尾。三圈都貼著披肩的錐面往上排（半徑跟著錐面收），
+ * 最高那一圈仍然在肩線以下、在胸口那顆膠囊之外，不會埋進身體裡。
+ *
+ * 成本：一個 `InstancedMesh`（一次 draw call、一份材質、一份幾何），
+ * **零新光源**（自發光材質，WORLD §6.1 的 37／20 一格不動）、
+ * **零新碰撞體**（角色不在 `collectSolids()` 掃的那棵樹底下）。
+ * 低畫質照蓋 —— 它是進度回饋，不是氛圍層。
+ * ------------------------------------------------------------------ */
+/** 一圈幾格。 */
+export const PIP_PER_RING = 33;
+/** 最多幾圈。 */
+export const PIP_RINGS = 3;
+/** 放得下幾格 ＝ 等級上限（99）。 */
+export const PIP_MAX = PIP_PER_RING * PIP_RINGS;
+/** 披肩：`ConeGeometry(0.44, 0.5, …)` 掛在 torso 的 y=0.42 → 下緣在 0.42 − 0.25。 */
+const CAPE_RIM_Y = 0.42 - 0.5 / 2;
+const CAPE_R = 0.44;
+const CAPE_H = 0.5;
+/** 圈與圈的高度差（三圈共 0.12，遠低於披肩高度 0.5）。 */
+const PIP_RISE = 0.06;
+/** 光點浮在布面外側這麼多（不然一半會埋進錐面裡）。 */
+const PIP_OUT = 0.022;
+/** 一顆光點的半徑。 */
+const PIP_R = 0.019;
+
 /** 膝蓋最大屈曲落在擺盪中期（步態週期約 70%），換算成相位偏移。 */
 const KNEE_PHASE = 0.3;
 /** 靜息呼吸 12–20 次/分 → 約 0.25 Hz。 */
@@ -160,6 +191,37 @@ export function createCharacter({ quality = 'high' } = {}) {
     new THREE.Mesh(geo(new THREE.ConeGeometry(0.44, 0.5, 8, 1, true)), darkShellMat)
   );
   cape.position.y = 0.42;
+
+  /*
+   * 等級光點（見檔頭的 PIP_* 那一段）。用 `InstancedMesh` 一次畫完，
+   * `count` 就是等級 —— 要多亮一格只改一個整數，不新增節點、不重建幾何。
+   */
+  const pipMat = mat(PALETTE.warm, {
+    emissive: new THREE.Color(PALETTE.warm),
+    emissiveIntensity: 1.6,
+    roughness: 0.35,
+  });
+  const pipGeo = geo(new THREE.OctahedronGeometry(PIP_R, 0));
+  const pips = new THREE.InstancedMesh(pipGeo, pipMat, PIP_MAX);
+  pips.name = 'traveler:pips';
+  pips.count = 1;
+  pips.frustumCulled = false;
+  torso.add(pips);
+  {
+    const m = new THREE.Matrix4();
+    for (let i = 0; i < PIP_MAX; i += 1) {
+      const ring = Math.floor(i / PIP_PER_RING);
+      const k = i % PIP_PER_RING;
+      const rise = ring * PIP_RISE;
+      // 錐面往上收：半徑 = 底圈半徑 × (1 − 高度 / 錐高)，再往外推一點點
+      const r = CAPE_R * (1 - rise / CAPE_H) + PIP_OUT;
+      // 每一圈錯開半格，三圈疊起來才不會排成三條對齊的直線
+      const a = ((k + ring * 0.5) / PIP_PER_RING) * Math.PI * 2;
+      m.makeTranslation(Math.sin(a) * r, CAPE_RIM_Y + rise, Math.cos(a) * r);
+      pips.setMatrixAt(i, m);
+    }
+    pips.instanceMatrix.needsUpdate = true;
+  }
 
   const belt = add(torso, new THREE.Mesh(geo(new THREE.TorusGeometry(0.25, 0.055, 4, 10)), leatherMat));
   belt.position.y = 0.04;
@@ -316,6 +378,21 @@ export function createCharacter({ quality = 'high' } = {}) {
   const CELEBRATE_TIME = 1.25;
 
   /*
+   * v1.2 · P23：多一格的時候整圈亮一次。
+   *
+   * 借的是慶祝那一條曲線（同一種鐘形、同一個時間長度）—— 不新增動畫檔、
+   * 不新增音效。升等可能發生在過關以外的地方（讀一塊碑、走進一處祕境），
+   * 那幾條路不會舉手歡呼，但披肩仍然要亮一下，不然「多了一格」會安靜地過去。
+   */
+  let pipFlashT = 0;
+  const PIP_FLASH_TIME = 1.25;
+
+  /*
+   * v1.2 · P23：現在穿著幾格光點（＝等級）。`pips.count` 就是那個數字 ——
+   * 這裡不另存一份，免得哪天兩份對不上（一份真相）。
+   */
+
+  /*
    * 坐下（Phase 25）：長凳唯一的用途。
    *
    * 一樣是 rigless —— 沒有新的動畫檔，只是把既有的關節往「坐姿」推：
@@ -443,6 +520,11 @@ export function createCharacter({ quality = 'high' } = {}) {
     scarfTail.rotation.z = Math.sin(t * 1.3 + p * 0.5) * (0.08 + move * 0.12);
     satchel.rotation.x = Math.sin(p + 0.9) * 0.13 * move;
 
+    /* --- 等級光點：平時慢慢呼吸，多一格或過關那一下整圈亮起來 --- */
+    if (pipFlashT > 0) pipFlashT = Math.max(0, pipFlashT - dt);
+    const pipFlash = pipFlashT > 0 ? Math.sin((1 - pipFlashT / PIP_FLASH_TIME) * Math.PI) : 0;
+    pipMat.emissiveIntensity = 1.5 + Math.sin(t * 1.7) * 0.14 + Math.max(cheer, pipFlash) * 2.4;
+
     /* --- 提燈：走路時晃、站著時慢慢擺；燈光呼吸 --- */
     lanternPivot.rotation.x = -arms[1].shoulder.rotation.x * 0.75 + Math.sin(p + 0.4) * 0.12 * move;
     lanternPivot.rotation.z = Math.sin(t * 1.1 + p * 0.5) * (0.1 + move * 0.16);
@@ -480,6 +562,35 @@ export function createCharacter({ quality = 'high' } = {}) {
     joints,
     lanternLight,
     lanternPivot,
+    /**
+     * v1.2 · P23：把等級穿上去 —— 亮著的光點數 ＝ 等級。
+     *
+     * 只改 `InstancedMesh.count` 一個整數：不新增節點、不重建幾何、不碰光源。
+     * 夾在 0–99（`PIP_MAX`）之間 —— 99 是等級上限，也是這一圈放得下的量，
+     * 所以夾住這件事在正常遊玩裡永遠不會發生（它擋的是壞存檔）。
+     * @param {number} level
+     * @returns {boolean} 這一次真的變了嗎
+     */
+    setLevel(level) {
+      const want = Math.max(0, Math.min(PIP_MAX, Math.round(Number.isFinite(level) ? level : 1)));
+      if (want === pips.count) return false;
+      // 多一格才亮（掉回去不亮 —— 只有重置會讓它變少，那一刻不該像在慶祝）
+      if (want > pips.count) pipFlashT = PIP_FLASH_TIME;
+      pips.count = want;
+      return true;
+    },
+    /** 現在亮著幾格（測試會看）。 */
+    get levelPips() {
+      return pips.count;
+    },
+    /** 那一圈光點本身（測試 / 除錯用）。 */
+    get pipMesh() {
+      return pips;
+    },
+    /** 多一格那一下還剩多久（測試會看：0 ＝ 已經收回去了）。 */
+    get pipFlash() {
+      return pipFlashT;
+    },
     /** 過關時的小慶祝（雙手舉起）。重複觸發會重新計時。 */
     celebrate() {
       celebrateT = CELEBRATE_TIME;

@@ -4165,8 +4165,14 @@ for (const g of catalog.implementedRegions()) {
 eq(prog.masteredRegions().length, catalog.counts.implementedRegions, '所有已上線的區域全部精通');
 
 const achievement = prog.hiddenAchievement();
-eq(achievement.complete, true, '隱藏成就達成（全技巧 ＋ 四廠徽章）');
-eq(achievement.collected, curriculum.techniques.length, '隱藏成就的收集數正確');
+eq(achievement.complete, true, '隱藏成就達成（全技法 ＋ 四宿全亮）');
+/*
+ * v1.2 · P23：門檻對齊 P22 的終局（130 條技法全收 ＋ 四宿全亮）。
+ * 以前這裡量的是 68 條舊技巧 —— 兩個「全部完成」不是同一件事。
+ */
+eq(achievement.collected, catalog.counts.skills, '隱藏成就的收集數＝130 條技法（與終局同一把尺）');
+eq(achievement.total, catalog.counts.skills, '隱藏成就的總數＝130 條技法');
+eq(achievement.reached, true, '而且是**真的**達成（不是靠「達成過了」那個旗標撐著）');
 ok(
   achievement.vendors.every((v) => v.done),
   '四廠徽章都達標',
@@ -14637,12 +14643,24 @@ console.log('\n▸ 課程 v2 runtime catalog（Phase B step 1）');
     const a = createProgression({ catalog, challenges });
     const b = createProgression({ curriculum, challenges });
     eq(a.masteredRegions().join(','), b.masteredRegions().join(','), 'progression：兩種建法的精通列舉一致');
+    /*
+     * v1.2 · P23：隱藏成就的門檻對齊 P22（130 條技法全收 ＋ 四宿全亮）之後，
+     * 兩種建法的**總數本來就該不一樣** —— 丟 catalog 的認得 130 條技法，
+     * 只丟 curriculum 的那一份世界裡根本沒有 v2 技法，「全部」就只有 68 條。
+     * 一致的是四宿那一半（同一份 vendors、同一個門檻）。
+     */
+    eq(a.hiddenAchievement().total, catalog.counts.skills, 'progression：隱藏成就的總數＝130 條技法（P22 那把尺）');
+    eq(b.hiddenAchievement().total, catalog.counts.techniques, '（對照）沒有 v2 技法的建法退回 68 條舊技巧那把尺');
     eq(
-      JSON.stringify(a.hiddenAchievement()),
-      JSON.stringify(b.hiddenAchievement()),
-      'progression：兩種建法的隱藏成就統計一致'
+      JSON.stringify(a.hiddenAchievement().vendors),
+      JSON.stringify(b.hiddenAchievement().vendors),
+      'progression：兩種建法的四宿統計一致'
     );
-    eq(a.hiddenAchievement().total, catalog.counts.techniques, 'progression：隱藏成就的總數來自 catalog');
+    eq(
+      a.hiddenAchievement().mansionsTotal,
+      b.hiddenAchievement().mansionsTotal,
+      'progression：兩種建法都知道一共有四宿'
+    );
     const { REGION_GATES: GATES } = await import('../src/progression/progression.js');
     eq(
       Object.keys(GATES).slice().sort().join(','),
@@ -25920,6 +25938,610 @@ console.log('');
     '長凳：每張凳子都把「座面比坐姿的髖高多少」告訴角色（人才會坐在凳面上，不是被凳面攔腰穿過）',
     `最差差 ${worstRise.toFixed(3)} m`
   );
+}
+
+
+/* ================================================================== *
+ * v1.2 · P23：進程外顯 ＋ 今日三事（無過期）＋ 成就整理
+ *
+ *   ① 等級穿在披肩上：格數 ＝ 等級，一圈 33 格 × 三圈 ＝ 99 ＝ 等級上限
+ *      零新光源、零新碰撞體、低畫質照蓋
+ *   ② 今日三事是**提議**：本地時間換日、換日只換提議不刪進度、
+ *      可以關掉且關掉之後與「從來沒有這個功能」逐值相同、
+ *      **整層掃不到一個催人的字**（倒數／期限／連著幾天／錯過…）
+ *   ③ 隱藏成就對齊 P22 的終局門檻（130 條技法 ＋ 四宿全亮），
+ *      而且**任何既有存檔的成就狀態不准倒退**
+ * ================================================================== */
+console.log('\n▸ 進程外顯 ＋ 今日三事 ＋ 成就整理（v1.2 · P23）');
+{
+  const EX23 = EXPECT.daily;
+  const Char23 = await import('../src/player/character.js');
+  const Daily23 = await import('../src/progression/daily.js');
+  const DailyUi23 = await import('../src/ui/daily.js');
+  const Prog23 = await import('../src/progression/progression.js');
+  const Turn23 = await import('../src/world/turning.js');
+  const Star23 = await import('../src/ui/starmap.js');
+  /*
+   * 只看真的會跑的程式（同 P22 的做法）。這一格的每一條靜態掃描都要先剝掉註解 ——
+   * 註解裡本來就會**解釋**「為什麼這裡沒有倒數、沒有期限、不用 UTC」，
+   * 拿沒剝過的原始碼去掃，掃到的是自己的說明文字，不是出貨的行為。
+   */
+  const strip23 = (src) =>
+    src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const dailySrc23 = strip23(readFileSync(resolve(root, 'src/progression/daily.js'), 'utf8'));
+  const dailyUiSrc23 = strip23(readFileSync(resolve(root, 'src/ui/daily.js'), 'utf8'));
+  const charSrc23 = readFileSync(resolve(root, 'src/player/character.js'), 'utf8');
+  const progSrc23 = readFileSync(resolve(root, 'src/progression/progression.js'), 'utf8');
+  const mainSrc23 = readFileSync(resolve(root, 'src/main.js'), 'utf8');
+  const setSrc23 = readFileSync(resolve(root, 'src/ui/settings.js'), 'utf8');
+  const codexSrc23 = readFileSync(resolve(root, 'src/ui/codex.js'), 'utf8');
+  const saveSrc23 = readFileSync(resolve(root, 'src/save/save.js'), 'utf8');
+
+  ok(EX23 && typeof EX23 === 'object', '契約檔登記了 P23 這一格');
+  ok(dailySrc23.length > 800 && dailyUiSrc23.length > 400, '（前提）量得到剝掉註解之後的那兩支程式', `${dailySrc23.length}/${dailyUiSrc23.length}`);
+
+  /* --- ① 進程外顯：等級穿在披肩上 --- */
+  {
+    eq(Char23.PIP_PER_RING, EX23.pipPerRing, '一圈幾格與契約逐值相同');
+    eq(Char23.PIP_RINGS, EX23.pipRings, '幾圈與契約逐值相同');
+    eq(Char23.PIP_MAX, EX23.pipMax, '放得下幾格與契約逐值相同');
+    eq(Char23.PIP_PER_RING * Char23.PIP_RINGS, Char23.PIP_MAX, '一圈 × 幾圈 ＝ 放得下的量（不是各寫一個數）');
+
+    /*
+     * **「一圈放不下」那條規則的驗收**：放得下的量要**剛好等於等級上限**。
+     * 等級上限不手抄 —— 直接把一大筆 XP 餵進 `levelFromXp()` 問它封在哪裡。
+     * 少一格就會有一個等級穿不上身（＝「格數 ＝ 等級」在定義域上破掉）。
+     */
+    const cap23 = Prog23.levelFromXp(1e9).level;
+    eq(cap23, EX23.levelCap, '等級上限與契約逐值相同');
+    eq(Char23.PIP_MAX, cap23, '披肩放得下的格數＝等級上限（每一個等級都穿得上身）');
+
+    for (const q of ['high', 'low']) {
+      const c = Char23.createCharacter({ quality: q });
+      // 低畫質照蓋 —— 它是進度回饋，不是氛圍層
+      ok(Boolean(c.pipMesh) && c.pipMesh.isInstancedMesh === true, `[${q}] 披肩那一圈是一個 InstancedMesh（一次 draw call）`);
+      eq(c.pipMesh.name, 'traveler:pips', `[${q}] 那一圈有名字（場景圖找得到）`);
+      eq(c.pipMesh.instanceMatrix.count, Char23.PIP_MAX, `[${q}] 位置一開始就排滿 99 格（每幀不重算）`);
+
+      // 逐級：0…99 每一級都對得上
+      let mismatch = null;
+      for (let lv = 0; lv <= Char23.PIP_MAX; lv += 1) {
+        c.setLevel(lv);
+        if (c.levelPips !== lv) {
+          mismatch = `Lv.${lv} → ${c.levelPips}`;
+          break;
+        }
+      }
+      eq(mismatch, null, `[${q}] 逐級對應：Lv.n 就亮 n 格（0–99 一級一級走過）`, String(mismatch));
+      c.setLevel(Char23.PIP_MAX + 40);
+      eq(c.levelPips, Char23.PIP_MAX, `[${q}] 壞存檔給的超大等級被夾在 99（不會畫出不存在的格子）`);
+      c.setLevel(-8);
+      eq(c.levelPips, 0, `[${q}] 負的等級夾到 0（不會變成負數的 count）`);
+      c.setLevel(12);
+      eq(c.setLevel(12), false, `[${q}] 同一個等級再設一次不算變（不會每幀當成有事發生）`);
+
+      /*
+       * **多一格那一下整圈亮一次**（借慶祝那條曲線，不新增動畫檔也不新增音效）。
+       * 掉回去（重置）不亮 —— 那一刻不該像在慶祝。
+       */
+      // 先讓前面幾次 setLevel 留下的那一下亮完，才量得到「平時」那一階
+      for (let i = 0; i < 10; i += 1) c.update({ dt: 0.3, t: 0 });
+      const calm = c.pipMesh.material.emissiveIntensity;
+      c.setLevel(13);
+      c.update({ dt: 0.3, t: 0 });
+      ok(
+        c.pipMesh.material.emissiveIntensity > calm + 0.5,
+        `[${q}] 多一格那一下整圈真的亮起來`,
+        `${calm.toFixed(3)} → ${c.pipMesh.material.emissiveIntensity.toFixed(3)}`
+      );
+      for (let i = 0; i < 10; i += 1) c.update({ dt: 0.3, t: 0 });
+      eq(c.pipFlash, 0, `[${q}] 亮完自己收回去（不會一直亮著）`);
+      ok(
+        Math.abs(c.pipMesh.material.emissiveIntensity - calm) < 1e-6,
+        `[${q}] 收回去之後亮度回到原本那一階`
+      );
+      c.setLevel(4);
+      c.update({ dt: 0.016, t: 0 });
+      eq(c.pipFlash, 0, `[${q}] 格子變少（重置）不亮 —— 那一刻不該像在慶祝`);
+
+      // 零新光源：整隻角色仍然只有提燈那一盞
+      let lights = 0;
+      c.root.traverse((o) => {
+        if (o.isLight) lights += 1;
+      });
+      eq(lights, 1, `[${q}] 整隻角色仍然只有提燈那一盞光源（光點是自發光材質）`);
+      ok(
+        c.pipMesh.material.emissive && c.pipMesh.material.emissiveIntensity > 0,
+        `[${q}] 光點靠 emissive 亮，不靠燈`
+      );
+
+      /*
+       * 幾何：三圈都要**在身體外面、肩線以下、披肩下緣以上**。
+       * 埋進胸口那顆膠囊裡的光點在畫面上看不見 —— 那就是「亮了但沒亮」。
+       */
+      const chestR = 0.27;
+      const shoulderY = 0.46;
+      const rimY = 0.42 - 0.25;
+      let worstIn = Infinity;
+      let highest = -Infinity;
+      let lowest = Infinity;
+      const m4 = new (await import('three')).Matrix4();
+      for (let i = 0; i < Char23.PIP_MAX; i += 1) {
+        c.pipMesh.getMatrixAt(i, m4);
+        const x = m4.elements[12];
+        const y = m4.elements[13];
+        const z = m4.elements[14];
+        worstIn = Math.min(worstIn, Math.hypot(x, z) - chestR);
+        highest = Math.max(highest, y);
+        lowest = Math.min(lowest, y);
+      }
+      ok(worstIn > 0.05, `[${q}] 每一格都在胸口那顆膠囊外面（最緊 ${worstIn.toFixed(3)} m）`, String(worstIn));
+      ok(highest < shoulderY, `[${q}] 最高那一圈仍在肩線以下（${highest.toFixed(3)} < ${shoulderY}）`);
+      // 位置存在 Float32 的 instanceMatrix 裡，所以比的是「一微米」不是位元組相等
+      ok(Math.abs(lowest - rimY) < 1e-5, `[${q}] 最低那一圈就貼在披肩下緣（${lowest.toFixed(4)}）`);
+      c.dispose();
+    }
+
+    /*
+     * 三角形：一格 8 個面（Octahedron detail 0）。滿級 99 格 ＝ 792 個三角。
+     * 這個數字寫下來是為了「增量要小且記錄下來」——它不在世界預算裡
+     * （角色不在 `collectSolids()` 掃的那棵樹底下），但仍然要有人數過。
+     */
+    {
+      const c = Char23.createCharacter({ quality: 'high' });
+      const g = c.pipMesh.geometry;
+      const per = g.index ? g.index.count / 3 : g.attributes.position.count / 3;
+      eq(per, 8, '一格光點 8 個三角形');
+      eq(per * Char23.PIP_MAX, 792, '滿級整圈 792 個三角形（增量記在這裡）');
+      c.dispose();
+    }
+
+    // 接線：開機穿一次、存檔一變再穿一次
+    ok(/player\.setLevel\(progression\.levelInfo\(\)\.level\)/.test(mainSrc23), 'P23：開機就把等級穿上去');
+    ok(
+      /if \(traveller\) traveller\.setLevel\(progression\.levelInfo\(\)\.level\)/.test(mainSrc23),
+      'P23：存檔一變（onChange）披肩跟著對一次'
+    );
+    ok(/setLevel\(level\)/.test(readFileSync(resolve(root, 'src/player/player.js'), 'utf8')), 'P23：玩家層把它轉出去');
+    // 低畫質不准被排除掉（它是進度回饋不是氛圍層）
+    const pipBlock23 = charSrc23.split('const pipMat =')[1].split('const belt =')[0];
+    ok(pipBlock23.length > 200, '（前提）切得到建光點那一段', String(pipBlock23.length));
+    ok(!/quality/.test(pipBlock23), 'P23：建光點那一段裡沒有畫質分支（低畫質照蓋）');
+    ok(!/PointLight|SpotLight|DirectionalLight/.test(pipBlock23), 'P23：建光點那一段裡沒有任何一盞燈');
+  }
+
+  /* --- ② 今日三事：本地時間、無過期、可關掉 --- */
+  {
+    eq(Daily23.DAILY_COUNT, EX23.count, '一天挑幾件與契約逐值相同');
+    eq(Daily23.OFFER_KINDS.join(','), EX23.kinds.join(','), '三種提議與契約逐值相同');
+    eq(Daily23.CLUE_KINDS.join(','), EX23.clueKinds.join(','), '三種線索與契約逐值相同');
+
+    /*
+     * **本地時間換日**（玩家的今天是他自己的今天）。
+     * 反例做成一個「本地與 UTC 剛好跨日」的假時鐘：本地是 2026-01-01，
+     * UTC 還在 2025-12-31。用 `toISOString()` 寫的實作會回 2025-12-31 —— 這條就是紅的。
+     */
+    const fakeClock = {
+      getFullYear: () => 2026,
+      getMonth: () => 0,
+      getDate: () => 1,
+      getUTCFullYear: () => 2025,
+      getUTCMonth: () => 11,
+      getUTCDate: () => 31,
+      toISOString: () => '2025-12-31T23:30:00.000Z',
+    };
+    eq(Daily23.localDayKey(fakeClock), '2026-01-01', '換日看的是玩家本地時間的今天');
+    const utcImpl = (d) => d.toISOString().slice(0, 10);
+    eq(utcImpl(fakeClock), '2025-12-31', '（對照）用 UTC 寫的實作在同一刻會說是昨天');
+    ok(
+      Daily23.localDayKey(fakeClock) !== utcImpl(fakeClock),
+      '出貨的那一支與「用 UTC 換日」不是同一件事'
+    );
+    eq(
+      Daily23.localDayKey({
+        getFullYear: () => 2026,
+        getMonth: () => 8,
+        getDate: () => 3,
+        // UTC 那一組刻意給不一樣的值：改用 UTC 寫的實作在這裡也會紅
+        getUTCFullYear: () => 2026,
+        getUTCMonth: () => 8,
+        getUTCDate: () => 4,
+        toISOString: () => '2026-09-04T00:30:00.000Z',
+      }),
+      '2026-09-03',
+      '月與日補零，而且補的是本地那一組'
+    );
+    ok(Daily23.isDayKey(Daily23.localDayKey()), '今天這一把鑰匙自己驗得過形');
+    ok(!/toISOString|getUTC/.test(dailySrc23), 'daily.js 裡一個 UTC 的寫法都沒有');
+
+    /*
+     * **一個催人的字都不准出現。**
+     * 掃兩面：這一層的原始碼（含註解與所有字串），以及**真的畫出來的 HTML**。
+     * 禁字表刻意包含「任務」「連續」「過期」「倒數」這幾個最容易滑進來的詞。
+     */
+    const PRESSURE23 = [
+      '過期',
+      '逾期',
+      '期限',
+      '倒數',
+      '剩下',
+      '截止',
+      '連續',
+      '連勝',
+      '中斷',
+      '斷了',
+      '錯過',
+      '失敗',
+      '懲罰',
+      '扣除',
+      '限時',
+      '今天結束',
+      '沒完成',
+      '未完成',
+      '作廢',
+      '失效',
+    ];
+    const scanPressure = (text, label) => {
+      const hit = PRESSURE23.filter((w) => text.includes(w));
+      eq(hit.join('、'), '', `${label}：掃不到任何一個催人的字`, hit.join('、'));
+    };
+    // 「任務」只准出現在「不是任務」這句話裡（那是在否認它，不是在催人）
+    const denyTask = (text, label) => {
+      const bare = text.split('不是任務').join('');
+      ok(!bare.includes('任務'), `${label}：除了「不是任務」那一句，一個「任務」都沒有`);
+    };
+    for (const [src, label] of [
+      [dailySrc23, 'daily.js'],
+      [dailyUiSrc23, 'ui/daily.js'],
+    ]) {
+      scanPressure(src, label);
+      denyTask(src, label);
+    }
+    // 設定頁那一段與存檔那一欄也一起掃（說明文字最容易寫成催人的話）
+    {
+      const setBlock = setSrc23.split('<label for="set-daily">')[1].split('</section>')[0];
+      ok(setBlock.length > 60, '（前提）切得到設定頁那一段', String(setBlock.length));
+      scanPressure(setBlock, '設定頁那一段');
+      denyTask(setBlock, '設定頁那一段');
+      const saveBlock = saveSrc23.split('v1.2 · P23：今日三事（提議，不是任務）')[1].split('badges:')[0];
+      ok(saveBlock.length > 100, '（前提）切得到存檔那一欄的說明', String(saveBlock.length));
+      denyTask(saveBlock, '存檔那一欄');
+    }
+
+    /* 候選：只從已經開了的土地挑、已經做完的不再提 */
+    const clues23 = {
+      secret: [
+        { id: 's-open', region: 'foundations' },
+        { id: 's-found', region: 'foundations' },
+        { id: 's-locked', region: 'divergence' },
+      ],
+      letter: [{ id: 'l-open', region: 'foundations' }],
+      ins: [{ id: 'i-locked', region: 'config' }],
+    };
+    const pool23 = Daily23.buildPool({
+      challenges: [
+        { id: 'c-open-b', region: 'foundations' },
+        { id: 'c-open-s', region: 'foundations' },
+        { id: 'c-open-new', region: 'foundations' },
+        { id: 'c-locked-b', region: 'divergence' },
+      ],
+      regions: ['foundations', 'reasoning', 'divergence'],
+      clues: clues23,
+      isPlayable: (r) => r === 'foundations' || r === 'reasoning',
+      bestGrade: (id) => (id === 'c-open-b' ? 'B' : id === 'c-open-s' ? 'S' : id === 'c-locked-b' ? 'B' : null),
+      found: (kind, id) => kind === 'secret' && id === 's-found',
+      visited: ['reasoning'],
+    });
+    eq(pool23.polish.join(','), 'polish:c-open-b', '重解：只提「開著的土地 ＋ 已經過了 ＋ 還不是 S」那一關');
+    ok(!pool23.polish.includes('polish:c-locked-b'), '（反例）鎖著的土地上那一關不會被提');
+    ok(!pool23.polish.includes('polish:c-open-s'), '（反例）已經拿到 S 的不會被提');
+    ok(!pool23.polish.includes('polish:c-open-new'), '（反例）還沒過的那一關不是「重解」');
+    eq(pool23.find.join(','), 'find:secret:s-open,find:letter:l-open', '線索：只提開著的土地上還沒找到的那幾處');
+    ok(!pool23.find.includes('find:secret:s-found'), '（反例）已經找到的線索不會再提');
+    ok(!pool23.find.includes('find:ins:i-locked'), '（反例）鎖著的土地上的刻文不會被提');
+    eq(pool23.visit.join(','), 'visit:foundations', '走一趟：只提開著、而且今天還沒走過的土地');
+    ok(!pool23.visit.includes('visit:reasoning'), '（反例）今天已經走過的土地不會再提');
+    ok(!pool23.visit.includes('visit:divergence'), '（反例）還沒開的土地不會被提（提了也走不到）');
+
+    /* 挑：同一天同一組、最多三件、不重複、不同天多半不一樣 */
+    const big23 = {
+      polish: Array.from({ length: 12 }, (_, i) => `polish:c${i}`),
+      find: Array.from({ length: 12 }, (_, i) => `find:secret:s${i}`),
+      visit: Array.from({ length: 12 }, (_, i) => `visit:r${i}`),
+    };
+    const day23 = '2026-09-08';
+    const first23 = Daily23.pickOffers(day23, big23);
+    eq(first23.length, Daily23.DAILY_COUNT, '一天挑三件');
+    eq(new Set(first23).size, 3, '三件彼此不同');
+    eq(first23.join(','), Daily23.pickOffers(day23, big23).join(','), '同一天挑到的是同一組（重開遊戲不會換）');
+    eq(new Set(first23.map((id) => Daily23.parseOffer(id).kind)).size, 3, '候選夠多時三件是三種不同的事');
+    {
+      const seen = new Set();
+      for (let i = 1; i <= 30; i += 1) seen.add(Daily23.pickOffers(`2026-09-${String(i).padStart(2, '0')}`, big23).join(','));
+      ok(seen.size >= 10, '三十天裡至少換過十種組合（換日真的會換提議）', String(seen.size));
+    }
+    // 候選不夠時：不湊數，也不重複
+    eq(Daily23.pickOffers(day23, { polish: ['polish:only'], find: [], visit: [] }).join(','), 'polish:only', '只有一件候選就只提一件（不會湊數）');
+    eq(Daily23.pickOffers(day23, {}).length, 0, '一件候選都沒有就一件都不提');
+    eq(Daily23.pickOffers(day23, { polish: ['a', 'b'], find: [], visit: [] }).length, 2, '兩種都沒候選時另一種補位（補得到才補）');
+
+    /* 做完了沒 */
+    const probes23 = { bestGrade: (id) => (id === 'done' ? 'S' : 'A'), found: (k, id) => id === 'gone', visited: ['here'] };
+    eq(Daily23.offerDone('polish:done', probes23), true, '重解拿到 S ＝ 做過了');
+    eq(Daily23.offerDone('polish:other', probes23), false, '拿到 A 還不算（提議說的是 S）');
+    eq(Daily23.offerDone('find:secret:gone', probes23), true, '線索找到了 ＝ 做過了');
+    eq(Daily23.offerDone('find:secret:stay', probes23), false, '還沒找到就是還沒找到');
+    eq(Daily23.offerDone('visit:here', probes23), true, '今天走過那一片 ＝ 做過了');
+    eq(Daily23.offerDone('visit:away', probes23), false, '還沒走過就是還沒走過');
+    eq(Daily23.offerDone('bogus', probes23), false, '壞掉的 id 不算做完（也不會丟例外）');
+    eq(Daily23.parseOffer('find:nope:x'), null, '不認得的線索種類回 null');
+    eq(Daily23.parseOffer(''), null, '空字串回 null');
+
+    /* 畫出來的字：關掉時整塊不出現、開著時每一件都畫得出來 */
+    eq(DailyUi23.dailyBlock(null), '', '關掉之後那一區整塊不出現（空字串，不是灰掉的標題）');
+    {
+      const html = DailyUi23.dailyBlock(
+        [
+          { kind: 'polish', id: 'polish:x', challengeId: 'x', challengeRegion: 'foundations', done: false },
+          { kind: 'find', id: 'find:secret:y', clueKind: 'secret', clueId: 'y', clueRegion: 'reasoning', done: false },
+          { kind: 'visit', id: 'visit:config', regionId: 'config', done: true },
+        ],
+        { regionName: (id) => `【${id}】`, challengeTitle: () => '一關的名字', challengeRegion: () => 'foundations' }
+      );
+      ok(/data-daily/.test(html), '畫出來的那一塊認得出來（e2e 靠它）');
+      eq((html.match(/data-daily-offer=/g) || []).length, 3, '三件都畫出來了');
+      eq((html.match(/data-daily-done="1"/g) || []).length, 1, '做過的那一件標成做過了');
+      ok(html.includes('一關的名字'), '重解那一件說得出是哪一關');
+      ok(html.includes('【reasoning】'), '線索那一件說得出在哪一片土地');
+      ok(!html.includes('find:secret:y'.split(':')[2] + '（'), '線索那一件不劇透它是哪一處（只說種類與土地）');
+      scanPressure(html, '畫出來的那一塊');
+      denyTask(html, '畫出來的那一塊');
+    }
+    ok(/dailyBlock\(/.test(codexSrc23), '圖鑑真的把那一塊畫進去');
+    ok(/dailyReport/.test(codexSrc23), '圖鑑讀的是進程層那一支（沒有第二份規則）');
+
+    /* --- 存檔：純加法、換日不刪進度、關掉逐值相同、reset 歸零 --- */
+    eq(SaveIO.defaultSave().settings.daily, true, '全新存檔的今日三事是開著的');
+    eq(SaveIO.normalize({}).settings.daily, true, '舊存檔沒有這個欄位 → 補成開著');
+    eq(SaveIO.normalize({ settings: { daily: false } }).settings.daily, false, '明寫的 false 要被尊重');
+    eq(SaveIO.normalize({ settings: { daily: 'yes' } }).settings.daily, true, '只認得明寫的 false');
+    eq(JSON.stringify(SaveIO.normalize({}).daily), '{"day":"","ids":[],"visited":[]}', '舊存檔沒有 daily → 三格都是空的');
+    eq(
+      JSON.stringify(SaveIO.normalize({ daily: { day: 'yesterday', ids: ['a'], visited: ['b'] } }).daily),
+      '{"day":"","ids":[],"visited":[]}',
+      '日期壞掉 → 整筆當成還沒挑過（沒有日期的三件事沒有意義）'
+    );
+    eq(
+      JSON.stringify(SaveIO.normalize({ daily: { day: '2026-09-08', ids: ['a', 'a', 3, 'b'], visited: ['r', 'r'] } }).daily),
+      '{"day":"2026-09-08","ids":["a","b"],"visited":["r"]}',
+      'ids／visited 去重、只留字串'
+    );
+
+    {
+      memory.clear();
+      const clueData23 = {
+        secret: readJson('src/data/secrets.json').entries,
+        letter: readJson('src/data/letters.json').entries,
+        ins: readJson('src/data/inscriptions.json').entries,
+      };
+      // 假時鐘：本地是 2026-09-k，UTC 還在前一天（改用 UTC 換日的實作在這裡就會露餡）
+      const day = (k) => ({
+        getFullYear: () => 2026,
+        getMonth: () => 8,
+        getDate: () => k,
+        getUTCFullYear: () => 2026,
+        getUTCMonth: () => 8,
+        getUTCDate: () => k - 1,
+        toISOString: () => `2026-09-${String(k - 1).padStart(2, '0')}T23:30:00.000Z`,
+      });
+      const p = createProgression({ catalog, challenges, clues: clueData23 });
+      // 先走出一點進度（換日之後這些都不准動）
+      p.readLore('lore-ring-1');
+      p.findSecret('stele-73');
+      /*
+       * 快照要在**第一次挑之前**就拿 —— 挑第一次本身也是一次換日
+       * （`day` 從空字串變成今天），那一次同樣不准動到任何進度。
+       */
+      const snapshot = (st) => JSON.stringify({ ...st, daily: undefined });
+      const before = snapshot(p.state);
+      const offersA = p.dailyOffers(day(8));
+      eq(Array.isArray(offersA) && offersA.length > 0, true, '今天真的提得出事情來', JSON.stringify(offersA));
+      eq(p.dailyState().day, '2026-09-08', '存檔記下的是今天（本地）');
+      eq(snapshot(p.state), before, '**第一次挑三件事也沒有動到任何進度**');
+      const offersB = p.dailyOffers(day(9));
+      eq(snapshot(p.state), before, '**換日只換提議，一格進度都沒有被刪**');
+      eq(p.dailyState().day, '2026-09-09', '換日之後記的是新的一天');
+      eq(p.dailyState().visited.length, 0, '換日之後「今天走過哪幾片」重新開始（那不是進度）');
+      ok(offersB.length > 0, '新的一天照樣提得出事情來');
+      // 沒做完不會怎麼樣：舊的那幾件不會留下任何痕跡
+      eq(p.state.xp, JSON.parse(before).xp, '換日之後 XP 一格沒動');
+      eq(Object.keys(p.state.bestGrades).length, Object.keys(JSON.parse(before).bestGrades).length, '換日之後通關紀錄一格沒動');
+      eq(p.hasFoundSecret('stele-73'), true, '換日之後找到的東西還在');
+
+      // 走一趟：記得下、冪等
+      eq(p.noteRegionVisit('foundations'), true, '走進一片土地會被記下來');
+      eq(p.noteRegionVisit('foundations'), false, '同一片再走一次不重複記');
+      eq(p.dailyState().visited.join(','), 'foundations', '記的就是那一片');
+      const xpBefore = p.state.xp;
+      p.noteRegionVisit('reasoning');
+      eq(p.state.xp, xpBefore, '走一趟不給 XP（它不是進度）');
+      memory.clear();
+    }
+
+    /*
+     * **關掉之後與「從來沒有這個功能」逐值相同。**
+     * 兩份存檔：一份完全沒碰過這一層，一份把每一支 API 都狠狠打過一輪。
+     * 除了 `settings.daily` 那一格（那正是開關本身），整份存檔要一個位元組都不差。
+     */
+    {
+      memory.clear();
+      const never = createProgression({ catalog, challenges });
+      never.readLore('lore-ring-1');
+      const neverState = JSON.parse(JSON.stringify(never.state));
+      memory.clear();
+      const off = createProgression({ catalog, challenges, clues: { secret: [{ id: 's', region: 'foundations' }] } });
+      off.updateSettings({ daily: false });
+      off.readLore('lore-ring-1');
+      eq(off.dailyOffers(), null, '關掉之後問「今天三件事」回 null');
+      eq(off.dailyReport(), null, '關掉之後那一區交不出東西');
+      eq(off.noteRegionVisit('foundations'), false, '關掉之後走一趟什麼都不記');
+      eq(off.dailyEnabled(), false, '關掉了就是關掉了');
+      const offState = JSON.parse(JSON.stringify(off.state));
+      eq(JSON.stringify(offState.daily), JSON.stringify(neverState.daily), '關掉之後存檔那三格停在預設值');
+      offState.settings.daily = neverState.settings.daily;
+      eq(JSON.stringify(offState), JSON.stringify(neverState), '**除了開關本身，關掉之後的存檔與「從來沒有這個功能」逐值相同**');
+      memory.clear();
+    }
+
+    // reset 之後歸零
+    {
+      memory.clear();
+      const p = createProgression({ catalog, challenges, clues: { secret: [{ id: 's', region: 'foundations' }] } });
+      p.dailyOffers();
+      p.noteRegionVisit('foundations');
+      ok(p.dailyState().day !== '', '（前提）重置之前今天已經挑過了');
+      p.resetAll();
+      eq(JSON.stringify(p.dailyState()), '{"day":"","ids":[],"visited":[]}', '重置之後今日三事整組歸零');
+      eq(p.dailyEnabled(), true, '重置之後回到預設（開著）');
+      memory.clear();
+    }
+  }
+
+  /* --- ③ 成就對齊 P22，而且不准倒退 --- */
+  {
+    eq(Prog23.BADGE_TARGET, Star23.MANSION_TARGET, '成就那一半的門檻與四宿星圖逐值相同（兩把尺是同一把）');
+    eq(Prog23.BADGE_TARGET, EX23.badgeTarget, '與契約逐值相同');
+    eq(Prog23.ACHIEVEMENT_FLAG, EX23.achievementFlag, '「達成過了」的旗標名與契約逐值相同');
+    eq(Prog23.ALIGNED_FLAG, EX23.alignedFlag, '對齊遷移的憑證名與契約逐值相同');
+
+    /*
+     * **判定走的就是 P22 那一支。**
+     * 靜態面：`hiddenAchievement` 的函式體裡看得到 `shrineOpen`；
+     * 行為面：拿一組取樣逐值比對兩邊的答案（差一條技法／差一宿都要一起翻面）。
+     */
+    ok(/import \{ shrineOpen \} from '\.\.\/world\/turning\.js'/.test(progSrc23), '進程層直接用 P22 的 shrineOpen()');
+    const hidBody23 = progSrc23.split('hiddenAchievement(badgeTarget')[1].split('\n    },')[0];
+    ok(hidBody23.length > 200, '（前提）切得到 hiddenAchievement() 的函式體', String(hidBody23.length));
+    ok(hidBody23.includes('shrineOpen('), '成就的判定就是呼叫終局那一支（不是另寫一份長得很像的條件）');
+    ok(!/techniques\.length/.test(hidBody23), '成就的函式體裡不再拿 68 條舊技巧當總數');
+
+    {
+      memory.clear();
+      const total = catalog.counts.skills;
+      const vendors = (curriculum.vendors || []).map((v) => v.id);
+      const io23 = (save) => ({ load: () => SaveIO.normalize(save), save: () => {}, reset: () => SaveIO.defaultSave() });
+      const build = (skills, badgeCount, extraFlags = {}) =>
+        createProgression({
+          catalog,
+          challenges,
+          io: io23({
+            skillsV2: catalog.skills.slice(0, skills).map((s) => s.id),
+            badges: Object.fromEntries(vendors.map((v) => [v, badgeCount])),
+            flags: { [Prog23.ALIGNED_FLAG]: true, ...extraFlags },
+          }),
+        });
+      eq(build(total, 5).hiddenAchievement().complete, true, '130 條技法全收 ＋ 四宿全亮 → 成就達成');
+      eq(build(total - 1, 5).hiddenAchievement().complete, false, '（反例）差最後一條技法 → 還沒達成');
+      eq(build(total, 4).hiddenAchievement().complete, false, '（反例）四宿差一顆星 → 還沒達成');
+      eq(build(68, 5).hiddenAchievement().complete, false, '（反例）只收到 68 條就不算了（這就是「對齊」）');
+      // 與終局那一支逐值同進退
+      for (const [sk, bd] of [[total, 5], [total - 1, 5], [total, 4], [68, 5], [0, 0]]) {
+        const a = build(sk, bd).hiddenAchievement();
+        const b = Turn23.shrineOpen({ skills: a.collected, skillsTotal: a.total, mansionsLit: a.mansionsLit, mansionsTotal: a.mansionsTotal });
+        eq(a.reached, b, `成就與終局門檻同進退（技法 ${sk} / 一宿 ${bd} 顆）`);
+      }
+      memory.clear();
+    }
+
+    /*
+     * **舊存檔不倒退**（這一格的紅線）。
+     *
+     * 對齊之前的「達成」＝ 68 條舊技巧全收 ＋ 四廠徽章。那樣的存檔載進來之後
+     * 一定還是達成 —— 而且是**一次性**的：開機用舊尺量最後一次、記進旗標、
+     * 插上 `p23Aligned`；已經插過旗的存檔不會再回頭用舊尺量（那才叫對齊）。
+     */
+    {
+      memory.clear();
+      const vendors = (curriculum.vendors || []).map((v) => v.id);
+      const legacySave = {
+        collected: curriculum.techniques.map((t) => t.id),
+        badges: Object.fromEntries(vendors.map((v) => [v, 9])),
+        skillsV2: [],
+      };
+      const written = [];
+      const io23 = (save) => ({
+        load: () => SaveIO.normalize(save),
+        save: (s) => written.push(JSON.parse(JSON.stringify(s))),
+        reset: () => SaveIO.defaultSave(),
+      });
+      const old = createProgression({ catalog, challenges, io: io23(legacySave) });
+      const info = old.hiddenAchievement();
+      eq(info.complete, true, '**舊存檔（68 條全收 ＋ 四廠徽章）載進來仍然是達成**');
+      eq(info.reached, false, '而且它不是靠新尺過的 —— 是「達成過了」那個旗標撐著');
+      eq(old.state.flags[Prog23.ACHIEVEMENT_FLAG], true, '遷移時把「達成過了」記上了');
+      eq(old.state.flags[Prog23.ALIGNED_FLAG], true, '而且插上了「對齊過了」的憑證');
+      ok(written.length > 0, '遷移真的落盤了（下次開機才不用再量一次）');
+
+      // 一次性：已經插過旗的存檔不再回頭用舊尺
+      const after = createProgression({
+        catalog,
+        challenges,
+        io: io23({ ...legacySave, flags: { [Prog23.ALIGNED_FLAG]: true } }),
+      });
+      eq(after.hiddenAchievement().complete, false, '（反例）已經對齊過的存檔走到 68/68 不再算達成（新尺是 130 條）');
+
+      // 看過成就畫面的舊存檔也算達成（就算徽章那一份是舊版留下的）
+      const seen = createProgression({
+        catalog,
+        challenges,
+        io: io23({ collected: [], badges: {}, skillsV2: [], flags: { finaleSeen: true } }),
+      });
+      eq(seen.hiddenAchievement().complete, true, '看過成就畫面的舊存檔也不會被打回未達成');
+
+      // 課程再長也不倒退：達成之後把技法拿掉，仍然算達成過
+      const full = createProgression({
+        catalog,
+        challenges,
+        io: io23({
+          skillsV2: catalog.skills.map((s) => s.id),
+          badges: Object.fromEntries(vendors.map((v) => [v, 9])),
+          flags: { [Prog23.ALIGNED_FLAG]: true },
+        }),
+      });
+      eq(full.hiddenAchievement().complete, true, '（前提）這一份是真的收齊了');
+      eq(full.state.flags[Prog23.ACHIEVEMENT_FLAG], true, '收齊的那一刻旗標就記上了（落盤時問一次）');
+      full.state.skillsV2 = [];
+      eq(full.hiddenAchievement().reached, false, '（前提）技法被拿掉之後新尺過不了');
+      eq(full.hiddenAchievement().complete, true, '**達成過就永遠算達成**（課程之後再長也不會把人打回去）');
+      memory.clear();
+    }
+
+    /*
+     * 兩個新旗標與今日三事**不准參與任何解鎖判定**。
+     * 靜態掃描擋不住間接讀法，所以再加一條逐項快照：把旗標與今天那三格
+     * 都打開之後，每一片土地的解鎖狀態逐值不變。
+     */
+    {
+      const gateBody = progSrc23.split('function gateSatisfied')[1].split('\n  }')[0];
+      const unlockBody = progSrc23.split('function refreshUnlocks')[1].split('\n  }')[0];
+      ok(gateBody.length > 200 && unlockBody.length > 80, '（前提）切得到那兩支的函式體');
+      for (const w of [Prog23.ACHIEVEMENT_FLAG, Prog23.ALIGNED_FLAG, 'daily', 'visited']) {
+        ok(!gateBody.includes(w), `gateSatisfied() 的函式體裡沒有「${w}」`);
+        ok(!unlockBody.includes(w), `refreshUnlocks() 的函式體裡沒有「${w}」`);
+      }
+      memory.clear();
+      const p = createProgression({ catalog, challenges, clues: { secret: [{ id: 's', region: 'foundations' }] } });
+      const snap = () => catalog.implementedRegionIds().map((id) => `${id}:${p.isRegionUnlocked(id) ? 1 : 0}`).join(',');
+      const before = snap();
+      p.setFlag(Prog23.ACHIEVEMENT_FLAG, true);
+      p.setFlag(Prog23.ALIGNED_FLAG, true);
+      p.dailyOffers();
+      p.noteRegionVisit('foundations');
+      eq(snap(), before, '旗標與今日三事都動過之後，每一片土地的解鎖狀態逐值不變');
+      eq(p.state.xp, 0, '而且一點 XP 都沒有偷偷給');
+      memory.clear();
+    }
+  }
 }
 
 if (failures.length) {

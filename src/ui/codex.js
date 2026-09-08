@@ -18,6 +18,7 @@ import {
 } from './dom.js';
 import { glossary } from './glossary.js';
 import { clueFound, rumorBlock } from './rumors.js';
+import { dailyBlock } from './daily.js';
 import { MANSION_TARGET, allMansionsLit, starMansions, starMapBlock } from './starmap.js';
 
 /** 官方出處在畫面上的說法（和主控台第二幕同一句話）。 */
@@ -667,6 +668,26 @@ export function createCodex({
     </section>`;
   }
 
+  /*
+   * v1.2 · P23：今日三事 —— 三個**提議**，排在稱號與四宿底下、世界觀之前。
+   * 設定裡關掉之後 `dailyReport()` 回 `null`，`dailyBlock()` 就回空字串，
+   * **這一區整塊不出現**（不是變灰、不是留一個空標題）。
+   */
+  function dailyChapter() {
+    if (typeof progression.dailyReport !== 'function') return '';
+    return dailyBlock(progression.dailyReport(), {
+      regionName: (id) => (content.group(id) || {}).name || id,
+      challengeTitle: (id) => {
+        const c = content.challenges.find((x) => x.id === id);
+        return (c && c.title) || id;
+      },
+      challengeRegion: (id) => {
+        const c = content.challenges.find((x) => x.id === id);
+        return (c && c.region) || '';
+      },
+    });
+  }
+
   function render() {
     const collected = progression.state.collected.length;
     const totalTech = content.catalog.counts.techniques;
@@ -739,7 +760,7 @@ export function createCodex({
     const murkHtml = murkBook();
     const archiveHtml = archiveChapter();
     overlay.body.innerHTML =
-      `${rankBar()}${badgeStrip()}${sealStrip()}` +
+      `${rankBar()}${badgeStrip()}${sealStrip()}${dailyChapter()}` +
       (loreHtml
         ? `${division('世界觀', 'Lore', '這個世界自己的事：藏起來的地方、對得上的傳聞、撿到的殘頁。')}${loreHtml}`
         : '') +
