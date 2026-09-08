@@ -22993,6 +22993,54 @@ async function main() {
 
   await key('Escape', 'Escape', { vk: 27 });
 
+  /* ================================================================
+   * v1.2 · P25b0：小景零件貼地（在**真的跑起來的那一份**上量）
+   *
+   * node 那一層（`scripts/vignette-fit.mjs`）量的是自己蓋的一棵樹；
+   * 這裡量的是瀏覽器裡真的在跑的場景圖 —— 打包、合批（P22b）、
+   * 低畫質剪枝全部走過一遍之後，每一件是不是還踩在自己腳下的地上。
+   *
+   * 不需要任何資料檔：**刻意抬高的只有 8 件**（桌上的墨、懸在階梯上方的浮階），
+   * 其餘 152 件一律貼地。修之前貼地的只有 69 件 —— 所以這一條真的會紅。
+   * 沒有 sleep：場景圖蓋完就定了（小景不進每幀迴圈）。
+   * ================================================================ */
+  console.log('▸ 小景零件貼地（P25b0）');
+  {
+    const fit = await evaluate(`
+      const g = window.__promptasy;
+      const holders = [];
+      g.engine.scene.traverse((o) => { if (o.name && o.name.startsWith('vignette:')) holders.push(o); });
+      g.engine.scene.updateMatrixWorld(true);
+      const devs = [];
+      const V = g.engine.camera.position.constructor;
+      const p = new V();
+      for (const h of holders) {
+        for (const c of h.children) {
+          c.getWorldPosition(p);
+          devs.push({ vig: h.name, y: p.y, ground: g.world.terrainHeight(p.x, p.z) });
+        }
+      }
+      const off = devs.map((d) => d.y - d.ground);
+      const lifted = off.filter((d) => Math.abs(d) > 0.05);
+      return {
+        holders: holders.length,
+        parts: devs.length,
+        grounded: off.filter((d) => Math.abs(d) <= 0.05).length,
+        lifted: lifted.length,
+        liftedMin: lifted.length ? Math.min(...lifted.map(Math.abs)) : null,
+        liftedMax: lifted.length ? Math.max(...lifted.map(Math.abs)) : null,
+        worstGrounded: Math.max(...off.map(Math.abs).filter((d) => d <= 0.05)),
+      };
+    `);
+    eq(fit.holders, 33, 'P25b0：場上 33 組小景');
+    eq(fit.parts, 160, 'P25b0：一共 160 件零件');
+    eq(fit.grounded, 152, 'P25b0：152 件貼在自己腳下的地上（±0.05 公尺）');
+    eq(fit.lifted, 8, 'P25b0：離地的只有刻意抬高的那 8 件');
+    ok(fit.liftedMin >= 0.2, 'P25b0：那 8 件離地是「刻意抬高」的量級，不是量測雜訊', String(fit.liftedMin));
+    ok(fit.liftedMax <= 4.2, 'P25b0：抬得最高的那一件仍在浮階的量級', String(fit.liftedMax));
+    ok(fit.worstGrounded <= 0.05, 'P25b0：貼地那 152 件最糟的一件也在門檻內', String(fit.worstGrounded));
+  }
+
   await sleep(600);
   const realErrors = consoleErrors.filter((e) => !/favicon|DevTools|Autofill/i.test(e));
   eq(realErrors.length, 0, '全程零 console error', realErrors.slice(0, 6).join('\n      '));

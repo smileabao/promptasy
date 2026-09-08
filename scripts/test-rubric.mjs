@@ -26544,6 +26544,128 @@ console.log('\n▸ 進程外顯 ＋ 今日三事 ＋ 成就整理（v1.2 · P23�
   }
 }
 
+console.log('▸ 小景零件貼地（v1.2 · P25b0）');
+{
+  const VF = await import('./vignette-fit.mjs');
+  const { STORY_VIGNETTES: VIGS } = await import('../src/world/props.js');
+  const { terrainHeight: vfHeight } = await import('../src/world/world.js');
+  const { buildWorld: vfBuild } = await import('./world-harness.mjs');
+
+  /*
+   * 小景是**成組**擺的：一組落在「組中心那一點的地面」，組內只給局部位移。
+   * 地會起伏，所以在這一格之前，離組中心越遠的零件浮空／埋地就越明顯
+   * （最糟的一件差 1.12 公尺；`tool-yard` 一組就中了四件）。
+   * 這與 P11 對母題那一層修過的是同一類錯，只是小景這一層當時沒跟上，
+   * 而且**沒有任何斷言在管它** —— 所以它一路退化到站長實玩才被看見。
+   *
+   * 判準不必發明新資料：`parts` 的 `[dx, dy, dz]` 裡的 `dy` 就是「刻意的垂直位移」。
+   * `dy === 0` → 貼自己腳下的地；`dy !== 0` → 擺的是相對關係（桌上的墨、
+   * 懸在階梯上方的浮階），**不准**被貼地。
+   */
+  const vf = VF.auditVignetteFit({ heightAt: vfHeight });
+  eq(vf.rows.length, 160, 'P25b0：33 組小景一共 160 件零件');
+  eq(vf.rows.filter((r) => r.lift === 0).length, 152, 'P25b0：應該貼地的 152 件');
+  eq(vf.rows.filter((r) => r.lift !== 0).length, 8, 'P25b0：刻意抬高的 8 件');
+  eq(vf.mismatch.length, 0, 'P25b0：每一組的零件都對得起來');
+  eq(new Set(vf.rows.map((r) => r.vignette)).size, VIGS.length, 'P25b0：33 組一組都沒漏量');
+
+  // 逐件硬斷言（160 條）—— 不合併成一條，紅的時候要看得出是哪一件
+  for (const r of vf.rows) {
+    ok(
+      !r.badOrigin,
+      `P25b0：${r.vignette}/${r.kind} 的原點落在該落的高度（±${VF.ORIGIN_TOLERANCE}）`,
+      `y=${r.y.toFixed(3)} 該在=${r.want.toFixed(3)} 差=${r.origin.toFixed(3)}`
+    );
+    if (r.lift === 0) {
+      ok(
+        !r.badFoot,
+        `P25b0：${r.vignette}/${r.kind} 真的畫出來的腳踩在地上`,
+        `腳-地=${r.foot === null ? '無幾何' : r.foot.toFixed(3)}`
+      );
+    }
+  }
+  eq(vf.bad.length, 0, 'P25b0：一件都沒有浮空或埋進地裡');
+
+  /*
+   * 反例①：**拿一支假的高度場去擺、拿真的去量**。
+   * 假的那一支只回組中心的高度（＝這一格之前的擺法：整組貼同一個平面），
+   * 所以每一件都應該被抓出來 —— 兩層（原點與腳）各自都要紅。
+   */
+  {
+    const flatOf = new Map(VIGS.map((v) => [`${v.at[0]},${v.at[1]}`, vfHeight(v.at[0], v.at[1])]));
+    let nearestCenter = null;
+    const flat = (x, z) => {
+      // 用最近的組中心當「整組共用的那一面」——重現修之前的擺法
+      let best = Infinity;
+      for (const v of VIGS) {
+        const d = (v.at[0] - x) ** 2 + (v.at[1] - z) ** 2;
+        if (d < best) {
+          best = d;
+          nearestCenter = v;
+        }
+      }
+      return flatOf.get(`${nearestCenter.at[0]},${nearestCenter.at[1]}`);
+    };
+    const red = VF.auditVignetteFit({ heightAt: vfHeight, placeHeight: flat });
+    ok(red.bad.length > 40, 'P25b0（反例）整組貼同一個平面 → 稽核一定紅', `${red.bad.length} 件`);
+    ok(red.rows.some((r) => r.badOrigin), 'P25b0（反例）原點那一層抓得到');
+    ok(red.rows.some((r) => r.badFoot), 'P25b0（反例）腳那一層自己也抓得到');
+    ok(
+      red.rows.some((r) => r.vignette === 'tool-yard' && Math.abs(r.origin) > 1),
+      'P25b0（反例）tool-yard 那一組差超過一公尺（＝站長實玩看到的那一組）'
+    );
+  }
+
+  /*
+   * 出貨的那個世界擺的就是這裡量的那一份 —— 合批（P22b）把小景的網格搬走了，
+   * 所以這一條比對的是**節點的世界座標**：世界端只要有人改回「只貼組中心」，
+   * 這裡就會逐件對不上。
+   */
+  {
+    const { scene: vfScene } = await vfBuild({ quality: 'high' });
+    const shipped = VF.auditVignetteFit({ heightAt: vfHeight, scene: vfScene });
+    eq(shipped.mismatch.length, 0, 'P25b0：出貨的世界逐件與稽核量的同一位置');
+    eq(shipped.bad.length, 0, 'P25b0：出貨的世界一件都沒有浮空或埋進地裡');
+
+    // 反例②：把場上任何一件挪 0.4 公尺 → 比對必須紅（證明這一條不是空過）
+    const holder = vfScene.getObjectByName('vignette:tool-yard');
+    ok(holder && holder.children.length === 5, '（前提）場上找得到 tool-yard 那五件');
+    holder.children[1].position.y += 0.4;
+    holder.updateMatrixWorld(true);
+    const nudged = VF.auditVignetteFit({ heightAt: vfHeight, scene: vfScene });
+    ok(nudged.mismatch.length === 1, 'P25b0（反例）挪一件 0.4 公尺 → 比對抓得到', nudged.mismatch.join('、'));
+    holder.children[1].position.y -= 0.4;
+    holder.updateMatrixWorld(true);
+    eq(VF.auditVignetteFit({ heightAt: vfHeight, scene: vfScene }).mismatch.length, 0, 'P25b0：挪回去就綠了');
+  }
+
+  /*
+   * 規則寫進 WORLD.md（§6.1 ＋ 維護檢查表 18b）—— 沒寫下來的規則下一個人不會知道，
+   * 這一格修的正是「P11 修過、小景那一層沒跟上」。
+   */
+  {
+    const worldMd = readFileSync(new URL('../WORLD.md', import.meta.url), 'utf8');
+    const s61 = worldMd.split('### 6.1 預算')[1].split('### 6.2')[0];
+    ok(s61.includes('P25b0'), '§6.1 記下這一格');
+    ok(s61.includes('每一件貼的是自己腳下的地'), '§6.1 寫得出判準本身');
+    ok(s61.includes('holder.rotation.y'), '§6.1 寫得出「局部位移要先套組的朝向」');
+    ok(s61.includes('scripts/vignette-fit.mjs'), '§6.1 指得到那支稽核');
+    ok(/1,049/.test(s61) && /953/.test(s61), '§6.1 的碰撞體數與實測相同');
+    ok(worldMd.includes('18b.'), '維護檢查表多一條 18b（成組擺的東西）');
+  }
+
+  /*
+   * 低畫質照擺 —— 貼地是「東西在不在地上」，不是氛圍層。
+   * （`buildVignettes()` 的 `quality` 分支只管光源與陰影，不准碰高度。）
+   */
+  {
+    const { scene: loScene } = await vfBuild({ quality: 'low' });
+    const lo = VF.auditVignetteFit({ heightAt: vfHeight, scene: loScene });
+    eq(lo.mismatch.length, 0, 'P25b0：低畫質的擺位與高畫質逐件相同');
+  }
+}
+
+
 if (failures.length) {
   console.error(`✗ ${failures.length} 個測試失敗（通過 ${passCount}）：\n`);
   for (const f of failures) console.error(`  • ${f}`);

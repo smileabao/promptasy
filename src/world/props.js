@@ -2404,15 +2404,29 @@ export function buildVignettes(regionId, kit, terrainHeight, quality) {
     if (v.region !== regionId) continue;
     const holder = new THREE.Group();
     holder.name = `vignette:${v.id}`;
-    holder.position.set(v.at[0], terrainHeight(v.at[0], v.at[1]), v.at[1]);
-    holder.rotation.y = v.rot || 0;
+    const baseY = terrainHeight(v.at[0], v.at[1]);
+    holder.position.set(v.at[0], baseY, v.at[1]);
+    const rot = v.rot || 0;
+    holder.rotation.y = rot;
+    const cos = Math.cos(rot);
+    const sin = Math.sin(rot);
 
     for (const [kind, offset, rotY, opts] of v.parts) {
       const make = PROPS[kind];
       if (!make) continue;
       // 低畫質：道具一律不帶實體光源（發光材質仍在，只是不參與著色）
       const prop = make(kit, quality === 'high' ? opts || {} : { ...(opts || {}), light: false });
-      prop.position.set(offset[0], offset[1] || 0, offset[2]);
+      /*
+       * v1.2 · P25b0：每一件貼**自己腳下的地**，不是組中心那一點的地。
+       * 地會起伏，離組中心越遠的零件浮空或埋地就越明顯（最糟的一件超過一公尺）。
+       * `offset[1]` 是「刻意的垂直位移」（放在桌上的墨、懸在階梯上方的浮階）——
+       * 那一種擺的是相對關係，一貼地就會從它靠著的東西上掉下來，所以原樣不動。
+       * 稽核在 `scripts/vignette-fit.mjs`，兩種擺法各有一條斷言守著。
+       */
+      const lift = offset[1] || 0;
+      const wx = v.at[0] + offset[0] * cos + offset[2] * sin;
+      const wz = v.at[1] - offset[0] * sin + offset[2] * cos;
+      prop.position.set(offset[0], lift || terrainHeight(wx, wz) - baseY, offset[2]);
       prop.rotation.y = rotY || 0;
       if (quality === 'high') {
         prop.traverse((o) => {
