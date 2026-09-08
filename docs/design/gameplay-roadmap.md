@@ -199,7 +199,7 @@ CLAUDE.md 的五個方向與七條護欄仍是最高準則。本 roadmap 只回�
   - 判斷：**不是 bug 是瑕疵**（沒有東西壞掉、玩得下去、學得到），所以排在功能項之後。但它打的是設計支柱 4（低成本高感知質感）——浮空物件正是讓免費資產看起來廉價的頭號原因，而且不需要任何新資產。
   - 工具已經在：`$JOB/tmp/float2.mjs` 的作法（逐件 AABB ＋ 扣掉「刻意飄著」與「疊在別的東西上」）可以直接搬成 `scripts/vignette-fit.mjs`。
 
-- [ ] **P25a · 打磨：果汁複核 ＋ 音訊 ＋ 無障礙**（M）— game-feel 複核（只保留不造成壓力的：squash、粒子、音層、`pulse`）；12 區 SFX／BGM 補錄（**以 `src/audio/audio.js` 與 WORLD.md §6.5 為準：BGM -20 LUFS、SFX -19 LUFS、峰值上限 -3 dBFS**；順手把 CLAUDE.md 那句「SFX 峰值 -6 dBFS」改成一致）；無障礙（reduced-motion 全覆蓋、螢幕閱讀器路徑）。
+- [~] **P25a · 打磨：果汁複核 ＋ 音訊 ＋ 無障礙**（M）— game-feel 複核（只保留不造成壓力的：squash、粒子、音層、`pulse`）；12 區 SFX／BGM 補錄（**以 `src/audio/audio.js` 與 WORLD.md §6.5 為準：BGM -20 LUFS、SFX -19 LUFS、峰值上限 -3 dBFS**；順手把 CLAUDE.md 那句「SFX 峰值 -6 dBFS」改成一致）；無障礙（reduced-motion 全覆蓋、螢幕閱讀器路徑）。
   - 依賴：P23（P24 已移出本輪）。方案：2-C（子集）。
 - [ ] **P25b · 效能回歸 ＋ 測試收斂 ＋ v1.2 發版**（M）— 低階機 low quality 30fps；e2e flaky 清零；README／CLAUDE.md 數字同步；`expected-counts.json` 契約更新；`docs/history/prompts.html` 補 v1.2 goal；v1.2 發版。
   - 依賴：P25a。
