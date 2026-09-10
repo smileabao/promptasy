@@ -218,10 +218,10 @@ promptasy/
 
 | Command | What it covers | Time | Latest run |
 | --- | --- | --- | --- |
-| `npm run test:rubric` | Scoring engine, data integrity, source health, collision audit, Chinese-only scan, font-corpus fingerprint, save migration | ~42 s | **227,274 assertions passing** |
+| `npm run test:rubric` | Scoring engine, data integrity, source health, collision audit, Chinese-only scan, font-corpus fingerprint, save migration | ~42 s | **227,303 assertions passing** |
 | `npm run test:playtest` | Every challenge is beatable by following the on-screen help: sample answer ≥ A, quick-fills always pass, weak starters always fail, misjudgement regressions | ~0.2 s | **2,824 assertions passing** |
 | `npm run build` | Vite build | ~2 s | passing |
-| `npm run test:e2e` | Headless Chrome playthrough over CDP (walking, prologue, all eleven board types, passing, sharing) — no puppeteer/playwright, just Node + system Chrome; a second browser instance replays the entry gate under the default autoplay policy | ~23 min on this software-rendering box | **4,930 checks passing, zero console errors** (three consecutive full runs, no reruns) |
+| `npm run test:e2e` | Headless Chrome playthrough over CDP (walking, prologue, all eleven board types, passing, sharing) — no puppeteer/playwright, just Node + system Chrome; a second browser instance replays the entry gate under the default autoplay policy | ~23 min on this software-rendering box | **4,990 checks passing, zero console errors** (three consecutive full runs, no reruns) |
 
 ---
 
@@ -270,6 +270,32 @@ requests at runtime.**
 
 ## Release notes
 
+### v1.2 — 2026-09-10（濁靈之夜）
+
+The "night of the murks" release: the curriculum did **not** grow (still 12 regions / 142 challenges / 130 skills) —
+what grew is the **world and the play**. Everything below is offline, saved locally, and reversible.
+
+- **Encounters** — 20 *murks* (12 of them *great murks*) stand where a badly-written request once went wrong; you soothe
+  them with choice-based answers scored by the same engine. Threat never punishes: a murk only grows quieter as you get
+  clearer. 12 *watchmen* (standing NPCs) trade hints, lore, directions and technique facts; one *gatekeeper* at the
+  wards carries a visible system prompt you must actually satisfy.
+- **A vertical world** — jump (**Space**), 11 platforms, a broken bridge span, mid-ground screens and motifs in every
+  region, one shortcut between neighbouring lands, and a map scaled up ×1.3 so nothing is crowded any more.
+- **The story closes** — 24 scribe pages, rumor links between clues, 12 echo replays, 12 archive halls with 24 cited
+  "why" notes, a mid-point reveal, and a finale where you rewrite your own first prompt and raise the mother stele.
+  Your text is never uploaded; carving it is explicit and skippable.
+- **Progress you can see** — your level is worn on the cape (33 pips × 3 rings = 99); "three things today" are
+  *suggestions, not tasks* (no expiry, no streak, off in settings); achievement now equals the finale threshold.
+- **Performance** — draw calls −27%, additive transparent quads −38%, materials −33%; both now live in the test
+  contract so they cannot regress silently. Triangles, lights (37) and colliders unchanged.
+- **Polish** — full `prefers-reduced-motion` coverage (motion stops, information stays), a real focus-trap bug fixed
+  (48 of 76 codex focusables were unreachable), one mis-measured track peak corrected, and the 15 layout/copy
+  issues found by an exploratory Playwright playtest fixed and re-verified.
+- **Tests** — 227,303 rubric assertions, 2,824 playtest gates, 4,990 headless e2e checks — three consecutive green
+  runs with zero reruns after every wall-clock wait in the harness was replaced by condition/frame polling.
+
+Touch controls are deferred to the next release (tracked in [#4](https://github.com/romanticamaj/promptasy/issues/4)).
+
 ### v1.1 — 2026-08-03（課程 v2）
 
 The curriculum v2 release: the world grew from 5 regions and 27 challenges to **12 regions and 142 challenges**,
@@ -309,8 +335,9 @@ The first full release, live at **[garyhsieh.com/promptasy](https://garyhsieh.co
 
 ## Roadmap
 
-- **Mobile**: touch joystick and a layout for viewports under 720 px — the biggest remaining gap (panels already fit
-  390 px, but walking the world still needs a keyboard).
+- **Mobile**: touch joystick and a layout for viewports under 720 px — the biggest remaining gap, deliberately
+  deferred out of v1.2 (spec in [#4](https://github.com/romanticamaj/promptasy/issues/4); panels already fit 390 px,
+  but walking the world still needs a keyboard).
 - An English UI layer (the scoring engine already detects both languages).
 - An optional online grading layer, as an add-on to — never a replacement for — the offline engine.
 - More "the world remembers what you solved" environmental storytelling.
