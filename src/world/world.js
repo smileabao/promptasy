@@ -3856,6 +3856,10 @@ const markerBatchMat = () =>
  * 低畫質收得更早（那一格本來就是拿畫面換 draw call）。
  */
 const LABEL_BAND = { high: [130, 145], low: [70, 85] };
+/** QA #13：鏡頭離字牌這麼近就淡掉（[全透明, 全實] 公尺）—— 站在旁邊時不需要一張蓋住半個畫面的牌。 */
+const LABEL_NEAR_FADE = [5.0, 8.5];
+/** 每幀零配置：`fitLabel` 算字牌世界座標用的暫存（§6.2）。 */
+const _labelPos = new THREE.Vector3();
 /** 每幀零配置：寫實例欄位用的暫存（§6.2）。 */
 const _markerMtx = new THREE.Matrix4();
 const _markerCol = new THREE.Color();
@@ -3979,11 +3983,26 @@ function buildMarker(challenge, quality, accent) {
   /** 三態的 lerp（halo 顏色＋底亮度乘數）到位了嗎；到位後 update() 對三態零工作。 */
   let visualSettled = true;
 
+  /*
+   * QA #13：離鏡頭很近的字牌會放到超大、被畫面邊緣裁掉 —— `s` 在 13 公尺內卡在下限 1.3，
+   * 可是 3 公尺外一張 1.3 高的牌子在螢幕上已經是半個畫面。
+   * 很近（鏡頭 ≤ LABEL_NEAR_FADE[0] 公尺）就把它**淡掉**而不是縮小：你已經站在它旁邊，
+   * 互動提示卡（`.hud__interact`）會把名字寫出來，這張牌不需要了。
+   * 只動 opacity，不動 visible（分帶那一套 `labelOn` 照舊管顯示與否）。
+   */
   const fitLabel = (sprite, camera, worldPos) => {
     if (!camera) return;
     const d = camera.position.distanceTo(worldPos);
     const s = THREE.MathUtils.clamp(d * 0.1, 1.3, 3.4);
     sprite.scale.set(s * 3.2, s, 1);
+    // 淡出量的是鏡頭到**字牌本身**的距離（牌子浮在石座上方 4.4 公尺，不是地面那一點）
+    _labelPos.copy(worldPos);
+    _labelPos.y += sprite.position.y;
+    sprite.material.opacity = THREE.MathUtils.smoothstep(
+      camera.position.distanceTo(_labelPos),
+      LABEL_NEAR_FADE[0],
+      LABEL_NEAR_FADE[1]
+    );
   };
 
   /*

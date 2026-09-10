@@ -158,24 +158,49 @@ export function buildPool({
  * @param {string} dayKey `localDayKey()` 的結果
  * @param {{polish:string[], find:string[], visit:string[]}} pool
  * @param {number} [count]
+ * @param {object} [opts]
+ * @param {(id:string)=>string} [opts.sayKey] 這一件「說出來」是哪一句（同一句只提一次；預設 ＝ id）
  * @returns {string[]}
  */
-export function pickOffers(dayKey, pool = {}, count = DAILY_COUNT) {
+export function pickOffers(dayKey, pool = {}, count = DAILY_COUNT, { sayKey = null } = {}) {
   const seed = dayHash(dayKey);
   const kinds = OFFER_KINDS.map((_, i) => OFFER_KINDS[(i + (seed % OFFER_KINDS.length)) % OFFER_KINDS.length]);
   const taken = new Set();
+  /*
+   * v1.2 發版後 QA #4：「不重複」看的是**畫出來會不會一樣**，不只是 id。
+   * 「到撰寫基本功找一處還沒讀到的刻文」×2 —— id 不同（兩則刻文），字一模一樣，
+   * 玩家看到的是複製貼上。所以除了 id 之外再記一把「說出來的鍵」（呼叫端給的
+   * `sayKey`：找線索 ＝ 種類＋土地），同一把鍵只提一次。
+   */
+  const said = new Set();
+  const keyOf = (id) => (typeof sayKey === 'function' ? String(sayKey(id) ?? id) : id);
+  /** 同一種提議裡再分「線索的種類」——只開一片土地時，三件事才會是三種（祕境／殘頁／刻文）。 */
+  const usedClue = new Set();
+  const clueOf = (id) => {
+    const o = parseOffer(id);
+    return o && o.kind === 'find' ? o.clueKind : null;
+  };
   const out = [];
 
   const takeFrom = (kind, round) => {
     const list = Array.isArray(pool[kind]) ? pool[kind] : [];
     if (!list.length) return false;
     const start = dayHash(`${dayKey}:${kind}:${round}`) % list.length;
-    for (let i = 0; i < list.length; i += 1) {
-      const pick = list[(start + i) % list.length];
-      if (typeof pick !== 'string' || taken.has(pick)) continue;
-      taken.add(pick);
-      out.push(pick);
-      return true;
+    // 先挑「線索種類還沒提過」的；沒有了才退回任何一件沒說過的
+    for (const preferFresh of [true, false]) {
+      for (let i = 0; i < list.length; i += 1) {
+        const pick = list[(start + i) % list.length];
+        if (typeof pick !== 'string' || taken.has(pick)) continue;
+        const key = keyOf(pick);
+        if (said.has(key)) continue;
+        const clue = clueOf(pick);
+        if (preferFresh && clue && usedClue.has(clue)) continue;
+        taken.add(pick);
+        said.add(key);
+        if (clue) usedClue.add(clue);
+        out.push(pick);
+        return true;
+      }
     }
     return false;
   };

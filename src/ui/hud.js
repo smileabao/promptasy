@@ -33,7 +33,7 @@ export function createHud({ content, progression, getObjective = null, onOpenCod
     <aside class="hud__aside" data-aside hidden aria-live="polite"></aside>
     <div class="hud__toasts" data-toasts role="status" aria-live="polite"></div>
     <div class="hud__banner" data-banner hidden aria-hidden="true"></div>
-    <p class="hud__controls">WASD 移動 · Shift 奔跑 · ← → 轉鏡頭 · ↑ ↓ 抬頭低頭（或拖曳滑鼠）· 空白鍵看天空 · - = 拉遠拉近 · E 互動 · ? 操作一覽</p>
+    <p class="hud__controls">WASD 移動 · Shift 奔跑 · ← → 轉鏡頭 · ↑ ↓ 抬頭低頭（或拖曳滑鼠）· 空白鍵 跳 · - = 拉遠拉近 · E 互動 · ? 操作一覽</p>
   `;
 
   const levelEl = root.querySelector('[data-level]');

@@ -760,7 +760,11 @@ export function createCodex({
     const murkHtml = murkBook();
     const archiveHtml = archiveChapter();
     overlay.body.innerHTML =
-      `${rankBar()}${badgeStrip()}${sealStrip()}${dailyChapter()}` +
+      /*
+       * QA #3：今日三事**真的在最上面**（設定頁與 task_plan 都這麼說）——
+       * 標頭之後、稱號之前。它是「今天可以做什麼」，開圖鑑第一眼就該看到。
+       */
+      `${dailyChapter()}${rankBar()}${badgeStrip()}${sealStrip()}` +
       (loreHtml
         ? `${division('世界觀', 'Lore', '這個世界自己的事：藏起來的地方、對得上的傳聞、撿到的殘頁。')}${loreHtml}`
         : '') +

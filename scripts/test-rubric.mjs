@@ -18572,6 +18572,17 @@ console.log('\n▸ 跳躍原型（v1.2 · P14）');
     );
     const introSrc = readFileSync(resolve(root, 'src/ui/intro.js'), 'utf8');
     ok(/<kbd>空白鍵<\/kbd>/.test(introSrc), '首次進入的教學卡也列了空白鍵');
+    /*
+     * v1.2 發版後 QA #5：空白鍵三處說法要一致（HUD 底下那行、教學卡、操作一覽）。
+     * 改鍵位那一次只更新了操作一覽 —— HUD 還寫「空白鍵看天空」、教學卡的
+     * 「抬頭看天空」那一行還掛著空白鍵（這兩條修之前都紅過）。
+     */
+    const hudSrc16 = readFileSync(resolve(root, 'src/ui/hud.js'), 'utf8');
+    ok(!/空白鍵看天空/.test(hudSrc16), 'QA #5：HUD 底下那行不再說「空白鍵看天空」');
+    ok(/空白鍵 跳/.test(hudSrc16), 'QA #5：HUD 底下那行說空白鍵是「跳」');
+    ok(!/<kbd>↑<\/kbd><kbd>↓<\/kbd> \/ <kbd>空白鍵<\/kbd>/.test(introSrc), 'QA #5：教學卡「抬頭看天空」那一行不再掛著空白鍵');
+    ok(/<kbd>空白鍵<\/kbd><span>跳/.test(introSrc), 'QA #5：教學卡的空白鍵那一行說的是「跳」');
+    ok(!/空白鍵[^<]{0,6}看天空|看天空[^<]{0,6}空白鍵/.test(introSrc), 'QA #5：教學卡裡「空白鍵」與「看天空」不再連在一起');
   }
 }
 
@@ -26264,6 +26275,41 @@ console.log('\n▸ 進程外顯 ＋ 今日三事 ＋ 成就整理（v1.2 · P23�
     eq(Daily23.pickOffers(day23, { polish: ['polish:only'], find: [], visit: [] }).join(','), 'polish:only', '只有一件候選就只提一件（不會湊數）');
     eq(Daily23.pickOffers(day23, {}).length, 0, '一件候選都沒有就一件都不提');
     eq(Daily23.pickOffers(day23, { polish: ['a', 'b'], find: [], visit: [] }).length, 2, '兩種都沒候選時另一種補位（補得到才補）');
+
+    /*
+     * v1.2 發版後 QA #4：「不重複」看的是**畫出來會不會一樣**。
+     * 只開一片土地時，三件事全來自「找線索」；id 不同、字一模一樣
+     * （「到撰寫基本功找一處還沒讀到的刻文」×2）看起來像複製貼上。
+     * 修之前：2026-09-08 挑到 ins:a、ins:b、letter:d → 兩句相同（這一條紅過）。
+     */
+    {
+      const same23 = { polish: [], find: ['find:ins:a', 'find:ins:b', 'find:ins:c', 'find:letter:d', 'find:secret:e'], visit: [] };
+      const sayKey23 = (id) => {
+        const o = Daily23.parseOffer(id);
+        return o && o.kind === 'find' ? `find:${o.clueKind}:foundations` : id;
+      };
+      for (const day of ['2026-09-08', '2026-09-09', '2026-09-12']) {
+        const picks = Daily23.pickOffers(day, same23, Daily23.DAILY_COUNT, { sayKey: sayKey23 });
+        eq(picks.length, 3, `QA #4 ${day}：只開一片土地也提得出三件`);
+        eq(new Set(picks.map(sayKey23)).size, 3, `QA #4 ${day}：三件**說出來**不一樣（種類＋土地）`, picks.join(','));
+        eq(new Set(picks.map((id) => Daily23.parseOffer(id).clueKind)).size, 3, `QA #4 ${day}：三件是三種線索（祕境／殘頁／刻文）`, picks.join(','));
+        eq(picks.join(','), Daily23.pickOffers(day, same23, Daily23.DAILY_COUNT, { sayKey: sayKey23 }).join(','), `QA #4 ${day}：加了說法鍵之後同一天仍然挑到同一組`);
+      }
+      // 不給 sayKey 就照舊（上面那幾條既有斷言的行為一個不變）
+      eq(Daily23.pickOffers(day23, big23).join(','), first23.join(','), 'QA #4：不給說法鍵時挑法與從前一字不差');
+      // 三種線索各自有一句副句，不再三條同一句
+      const names23 = { regionName: () => '撰寫基本功' };
+      const says23 = Daily23.CLUE_KINDS.map((k) =>
+        DailyUi23.offerSay({ kind: 'find', id: `find:${k}:x`, clueKind: k, clueId: 'x', clueRegion: 'foundations' }, names23)
+      );
+      eq(new Set(says23.map((s) => s.say)).size, 3, 'QA #4：三種線索的副句各不相同', says23.map((s) => s.say).join(' ｜ '));
+      eq(new Set(says23.map((s) => s.what)).size, 3, 'QA #4：三種線索的主句各不相同', says23.map((s) => s.what).join(' ｜ '));
+      for (const s of says23) {
+        scanPressure(`${s.what} ${s.say}`, `QA #4 副句「${s.say}」`);
+        denyTask(`${s.what} ${s.say}`, `QA #4 副句「${s.say}」`);
+        ok(/[。]$/.test(s.say) && s.say.length >= 10, `QA #4 副句「${s.say}」是一句完整的話`);
+      }
+    }
 
     /* 做完了沒 */
     const probes23 = { bestGrade: (id) => (id === 'done' ? 'S' : 'A'), found: (k, id) => id === 'gone', visited: ['here'] };

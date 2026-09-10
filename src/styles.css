@@ -884,8 +884,25 @@ a.src:hover {
 .hud > * {
   pointer-events: auto;
 }
+/*
+ * QA #8 / #15：HUD 頂列沒有底 —— 「下一個目標：…」與地平線上那一排世界字牌疊在同一個高度，
+ * 左上的 XP 區塊底下也透出區域門的字。不是實心條：一道**由上而下淡出的漸層 scrim**，
+ * 字讀得清、世界仍然看得到。pointer-events 從 .hud 繼承 none，不擋任何拖曳。
+ */
+.hud::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: clamp(180px, 27vh, 250px);
+  background: linear-gradient(180deg, rgba(4, 7, 12, 0.74) 0%, rgba(4, 7, 12, 0.5) 38%, rgba(4, 7, 12, 0.22) 68%, rgba(4, 7, 12, 0) 100%);
+  z-index: 0;
+}
 
 .hud__top {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: flex-start;
   gap: var(--s6);
@@ -1018,6 +1035,12 @@ a.src:hover {
   color: var(--paper-3);
   text-shadow: 0 2px 12px rgba(0, 0, 0, 0.95);
   max-width: 52ch;
+  /* QA #8：800px 寬時這一行折成三行；最多兩行，多的截成「…」（字級不動） */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 
 .hud__buttons {
@@ -1190,7 +1213,12 @@ a.src:hover {
 .hud__toasts {
   position: absolute;
   right: var(--s6);
-  bottom: var(--s6);
+  /*
+   * QA #7：右下角的 toast 蓋住互動提示卡的右端（坐長凳的「+4 XP」把「起身」蓋掉）。
+   * 提示卡 `bottom: 76px`、高 54px → 上緣在 130px；toast 抬到 140px，
+   * 疊在卡片**上方**、留 10px 的縫，水平仍然靠右。
+   */
+  bottom: 140px;
   display: flex;
   flex-direction: column;
   gap: var(--s2);
@@ -3104,13 +3132,36 @@ select option:disabled {
 .intro__card {
   position: relative;
   width: min(720px, 100%);
+  /*
+   * QA #1：卡片內容 1177px 高、視窗 720px，唯一的主按鈕在摺線下。
+   * 卡片貼著視窗高（92vh）；內文在 .intro__scroll 自己捲；主按鈕釘在 .intro__foot 永遠看得到。
+   * 字級一個都不縮（Phase 14 是站長回饋放大的）。
+   */
   max-height: 92vh;
-  overflow-y: auto;
-  padding: var(--s8) var(--s8) var(--s7);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
   border: 1px solid var(--rule-2);
   border-radius: var(--radius-lg);
   background: linear-gradient(168deg, var(--ink-3), var(--ink-1) 48%, var(--ink-0));
   box-shadow: 0 40px 120px rgba(0, 0, 0, 0.72);
+}
+.intro__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(169, 201, 216, 0.3) transparent;
+  padding: var(--s8) var(--s8) var(--s4);
+}
+.intro__foot {
+  flex: none;
+  padding: var(--s4) var(--s8) var(--s7);
+  /* 上緣一道淡出：內文捲到底下時，看得出按鈕是釘著的、不是內文的一部分 */
+  background: linear-gradient(180deg, rgba(10, 16, 23, 0), rgba(10, 16, 23, 0.9) 40%);
+  border-top: 1px solid var(--rule);
 }
 .intro__card::before {
   content: '';
@@ -3748,6 +3799,39 @@ select option:disabled {
   font-size: var(--t-meta);
   color: var(--paper-4);
 }
+/*
+ * QA #12：800×600 的門詢問窗，底部那排鍵盤提示被切掉（內容比 94vh 的面板多 58px）。
+ * 矮視窗只收**間距**（字級一個都不動）：金線、警語、按鍵提示之間的留白各收一階，
+ * 標頭與內容區的內距也收一階 —— 收回來的剛好夠那一排提示站進面板裡。
+ */
+@media (max-height: 660px) {
+  .overlay--gateask .panel__head {
+    padding-top: var(--s4);
+    padding-bottom: var(--s2);
+  }
+  .overlay--gateask .panel__body {
+    padding-top: var(--s3);
+    padding-bottom: var(--s4);
+  }
+  .gateask {
+    padding: 0;
+  }
+  .gateask__mark {
+    margin-bottom: var(--s3);
+  }
+  .gateask__line {
+    margin-bottom: var(--s2);
+  }
+  .gateask__need {
+    margin-bottom: var(--s3);
+  }
+  .gateask__warn {
+    margin-bottom: var(--s4);
+  }
+  .gateask__hint {
+    margin-top: var(--s3);
+  }
+}
 
 /* ---------------------------------------------------------------- 走出來的收集
    圖鑑底下那兩行小字：刻文小語與藏起來的地方。
@@ -3782,14 +3866,16 @@ select option:disabled {
 .finds {
   margin: var(--s6) 0 0;
 }
-.finds__list {
+.finds__list,
+.daily__list {
   margin: var(--s4) 0 0;
   padding: 0;
   list-style: none;
   display: grid;
   gap: var(--s3);
 }
-.finds__list li {
+.finds__list li,
+.daily__list li {
   display: grid;
   grid-template-columns: auto auto 1fr;
   align-items: baseline;
@@ -3798,16 +3884,19 @@ select option:disabled {
   border-bottom: 1px solid var(--rule);
   font-size: var(--t-micro);
 }
-.finds__list b {
+.finds__list b,
+.daily__list b {
   color: var(--paper-2);
   letter-spacing: var(--tr-cjk);
 }
-.finds__list span {
+.finds__list span,
+.daily__list span {
   font-family: var(--font-ui);
   font-variant-numeric: tabular-nums;
   color: var(--gold);
 }
-.finds__list i {
+.finds__list i,
+.daily__list i {
   font-style: normal;
   color: var(--paper-4);
 }
@@ -3817,11 +3906,18 @@ select option:disabled {
    所以沒有勾選框、沒有進度條、沒有任何在倒數的東西。
    做過了的那一件只是把記號換成 ✓ 並且退到背景，不會被強調。 */
 .daily {
-  margin: var(--s6) 0 0;
+  /* QA #3：它現在真的在圖鑑最上面（標頭之後、稱號之前）—— 上面不留空、下面接稱號那一條 */
+  margin: 0 0 var(--s6);
 }
 .daily__lead {
   margin: 0 0 var(--s2);
   font-size: var(--t-micro);
+}
+/* 一件都提不出來時的那一句：與圖鑑其他小字同一個安靜的字級 */
+.daily__empty {
+  margin: var(--s3) 0 0;
+  font-size: var(--t-micro);
+  color: var(--paper-4);
 }
 .daily__list i {
   color: var(--gold);
@@ -4586,6 +4682,28 @@ select option:disabled {
   }
 }
 
+/*
+ * QA #10：800px 寬的主控台標頭，✕ 折到標題底下左側。
+ * 一條式標頭在 900px 以下就讓進度小牌先掉到第二行（同 720px 那一套），
+ * 關卡名與 ✕ 守在第一行 —— 出口永遠在右上角。
+ */
+@media (max-width: 900px) {
+  .panel__head--bar .panel__close {
+    order: 2;
+    align-self: baseline;
+  }
+  .panel__head--bar .panel__eyebrow {
+    order: 3;
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+  .panel__head--bar .panel__headline {
+    flex: 1 1 0;
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+}
+
 @media (max-width: 720px) {
   .panel__head {
     padding: var(--s5) var(--s5) var(--s3);
@@ -4626,8 +4744,11 @@ select option:disabled {
   .panel__body {
     padding: var(--s5);
   }
-  .intro__card {
-    padding: var(--s6) var(--s5);
+  .intro__scroll {
+    padding: var(--s6) var(--s5) var(--s4);
+  }
+  .intro__foot {
+    padding: var(--s3) var(--s5) var(--s5);
   }
   .result__top {
     flex-wrap: wrap;
@@ -7656,6 +7777,21 @@ select option:disabled {
 .console.is-palm .rail {
   opacity: 0.5;
 }
+/*
+ * QA #2：手印在摺線以下（720 高被切一半、600 高整顆看不到）—— 每一關的最後一步。
+ * 動作列釘在面板底部：sticky 在 `.panel__body` 這個捲動容器的下緣，
+ * 內文（石碑）照樣捲得到，但手印永遠看得見。底下墊一道由透明到底色的漸層，
+ * 蓋在石碑上時讀得出「這是釘著的一列」。字級不動。
+ */
+.console.is-palm .palmwrap {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  padding-top: var(--s5);
+  padding-bottom: var(--s3);
+  /* 上緣 14px 的淡入，之後是實的 —— 釘在石碑上時，底下的字不會透出來跟引言疊在一起 */
+  background: linear-gradient(180deg, rgba(10, 16, 23, 0) 0, rgba(10, 16, 23, 0.96) 14px, rgba(10, 16, 23, 0.96) 100%);
+}
 .console.is-palm .stele {
   box-shadow: inset 0 1px 0 rgba(214, 232, 244, 0.12), 0 0 60px -18px rgba(230, 199, 155, 0.5);
 }
@@ -7886,6 +8022,12 @@ select option:disabled {
   opacity: 0;
   visibility: hidden;
   transform: translate(-50%, 4px);
+  /*
+   * QA #9：`--infotip-shift` 是 clampBubble() 量出來的回推量（預設 0）—— 氣泡不再被面板邊緣裁掉。
+   * 走 `translate` 而不是併進 `transform`：`transform` 有 transition，併進去會變成從左邊滑進來；
+   * `translate` 與 `transform` 相加、又不在 transition 清單裡，位移是瞬間到位的。
+   */
+  translate: var(--infotip-shift, 0px) 0;
   pointer-events: none;
   /*
    * 只讓「位移」補間。
@@ -7917,12 +8059,12 @@ select option:disabled {
   visibility: visible;
   transform: translate(-50%, 0);
 }
-/* 小尖角，指回那顆 ⓘ */
+/* 小尖角，指回那顆 ⓘ（氣泡被回推時尖角反向位移，仍然指著 ⓘ） */
 .infotip__bubble::after {
   content: '';
   position: absolute;
   top: 100%;
-  left: 50%;
+  left: calc(50% - var(--infotip-shift, 0px));
   width: 7px;
   height: 7px;
   margin-left: -4px;
@@ -8314,7 +8456,12 @@ select option:disabled {
   width: max-content;
   max-width: min(560px, 62vw);
   transform: translate(-50%, -10px);
-  padding: var(--s3) var(--s5) var(--s4);
+  padding: var(--s4) var(--s8) var(--s5);
+  /*
+   * QA #6：回聲那一行正好落在石座字牌的高度（y≈215），字壓字。
+   * 不是實心方塊 —— 一片往四周淡出的暗色 scrim，字在字牌上方仍然讀得清。
+   */
+  background: radial-gradient(ellipse 62% 78% at 50% 50%, rgba(4, 7, 12, 0.82) 0%, rgba(4, 7, 12, 0.62) 42%, rgba(4, 7, 12, 0.24) 74%, rgba(4, 7, 12, 0) 100%);
   text-align: center;
   pointer-events: none;
   user-select: none;

@@ -2004,8 +2004,11 @@ function boot() {
     } else if (nearMurk) {
       // 標題 ＋ 一句狀態 ＋ E ＋ 動詞（WORLD.md §3.1）
       // 副標用牠自己的名字（含糊的請求／只說不要的請求…），不是寫死的一句
+      // QA #11：安撫過的要像石座那樣把狀態寫出來（「· 已安撫 · S」）；動詞維持「安撫」——再按一次是重寫
+      const mst = progression.murkState(nearMurk.entry.id);
+      const calmedSay = mst && typeof mst.grade === 'string' && mst.grade ? ` · 已安撫 · ${esc(mst.grade)}` : '';
       hud.setInteract(
-        `<b>${nearMurk.entry.kind === 'great' ? '大濁靈' : '濁靈'}</b><span>${esc(nearMurk.entry.title)}</span><kbd>E</kbd> 安撫`
+        `<b>${nearMurk.entry.kind === 'great' ? '大濁靈' : '濁靈'}</b><span>${esc(nearMurk.entry.title)}${calmedSay}</span><kbd>E</kbd> 安撫`
       );
     } else if (nearWatchman) {
       // 標題 ＋ 一句狀態 ＋ E ＋ 動詞（WORLD.md §3.1）
@@ -2098,9 +2101,18 @@ function boot() {
 
   /* --- 鍵盤快捷 --- */
   window.addEventListener('keydown', (e) => {
+    /*
+     * QA #14：「Esc 關掉設定、馬上按 C，圖鑑沒開」。
+     * 面板收起（`hidden`）之後，裡面那顆有焦點的 <input> 要等瀏覽器**下一次繪製**
+     * 才會被移出 activeElement（focus fixup 是非同步的）；軟體渲染一幀 200–500 ms，
+     * 這段時間內按的鍵 target 仍是那顆藏起來的 input → 被當成「正在打字」吞掉。
+     * 藏在 `[hidden]` 底下的東西不可能真的在打字，不算。
+     * （`createOverlay.close()` 也會主動 blur —— 這裡是第二道保險。）
+     */
     const typing =
       e.target &&
-      (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable);
+      (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) &&
+      !(typeof e.target.closest === 'function' && e.target.closest('[hidden]'));
 
     if (e.key === 'Escape') {
       // 操作一覽與分享卡是疊在最上面那兩層，Escape 一定先關它們

@@ -1022,7 +1022,8 @@ async function main() {
   eq(afterTitle.typedZh, '在一個夜色的世界裡探索，用你寫的 prompt 解開它。', '第二句也完整');
   eq(afterTitle.caretsOn, 0, '畫面上沒有任何游標（打字機已移除）');
   eq(afterTitle.stillTyping, false, '沒有殘留的打字計時器');
-  eq(afterTitle.coverLifting, true, '按下開始 → 黑幕開始淡出（世界第一次亮起來）');
+  // 機器快的時候取樣那一刻黑幕已經淡完被移除（'removed'）—— 那是更強的成功，不是失敗
+  ok(afterTitle.coverLifting === true || afterTitle.coverLifting === 'removed', '按下開始 → 黑幕開始淡出或已淡完（世界第一次亮起來）', String(afterTitle.coverLifting));
   // 淡到哪一格不斷言：軟體渲染下 getComputedStyle 取到的是「上一幀」的值，
   // 幀率一低就會讀到還沒動的 1。真正該守的是「有沒有淡完」——下面那條在等它消失。
   eq(afterTitle.prologueActive, true, '新玩家先進引導課程（Phase 7 序章）');
@@ -3973,25 +3974,47 @@ async function main() {
   eq(shortPress.resultHidden, true, '沒按住就沒有評分');
 
   // 真的按住 900ms（> PALM_HOLD_MS 600ms）
+  /*
+   * 「按住 300ms 還沒發動」量的是**牆鐘**：手掌印的門檻本來就是 setTimeout(600ms)，
+   * 不看影格（stele.js 的 startHold 寫得很清楚）。可是這裡原本用 settle(300)
+   * ＝「300ms **且** 兩個真的畫出來的影格」—— 第四幕在軟體渲染下一幀 300–700ms
+   * （v1.2 發版後 QA 那一輪實測 median 324ms、p90 693ms；同一台機器上**改前的程式碼**
+   * 也是 315ms），兩幀就超過 600ms，讀到的當然是「已經發動」。那不是手掌印壞了，
+   * 是尺拿錯了。改成在頁面裡從 keydown 起算，等到牆鐘 300ms 就讀；並把「真的是在
+   * 600ms 之前讀到的」寫成前提斷言 —— 機器慢到連這個都做不到時，紅的是前提，
+   * 不是那條門檻（門檻 600ms 一字不改）。
+   */
+  await evaluate(`
+    const palm = document.querySelector('#prompt-console [data-palm]');
+    window.__palmDownAt = 0;
+    palm.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !window.__palmDownAt) window.__palmDownAt = performance.now(); }, { once: true, capture: true });
+    return 1;
+  `);
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'Enter', key: 'Enter', windowsVirtualKeyCode: 13 }, sessionId);
-  const holdMid = await (async () => {
-    await settle(300);
-    return evaluate(`
-      const palm = document.querySelector('#prompt-console [data-palm]');
-      const ring = palm.querySelector('.palm__ring');
-      return {
-        holding: palm.classList.contains('is-holding'),
-        slipped: palm.classList.contains('is-slipped'),
-        // 蓄力環是一圈 conic-gradient，由 --hold 推進（軟體渲染下影格很稀疏，
-        // 所以這裡只驗結構，不驗某一刻的填滿比例）
-        ring: getComputedStyle(ring).backgroundImage.slice(0, 40),
-        fired: window.__promptasy.promptConsole.stele.fired,
-      };
-    `);
-  })();
+  const holdMid = await evaluate(`
+    // 從 keydown 起算，等到牆鐘 300ms（已經過了就馬上讀）。
+    // setTimeout 會提早零點幾毫秒醒來（量到 299.x → 前提斷言的 >= 300 紅），
+    // 所以用同一個時鐘迴圈等到真的過了 300ms，不靠容差。
+    const down = window.__palmDownAt || performance.now();
+    while (performance.now() - down < 300) {
+      await new Promise((r) => setTimeout(r, Math.max(1, 300 - (performance.now() - down))));
+    }
+    const palm = document.querySelector('#prompt-console [data-palm]');
+    const ring = palm.querySelector('.palm__ring');
+    return {
+      elapsed: window.__palmDownAt ? performance.now() - window.__palmDownAt : -1,
+      holding: palm.classList.contains('is-holding'),
+      slipped: palm.classList.contains('is-slipped'),
+      // 蓄力環是一圈 conic-gradient，由 --hold 推進（軟體渲染下影格很稀疏，
+      // 所以這裡只驗結構，不驗某一刻的填滿比例）
+      ring: getComputedStyle(ring).backgroundImage.slice(0, 40),
+      fired: window.__promptasy.promptConsole.stele.fired,
+    };
+  `);
   await settle(600);
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'Enter', key: 'Enter', windowsVirtualKeyCode: 13 }, sessionId);
   await settle(700);
+  ok(holdMid.elapsed >= 300 && holdMid.elapsed < 600, '（前提）讀「按住 300ms」那一刻真的落在 300–600ms 之間（機器慢到讀不到就紅這條，不是下面那條）', `${holdMid.elapsed.toFixed(0)}ms`);
   ok(holdMid.holding, '按住的時候手掌印進入蓄力狀態');
   eq(holdMid.slipped, false, '按住時「手滑」的提示會收掉');
   ok(/conic-gradient/.test(holdMid.ring), '蓄力環是一圈會填滿的環', holdMid.ring);
@@ -18148,15 +18171,28 @@ async function main() {
     ok(fxSweeping.opacity > 0, '掃亮的那一圈看得見', String(fxSweeping.opacity));
 
     // 讓它自己演完（≤ 2.5 秒）
+    /*
+     * 演出長度是 ≤ 2.5 秒的**遊戲時間**，而引擎把 dt 夾在 0.1（engine.js:596）——
+     * 幀一慢（e2e 自己的 SwiftShader 就會把這台機器拖到 300–700 ms/幀），
+     * 9 秒牆鐘只走得完 1–2 秒遊戲時間，演出「永遠不結束」。
+     * 所以改成在頁面裡**數影格**：每一幀最多推 0.1 秒，120 幀 ≥ 12 秒遊戲時間，
+     * 不管機器多慢都夠演完；外層的牆鐘只是防當機的保險絲，不是量尺。
+     */
     const fxDone = await waitFor(async () => {
       const r = await evaluate(`
         const fx = window.__promptasy.world.rubricFx;
         const m = fx.group.getObjectByName('ring-sweep');
-        const st = fx.state();
-        return { playing: st.playing.length, particles: st.particlesActive, visible: m.visible, spawned: fx.particlesSpawned };
+        let frames = 0;
+        let st = fx.state();
+        while ((st.playing.length > 0 || st.particlesActive > 0) && frames < 120) {
+          await new Promise((res) => requestAnimationFrame(res));
+          frames += 1;
+          st = fx.state();
+        }
+        return { playing: st.playing.length, particles: st.particlesActive, visible: m.visible, spawned: fx.particlesSpawned, frames };
       `);
       return r.playing === 0 && r.particles === 0 ? r : null;
-    }, { timeout: 9000, label: '演出自己結束' });
+    }, { timeout: 120000, label: '演出自己結束' });
     eq(fxDone.playing, 0, '≤ 2.5 秒後演出自己結束（playing 歸零）');
     eq(fxDone.particles, 0, '碎光也熄了');
     eq(fxDone.visible, false, '演完的道具藏起來');
@@ -18208,10 +18244,19 @@ async function main() {
       eq(st.playing[0].check, 'assignsTask', '演的還是那一條');
     }
     ok(fxReopen.spawned > fxAgain.spawned, '重開之後真的又噴了碎光', `${fxAgain.spawned} → ${fxReopen.spawned}`);
+    // 同上：數影格，不看牆鐘
     await waitFor(async () => {
-      const r = await evaluate(`return window.__promptasy.world.rubricFx.state().playing.length;`);
+      const r = await evaluate(`
+        const fx = window.__promptasy.world.rubricFx;
+        let frames = 0;
+        while (fx.state().playing.length > 0 && frames < 120) {
+          await new Promise((res) => requestAnimationFrame(res));
+          frames += 1;
+        }
+        return fx.state().playing.length;
+      `);
       return r === 0 ? true : null;
-    }, { timeout: 9000, label: '第二次演出也自己結束' });
+    }, { timeout: 120000, label: '第二次演出也自己結束' });
 
     /* --- 低畫質：整層關掉 --- */
     const fxLow = await evaluate(`
@@ -23537,6 +23582,364 @@ async function main() {
     eq(busy.reduced, false, '（前提）P25a：reduced-motion 模擬已關');
     eq(busy.auroraDrift, 1, '（對照）P25a：一般模式極光照樣漂');
     ok(busy.worst > 0.01, '（對照）P25a：一般模式那幾件真的會動（上面那條零位移不是空過）', String(busy.worst));
+  }
+
+  /* ================================================================ */
+  /* v1.2 發版後 QA：15 條「斷言不會抓、人會皺眉」的違和                */
+  /*   每一條都量幾何或掃字串；修之前每一條都紅過（逐條記在 PR 說明）。   */
+  /*   不等牆鐘：條件用 until()，只有「讓畫面跑一拍」才 settle()。      */
+  /* ================================================================ */
+  console.log('\n▸ v1.2 發版後 QA：面板摺線 ＋ 文案一致 ＋ UI 分層（15 條違和）');
+  {
+    const metrics = async (w, h) => {
+      await cdp.send(
+        'Emulation.setDeviceMetricsOverride',
+        { width: w, height: h, deviceScaleFactor: 1, mobile: false },
+        sessionId
+      );
+      await settle(420);
+    };
+    /* 乾淨存檔（上過序章、**沒看過**教學卡）→ 標題卡 Enter → 教學卡 */
+    await evaluate(`
+      localStorage.clear();
+      localStorage.setItem('promptasy.v1.save', JSON.stringify({ version: 1, flags: { prologueDone: true } }));
+      return 1;
+    `);
+    await reloadPage('QA 違和：重新載入（乾淨存檔）');
+    await metrics(1280, 720);
+    await key('Enter', 'Enter', { vk: 13 });
+    await until(`!window.__promptasy.title.isOpen`, { label: 'QA：標題卡收起' });
+    await until(`window.__promptasy.intro.isOpen`, { label: 'QA #1：教學卡出現' });
+    await settle(400);
+
+    /* --- #1 區域介紹卡：唯一的主按鈕不捲動就在畫面內（720 與 600 高都是） --- */
+    const introFit = async (w, h) => {
+      await metrics(w, h);
+      return evaluate(`
+        const b = document.querySelector('.intro [data-start]');
+        const r = b.getBoundingClientRect();
+        const sc = document.querySelector('.intro__scroll');
+        const card = document.querySelector('.intro__card').getBoundingClientRect();
+        return {
+          top: r.top, bottom: r.bottom, h: r.height, vh: innerHeight,
+          cardBottom: card.bottom,
+          scrolls: !!sc && sc.scrollHeight > sc.clientHeight + 1,
+          focused: document.activeElement === b,
+          lead: parseFloat(getComputedStyle(document.querySelector('.intro__lead')).fontSize),
+        };
+      `);
+    };
+    for (const [w, h] of [[1280, 720], [800, 600]]) {
+      const r = await introFit(w, h);
+      ok(r.h > 30, `QA #1：${w}×${h} 「開始探索」量得到大小`, `h=${r.h}`);
+      ok(r.top >= 0 && r.bottom <= r.vh + 0.5, `QA #1：${w}×${h} 「開始探索」不捲動就在畫面內`, `${r.top.toFixed(0)}–${r.bottom.toFixed(0)} / ${r.vh}`);
+      ok(r.cardBottom <= r.vh + 0.5, `QA #1：${w}×${h} 卡片本身貼著視窗、沒有超出去`, `${r.cardBottom.toFixed(0)} / ${r.vh}`);
+      eq(r.scrolls, true, `QA #1：${w}×${h} 內文自己捲（按鈕釘在底部，不是靠縮字）`);
+      ok(r.lead >= 20, `QA #1：${w}×${h} 內文字級沒有被縮回去（Phase 14 是站長回饋）`, `${r.lead}px`);
+    }
+    await metrics(1280, 720);
+
+    /* --- #5 空白鍵三處說法一致：跳 --- */
+    const spaceSay = await evaluate(`
+      const lis = [...document.querySelectorAll('.intro__keys li')].map((li) => ({
+        kbds: [...li.querySelectorAll('kbd')].map((k) => k.textContent.trim()),
+        text: li.textContent.replace(/\\s+/g, ' ').trim(),
+      }));
+      const sky = lis.find((l) => /抬頭看天空/.test(l.text));
+      const jump = lis.find((l) => l.kbds.includes('空白鍵'));
+      return {
+        skyKbds: sky ? sky.kbds : null,
+        jumpText: jump ? jump.text : '',
+        hud: document.querySelector('.hud__controls').textContent.replace(/\\s+/g, ' ').trim(),
+      };
+    `);
+    ok(spaceSay.skyKbds && !spaceSay.skyKbds.includes('空白鍵'), 'QA #5：教學卡「抬頭看天空」那一行只剩 ↑↓，不再掛空白鍵', JSON.stringify(spaceSay.skyKbds));
+    ok(/跳/.test(spaceSay.jumpText), 'QA #5：教學卡說空白鍵是「跳」', spaceSay.jumpText);
+    ok(!/看天空/.test(spaceSay.hud) && /空白鍵 跳/.test(spaceSay.hud), 'QA #5：HUD 底下那行操作說明也說空白鍵是「跳」', spaceSay.hud);
+
+    await evaluate(`document.querySelector('.intro [data-start]').click(); return 1;`);
+    await until(`!window.__promptasy.intro.isOpen`, { label: 'QA：教學卡收起' });
+    // 教學卡收起之後輸入是**非同步**恢復的：等到真的恢復再按鍵（settle(300) 在慢機器上不夠，
+    // 而且那正是「固定等待」的老毛病）。真實點擊的探針量過：恢復後 O／C 都正常。
+    await until(`window.__promptasy.player.inputEnabled === true`, { label: 'QA：教學卡收起後輸入恢復' });
+    await settle(200);
+
+    /* --- #8 / #15 HUD 頂列有一道由上而下淡出的 scrim（字不再直接壓在世界字牌上） --- */
+    const hudScrim = await evaluate(`
+      const cs = getComputedStyle(document.querySelector('.hud'), '::before');
+      const obj = getComputedStyle(document.querySelector('.hud__objective'));
+      return { h: parseFloat(cs.height), bg: cs.backgroundImage, pe: cs.pointerEvents, clamp: obj.webkitLineClamp || obj.lineClamp };
+    `);
+    ok(hudScrim.h >= 150, 'QA #8/#15：HUD 頂列底下有一片 scrim（高度 ≥150px）', `${hudScrim.h}px`);
+    ok(/gradient/.test(hudScrim.bg), 'QA #8/#15：那片 scrim 是漸層（不是實心條）', hudScrim.bg.slice(0, 40));
+    eq(hudScrim.pe, 'none', 'QA #8/#15：scrim 不擋任何拖曳');
+    eq(String(hudScrim.clamp), '2', 'QA #8：「下一個目標」最多兩行，多的截成 …');
+
+    /* --- #14 Esc 關掉設定、馬上按 C：圖鑑一定開（焦點不准留在藏起來的 input 上） --- */
+    await key('KeyO', 'o', { vk: 79 });
+    await until(`window.__promptasy.settings.isOpen`, { label: 'QA #14：設定開了' });
+    await settle(200);
+    const raceSync = await evaluate(`
+      const g = window.__promptasy;
+      // 跟 QA 做的事一樣：先碰了設定裡的勾勾（焦點在 <input>），再 Esc、再 C
+      document.querySelector('#settings [data-daily]').focus();
+      const before = document.activeElement.id;
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+      const afterEsc = document.activeElement === document.body ? 'body' : (document.activeElement.id || document.activeElement.tagName);
+      const settingsClosed = !g.settings.isOpen;
+      // 同一個 task 裡就按 C —— 瀏覽器的 focus fixup 還沒跑，這正是那個空窗
+      document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', code: 'KeyC', bubbles: true }));
+      return { before, afterEsc, settingsClosed, codexOpen: g.codex.isOpen };
+    `);
+    eq(raceSync.before, 'set-daily', '（前提）QA #14：Esc 之前焦點真的在設定裡的勾勾上');
+    eq(raceSync.settingsClosed, true, 'QA #14：Esc 真的把設定關掉了');
+    eq(raceSync.afterEsc, 'body', 'QA #14：面板收起的同一拍，焦點已經離開藏起來的 input');
+    eq(raceSync.codexOpen, true, 'QA #14：Esc 之後**同一個 task** 按 C，圖鑑照開（不被「正在打字」吞掉）');
+    await evaluate(`window.__promptasy.codex.close(); return 1;`);
+    await settle(200);
+    // 真的按鍵再走一次（rawKeyDown 走瀏覽器的真事件路徑）
+    await key('KeyO', 'o', { vk: 79 });
+    await until(`window.__promptasy.settings.isOpen`, { label: 'QA #14：設定再開一次' });
+    await evaluate(`document.querySelector('#settings [data-daily]').focus(); return 1;`);
+    await key('Escape', 'Escape', { vk: 27 });
+    await key('KeyC', 'c', { vk: 67 });
+    const raceReal = await until(`window.__promptasy.codex.isOpen`, { timeout: 4000, soft: true, label: 'QA #14：真按鍵之後圖鑑開了' });
+    eq(Boolean(raceReal), true, 'QA #14：真的按 Esc 再馬上按 C，圖鑑開了（4 秒內）');
+
+    /* --- #3 今日三事在圖鑑最上面；#4 三件不撞句 --- */
+    await until(`window.__promptasy.codex.isOpen && document.querySelector('#codex [data-daily]')`, { label: 'QA #3：圖鑑掛上畫面' });
+    const dailyTop = await evaluate(`
+      const body = document.querySelector('#codex .panel__body');
+      const first = body.firstElementChild;
+      const rows = [...body.querySelectorAll('[data-daily-offer]')].map((li) => ({
+        what: li.querySelector('b').textContent.trim(),
+        say: li.querySelector('span').textContent.trim(),
+      }));
+      return {
+        firstIsDaily: !!first && first.hasAttribute('data-daily'),
+        firstClass: first ? first.className : '',
+        rankAfterDaily: (() => {
+          const d = body.querySelector('[data-daily]');
+          const r = body.querySelector('.sharebar');
+          return !!d && !!r && d.getBoundingClientRect().bottom <= r.getBoundingClientRect().top + 1;
+        })(),
+        rows,
+      };
+    `);
+    eq(dailyTop.firstIsDaily, true, 'QA #3：今日三事是圖鑑內容區的**第一塊**（標頭之後、稱號之前）', dailyTop.firstClass);
+    eq(dailyTop.rankAfterDaily, true, 'QA #3：稱號那一條排在今日三事下面');
+    ok(dailyTop.rows.length >= 2, 'QA #4：（前提）乾淨存檔至少提得出兩件', String(dailyTop.rows.length));
+    eq(new Set(dailyTop.rows.map((r) => r.what)).size, dailyTop.rows.length, 'QA #4：三件的主句彼此不同（不是複製貼上）', dailyTop.rows.map((r) => r.what).join(' ｜ '));
+    eq(new Set(dailyTop.rows.map((r) => r.say)).size, dailyTop.rows.length, 'QA #4：三件的副句彼此不同', dailyTop.rows.map((r) => r.say).join(' ｜ '));
+
+    /* --- #9 800px 寬：ⓘ 的氣泡不被面板左緣裁掉（hover 與鍵盤 focus 都一樣） --- */
+    await metrics(800, 600);
+    await evaluate(`document.querySelector('#codex .codex__hint .infotip__btn').focus(); return 1;`);
+    // 氣泡的位移不走 transition（`translate`），但仍然等它的幾何**穩下來**再量，不等牆鐘
+    await untilStable(
+      `document.querySelector('#codex .codex__hint .infotip__bubble').getBoundingClientRect().left`,
+      { label: 'QA #9：氣泡定位穩下來' }
+    );
+    const tipClamp = await evaluate(`
+      const btn = document.querySelector('#codex .codex__hint .infotip__btn');
+      const tip = btn.closest('.infotip');
+      const b = tip.querySelector('.infotip__bubble').getBoundingClientRect();
+      const body = document.querySelector('#codex .panel__body').getBoundingClientRect();
+      const arrow = getComputedStyle(tip.querySelector('.infotip__bubble'), '::after').left;
+      return {
+        open: tip.classList.contains('is-open') || tip.matches(':focus-within'),
+        w: b.width, left: b.left, right: b.right, bodyLeft: body.left, bodyRight: body.right,
+        shift: tip.style.getPropertyValue('--infotip-shift'),
+        arrow,
+      };
+    `);
+    eq(tipClamp.open, true, '（前提）QA #9：鍵盤 focus 把氣泡打開了');
+    ok(tipClamp.w > 100, '（前提）QA #9：氣泡量得到寬度', `${tipClamp.w}`);
+    ok(tipClamp.left >= tipClamp.bodyLeft - 1 && tipClamp.right <= tipClamp.bodyRight + 1, 'QA #9：800px 下氣泡整個在面板內容區裡（沒被左緣裁掉）', `${tipClamp.left.toFixed(0)}–${tipClamp.right.toFixed(0)} in ${tipClamp.bodyLeft}–${tipClamp.bodyRight}`);
+    ok(parseFloat(tipClamp.shift) > 0, 'QA #9：那顆 ⓘ 靠左，氣泡真的被往右推了（不是本來就在裡面的空過）', tipClamp.shift);
+    await evaluate(`document.activeElement.blur(); window.__promptasy.codex.close(); return 1;`);
+    await settle(200);
+
+    /* --- #10 800×600 主控台標頭：✕ 與關卡名同一行；#2 手印釘在面板底部 --- */
+    await evaluate(`
+      const g = window.__promptasy;
+      g.promptConsole.open(g.content.challenge('gate-of-clarity-01'));
+      return 1;
+    `);
+    await until(`window.__promptasy.promptConsole.isOpen && document.querySelector('#prompt-console .panel')`, { label: 'QA #10：關卡面板掛上畫面' });
+    await settle(500);
+    const head800 = await evaluate(`
+      const p = document.querySelector('#prompt-console .panel');
+      // DOMRect 沒有自有可列舉屬性，經 Runtime.evaluate 回來會變成 {} —— 一定要攤成普通物件
+      const R = (r) => ({ top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height });
+      const t = R(p.querySelector('.panel__title').getBoundingClientRect());
+      const x = R(p.querySelector('.panel__close').getBoundingClientRect());
+      const e = R(p.querySelector('.panel__eyebrow').getBoundingClientRect());
+      return { title: t, close: x, eyebrow: e, w: innerWidth };
+    `);
+    ok(head800.close.width > 20 && head800.title.width > 20, '（前提）QA #10：800px 標頭量得到');
+    ok(head800.close.top < head800.title.bottom && head800.close.left > head800.title.right, 'QA #10：800px 下 ✕ 與關卡名同一行、在右邊（沒折到標題底下）', `close=(${head800.close.left.toFixed(0)},${head800.close.top.toFixed(0)}) title.bottom=${head800.title.bottom.toFixed(0)} title.right=${head800.title.right.toFixed(0)}`);
+    ok(head800.close.right <= head800.w + 1, 'QA #10：800px 下 ✕ 在畫面內', String(head800.close.right));
+    ok(head800.eyebrow.top >= head800.title.bottom - 1, 'QA #10：800px 下進度小牌掉到第二行（讓位給 ✕）', `eyebrow.top=${head800.eyebrow.top.toFixed(0)}`);
+
+    /** 把石碑刻滿：每一段依序試選項，刻進去就往下一段（不猜答案，選錯石碑不收） */
+    const carveToPalm = `
+      const g = window.__promptasy;
+      for (let n = 0; n < 3; n += 1) {
+        const act = g.promptConsole.act;
+        if (act >= 3) break;
+        document.querySelector('#prompt-console [data-in-acts="' + act + '"] [data-act-next]')?.click();
+        await window.__paSettle(300);
+      }
+      for (let guard = 0; guard < 12; guard += 1) {
+        const wrap = document.querySelector('#prompt-console [data-palmwrap]');
+        if (wrap && !wrap.hidden) break;
+        const before = document.querySelector('#prompt-console [data-progress]').textContent;
+        for (const o of document.querySelectorAll('#prompt-console .opt')) {
+          o.click();
+          await window.__paSettle(220);
+          if (document.querySelector('#prompt-console [data-progress]').textContent !== before) break;
+          const w2 = document.querySelector('#prompt-console [data-palmwrap]');
+          if (w2 && !w2.hidden) break;
+        }
+      }
+      return 1;
+    `;
+    await evaluate(carveToPalm);
+    await until(`window.__promptasy.promptConsole.act === 4 && !document.querySelector('#prompt-console [data-palmwrap]').hidden`, { label: 'QA #2：刻滿、到手印那一幕' });
+    await settle(400);
+    const palmFit = `
+      const palm = document.querySelector('#prompt-console .palm');
+      const body = document.querySelector('#prompt-console .panel__body');
+      const pr = palm.getBoundingClientRect();
+      const br = body.getBoundingClientRect();
+      return {
+        top: pr.top, bottom: pr.bottom, h: pr.height, bodyTop: br.top, bodyBottom: br.bottom,
+        bodyScrolls: body.scrollHeight > body.clientHeight + 1,
+        sticky: getComputedStyle(document.querySelector('#prompt-console .palmwrap')).position,
+        label: parseFloat(getComputedStyle(palm.querySelector('.palm__label')).fontSize),
+      };
+    `;
+    for (const [w, h] of [[800, 600], [1280, 720]]) {
+      await metrics(w, h);
+      const r = await evaluate(palmFit);
+      ok(r.h > 60, `QA #2：${w}×${h} 手印量得到大小`, `h=${r.h}`);
+      ok(r.top >= r.bodyTop - 1 && r.bottom <= r.bodyBottom + 1, `QA #2：${w}×${h} 手印整顆在面板可見範圍內（不用捲）`, `${r.top.toFixed(0)}–${r.bottom.toFixed(0)} in ${r.bodyTop.toFixed(0)}–${r.bodyBottom.toFixed(0)}`);
+      eq(r.sticky, 'sticky', `QA #2：${w}×${h} 手印那一列是釘在底部的（sticky）`);
+      ok(r.label >= 16, `QA #2：${w}×${h} 手印上的字級沒有被縮`, `${r.label}px`);
+    }
+    await evaluate(`window.__promptasy.promptConsole.close(); return 1;`);
+    await settle(200);
+
+    /* --- #12 800×600 橋上的門詢問窗：底部那排鍵盤提示在面板內 --- */
+    await metrics(800, 600);
+    await evaluate(`window.__promptasy.askGate('reasoning'); return 1;`);
+    await until(`window.__promptasy.gateAsk.isOpen && document.querySelector('#gate-ask .gateask__hint')`, { label: 'QA #12：門詢問窗開了' });
+    await settle(500);
+    const gateFit = await evaluate(`
+      const h = document.querySelector('#gate-ask .gateask__hint').getBoundingClientRect();
+      const p = document.querySelector('#gate-ask .panel').getBoundingClientRect();
+      const acts = document.querySelector('#gate-ask .gateask__acts').getBoundingClientRect();
+      const line = parseFloat(getComputedStyle(document.querySelector('#gate-ask .gateask__line')).fontSize);
+      return { hintBottom: h.bottom, hintH: h.height, actsBottom: acts.bottom, panelBottom: p.bottom, vh: innerHeight, line };
+    `);
+    ok(gateFit.hintH > 10, '（前提）QA #12：那排提示量得到', `${gateFit.hintH}`);
+    ok(gateFit.hintBottom <= gateFit.panelBottom + 0.5, 'QA #12：800×600 下那排鍵盤提示整排在面板內', `${gateFit.hintBottom.toFixed(0)} / ${gateFit.panelBottom.toFixed(0)}`);
+    ok(gateFit.actsBottom <= gateFit.panelBottom + 0.5, 'QA #12：800×600 下兩顆按鈕也在面板內', `${gateFit.actsBottom.toFixed(0)}`);
+    ok(gateFit.line >= 20, 'QA #12：字級沒有被縮（只收了間距）', `${gateFit.line}px`);
+    await evaluate(`window.__promptasy.gateAsk.close(); return 1;`);
+    await metrics(1280, 720);
+
+    /* --- #7 右下 toast 抬到互動提示卡上方 --- */
+    await evaluate(`
+      const g = window.__promptasy;
+      const m = g.world.markers[0];
+      g.player.teleport(m.position.x + 0.6, m.position.z + 0.6);
+      return 1;
+    `);
+    await until(`!document.querySelector('.hud__interact').hidden && /E/.test(document.querySelector('.hud__interact').textContent)`, { label: 'QA #7：走近石座、提示卡出現' });
+    const toastFit = await evaluate(`
+      const g = window.__promptasy;
+      g.hud.toast('坐下來。這裡什麼都不會發生 —— 抄寫人當初就是為了這個把凳子擺在這。 +4 XP', 'good');
+      await window.__paSettle(500);
+      const t = document.querySelector('.hud__toasts .toast').getBoundingClientRect();
+      const i = document.querySelector('.hud__interact').getBoundingClientRect();
+      return {
+        toast: { top: t.top, bottom: t.bottom, left: t.left, right: t.right },
+        card: { top: i.top, bottom: i.bottom, left: i.left, right: i.right },
+        overlap: !(t.bottom <= i.top || t.top >= i.bottom || t.right <= i.left || t.left >= i.right),
+      };
+    `);
+    ok(toastFit.toast.right - toastFit.toast.left > 100 && toastFit.card.right - toastFit.card.left > 100, '（前提）QA #7：toast 與提示卡都量得到');
+    eq(toastFit.overlap, false, 'QA #7：toast 不蓋住互動提示卡', `toast=${JSON.stringify(toastFit.toast)} card=${JSON.stringify(toastFit.card)}`);
+    ok(toastFit.toast.bottom <= toastFit.card.top, 'QA #7：toast 在提示卡**上方**（不是擠到旁邊）', `${toastFit.toast.bottom.toFixed(0)} ≤ ${toastFit.card.top.toFixed(0)}`);
+
+    /* --- #13 離鏡頭很近的字牌淡出（不是放大到被裁掉） --- */
+    const labelFade = await evaluate(`
+      const g = window.__promptasy;
+      const m = g.world.markers[0];
+      const cam = g.engine.camera;
+      const wp = () => m.label.getWorldPosition(new m.label.position.constructor());
+      const settleTo = async (dz) => {
+        g.player.teleport(m.position.x, m.position.z + dz);
+        // 等鏡頭跟過去（不等牆鐘：等相機到字牌的距離連續兩拍不再變）
+        let last = -1;
+        for (let i = 0; i < 90; i += 1) {
+          await new Promise((r) => requestAnimationFrame(r));
+          const d = cam.position.distanceTo(wp());
+          if (Math.abs(d - last) < 0.01 && i > 10) break;
+          last = d;
+        }
+        return { d: cam.position.distanceTo(wp()), opacity: m.label.material.opacity };
+      };
+      const near = await settleTo(-10);
+      const far = await settleTo(28);
+      return { near, far };
+    `);
+    ok(labelFade.near.d < 5.5, '（前提）QA #13：鏡頭真的貼到字牌 5.5 公尺內', `${labelFade.near.d.toFixed(2)}m`);
+    ok(labelFade.near.opacity < 0.05, 'QA #13：貼得很近的字牌淡到看不見（不再放大到被邊緣裁掉）', String(labelFade.near.opacity));
+    ok(labelFade.far.d > 12, '（對照）QA #13：走遠之後鏡頭離字牌 12 公尺以上', `${labelFade.far.d.toFixed(2)}m`);
+    ok(labelFade.far.opacity > 0.95, '（對照）QA #13：走遠了字牌照樣是實的（淡出只發生在很近的時候）', String(labelFade.far.opacity));
+
+    /* --- #11 安撫過的濁靈，提示卡寫出狀態與評價 --- */
+    const murkSay = await evaluate(`
+      const g = window.__promptasy;
+      const id = 'murk-vague-ask';
+      g.progression.state.murks = g.progression.state.murks && !Array.isArray(g.progression.state.murks) ? g.progression.state.murks : {};
+      g.progression.state.murks[id] = { hits: [0, 1, 2], grade: 'S' };
+      const m = g.world.murks.byId(id);
+      g.player.teleport(m.position.x + 1.2, m.position.z + 1.2);
+      let text = '';
+      for (let i = 0; i < 120; i += 1) {
+        await new Promise((r) => requestAnimationFrame(r));
+        const h = document.querySelector('.hud__interact');
+        if (!h.hidden && /含糊的請求/.test(h.textContent)) { text = h.textContent.replace(/\\s+/g, ' ').trim(); break; }
+      }
+      return { text, state: g.progression.murkState(id) };
+    `);
+    ok(/含糊的請求/.test(murkSay.text), '（前提）QA #11：走近了那一隻濁靈、提示卡出現', murkSay.text);
+    ok(/濁靈/.test(murkSay.text) && /E/.test(murkSay.text) && /安撫/.test(murkSay.text), 'QA #11：原本那三樣（濁靈 · 名字 · E 安撫）一個不少', murkSay.text);
+    ok(/已安撫 · S/.test(murkSay.text), 'QA #11：安撫過的濁靈，提示卡寫出「已安撫 · S」（像石座的「最佳 S」）', murkSay.text);
+
+    /* --- #6 回聲字幕底下有一片柔和的暗色底（不是實心方塊） --- */
+    const nudgeScrim = await evaluate(`
+      const cs = getComputedStyle(document.querySelector('.nudge'));
+      return { bg: cs.backgroundImage, pe: cs.pointerEvents };
+    `);
+    ok(/radial-gradient/.test(nudgeScrim.bg), 'QA #6：回聲字幕底下是往四周淡出的漸層 scrim', nudgeScrim.bg.slice(0, 40));
+    eq(nudgeScrim.pe, 'none', 'QA #6：scrim 仍然不擋任何點擊');
+
+    // 還原：走遠一點、把測試塞進去的濁靈狀態拿掉
+    await evaluate(`
+      const g = window.__promptasy;
+      delete g.progression.state.murks['murk-vague-ask'];
+      const m = g.world.markers[0];
+      g.player.teleport(m.position.x, m.position.z + 28);
+      g.player.setInputEnabled(true);
+      return 1;
+    `);
+    await cdp.send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+    await settle(420);
   }
 
   await settle(600);

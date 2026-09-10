@@ -9,8 +9,14 @@ export function createIntro({ onDismiss }) {
   root.setAttribute('role', 'dialog');
   root.setAttribute('aria-modal', 'true');
   root.setAttribute('aria-label', '操作說明');
+  /*
+   * QA #1：卡片高 1177px、視窗 720px —— 唯一的主按鈕在摺線下 400px，
+   * 新玩家看到的第一個畫面沒有按鈕。字級不縮（Phase 14 是站長回饋放大的），
+   * 改成：內文自己捲（.intro__scroll）、主按鈕釘在卡片底部（.intro__foot）永遠看得到。
+   */
   root.innerHTML = `
     <div class="intro__card">
+      <div class="intro__scroll" data-intro-scroll>
       <p class="intro__eyebrow">Promptasy — Foundations</p>
       <h1 class="intro__title">高原上的第一課</h1>
       <p class="intro__lead">
@@ -23,7 +29,7 @@ export function createIntro({ onDismiss }) {
         <li><kbd>Shift</kbd><span>奔跑</span></li>
         <li><kbd>空白鍵</kbd><span>跳（有高台的土地）</span></li>
         <li><kbd>←</kbd><kbd>→</kbd> / 滑鼠拖曳<span>轉鏡頭</span></li>
-        <li><kbd>↑</kbd><kbd>↓</kbd> / <kbd>空白鍵</kbd><span>抬頭看天空</span></li>
+        <li><kbd>↑</kbd><kbd>↓</kbd><span>抬頭看天空</span></li>
         <li><kbd>-</kbd><kbd>=</kbd><span>鏡頭拉遠 / 拉近</span></li>
         <li><kbd>E</kbd><span>互動</span></li>
         <li><kbd>C</kbd><span>技巧圖鑑</span></li>
@@ -36,13 +42,18 @@ export function createIntro({ onDismiss }) {
         每條技巧都附官方出處，可以直接點開查證。
         整趟旅程不用滑鼠也走得完 —— 忘記按什麼就按 <kbd>?</kbd>。
       </p>
-      <button class="btn btn--primary" data-start type="button">開始探索</button>
+      </div>
+      <div class="intro__foot">
+        <button class="btn btn--primary" data-start type="button">開始探索</button>
+      </div>
     </div>
   `;
 
-  root.querySelector('[data-start]').addEventListener('click', () => {
+  root.querySelector('[data-start]').addEventListener('click', (e) => {
     root.classList.remove('is-open');
     root.hidden = true;
+    // 收起來的按鈕不該還握著焦點（QA #14 同一個病：藏起來的元素在下一次繪製前仍是 activeElement）
+    if (e.currentTarget === document.activeElement) e.currentTarget.blur();
     onDismiss?.();
   });
 

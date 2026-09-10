@@ -1735,7 +1735,17 @@ export function createProgression({
         changed = true;
       }
       if (!box.ids.length) {
-        const picked = Daily.pickOffers(key, dailyPool(box.visited));
+        /*
+         * QA #4：同一句話只提一次。找線索那一種畫出來是「到某片土地找一處還沒某種線索」，
+         * 所以它的「說出來的鍵」是種類＋土地 —— 兩則不同的刻文在同一片土地上等於同一句。
+         */
+        const sayKey = (id) => {
+          const o = Daily.parseOffer(id);
+          if (!o || o.kind !== 'find') return id;
+          const e = ((clues || {})[o.clueKind] || []).find((x) => x && x.id === o.clueId);
+          return `find:${o.clueKind}:${(e && e.region) || o.clueId}`;
+        };
+        const picked = Daily.pickOffers(key, dailyPool(box.visited), Daily.DAILY_COUNT, { sayKey });
         if (picked.length) {
           box.ids = picked;
           changed = true;

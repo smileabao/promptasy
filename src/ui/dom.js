@@ -194,6 +194,42 @@ export function sourceNoteHtml(note) {
  * 幫一個容器裡所有的 ⓘ 接上互動（事件委派，之後重繪的 ⓘ 也有效）。
  * 呼叫一次就好。
  */
+/**
+ * QA #9：氣泡要留在看得到的範圍裡。
+ *
+ * 氣泡以 ⓘ 為中心往兩邊長（`translate(-50%)`）。ⓘ 靠近面板左緣時，
+ * 氣泡左半邊會被 `.panel__body`（overflow）或視窗裁掉 —— 800px 寬的圖鑑實測少了 127px。
+ * 量一次：找到最近一個會裁東西的祖先（overflow 不是 visible 的）或視窗，
+ * 氣泡超出去多少就往回推多少，寫進 `--infotip-shift`；小尖角反向位移，仍然指著 ⓘ。
+ * 純量測、不改任何字級；關掉時把位移清掉。
+ * @param {Element} tip `[data-infotip]`
+ */
+export function clampBubble(tip) {
+  const bubble = tip.querySelector('.infotip__bubble');
+  if (!bubble || typeof bubble.getBoundingClientRect !== 'function') return;
+  tip.style.setProperty('--infotip-shift', '0px');
+  // 找會裁掉它的那一層（面板內容區有 overflow-y:auto，橫向也會一起裁）
+  let clip = null;
+  for (let node = tip.parentElement; node && node !== document.body; node = node.parentElement) {
+    const cs = getComputedStyle(node);
+    if (cs.overflowX !== 'visible' || cs.overflowY !== 'visible') {
+      clip = node.getBoundingClientRect();
+      break;
+    }
+  }
+  const margin = 8;
+  const left = clip ? clip.left + margin : margin;
+  const right = clip ? clip.right - margin : window.innerWidth - margin;
+  const r = bubble.getBoundingClientRect();
+  if (!r.width) return;
+  let shift = 0;
+  if (r.left < left) shift = left - r.left;
+  else if (r.right > right) shift = right - r.right;
+  // 兩邊都塞不下（氣泡比容器還寬）：靠左對齊，至少看得到開頭
+  if (shift && r.left + shift < left) shift = left - r.left;
+  tip.style.setProperty('--infotip-shift', `${Math.round(shift)}px`);
+}
+
 export function bindInfoTips(root) {
   if (!root || root.__infoTipsBound) return;
   root.__infoTipsBound = true;
@@ -202,6 +238,8 @@ export function bindInfoTips(root) {
     if (!tip) return;
     tip.classList.toggle('is-open', open);
     tip.querySelector('[data-infotip-btn]')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) clampBubble(tip);
+    else tip.style.removeProperty('--infotip-shift');
   };
   const closeAll = () => {
     for (const tip of root.querySelectorAll('[data-infotip].is-open')) setOpen(tip, false);
@@ -533,6 +571,20 @@ export function createOverlay({
         }
       }
       restoreFocusTo = null;
+      /*
+       * QA #14：藏起來的面板不准還握著焦點。
+       * 上面那一步還原不到（開面板時焦點在 <body>、或原本那顆已經不在）的時候，
+       * 面板裡的 <input> 會一直是 activeElement，直到瀏覽器下一次繪製才被移出來 ——
+       * 這段空窗裡按的 C／O／E 全部被「正在打字」的判定吞掉。主動放掉它。
+       */
+      const active = document.activeElement;
+      if (active && active !== document.body && overlay.contains(active)) {
+        try {
+          active.blur();
+        } catch {
+          /* 沒得 blur 就算了 */
+        }
+      }
     },
     get isOpen() {
       return !overlay.hidden;

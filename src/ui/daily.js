@@ -34,6 +34,16 @@ export const CLUE_SAY = Object.freeze({
 });
 
 /**
+ * 三種線索各自的副句（QA #4：三條一模一樣的「那一片土地上還有東西沒被你看見」
+ * 看起來像複製貼上）。每一句說的是**那一種東西在哪裡找**，不是催。
+ */
+export const FIND_SAY = Object.freeze({
+  secret: '藏起來的地方，要繞到看不見的那一側才找得到。',
+  letter: '有人把話留在紙上，就放在路邊。',
+  ins: '角落的刻文，每一則都教一件小事。',
+});
+
+/**
  * 一個提議要怎麼說。
  *
  * @param {object} offer `daily.js` 的 `parseOffer()` 加上 `done`
@@ -55,7 +65,7 @@ export function offerSay(offer, { regionName = (id) => id, challengeTitle = (id)
   if (offer.kind === 'find') {
     return {
       what: `到${regionName(offer.clueRegion || '')}找一處還沒${CLUE_SAY[offer.clueKind] || '找到的東西'}`,
-      say: '那一片土地上還有東西沒被你看見。',
+      say: FIND_SAY[offer.clueKind] || '那一片土地上還有東西沒被你看見。',
     };
   }
   if (offer.kind === 'visit') {
@@ -90,10 +100,15 @@ function offerHtml(offer, names) {
 export function dailyBlock(offers, names = {}) {
   if (!Array.isArray(offers)) return '';
   const rows = offers.map((o) => offerHtml(o, names)).join('');
-  return `<div class="seals finds daily" data-daily>
+  /*
+   * 只掛自己的 class（`.daily` / `.daily__list`），不再借 `.seals .finds .finds__list`：
+   * QA #3 把這一塊搬到圖鑑最上面之後，借來的 class 會讓「找 `.seals`」「找 `.finds__list li` 裡的刻文」
+   * 那些既有讀法先撞到今日三事（e2e 實測撞了三條 ＋ 一次中斷）。樣式在 styles.css 與 `.finds__list` 同一組規則。
+   */
+  return `<div class="daily" data-daily>
     <div class="meta-rule"><h4><span class="zh">${esc(DAILY_TITLE)}</span><span class="en">Today</span></h4></div>
     <p class="muted daily__lead">${esc(DAILY_LEAD)}</p>
-    ${rows ? `<ul class="finds__list daily__list">${rows}</ul>` : `<p class="codex__hint" data-daily-empty>${esc(DAILY_EMPTY)}</p>`}
+    ${rows ? `<ul class="daily__list">${rows}</ul>` : `<p class="daily__empty" data-daily-empty>${esc(DAILY_EMPTY)}</p>`}
   </div>`;
 }
 
