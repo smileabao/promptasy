@@ -36,6 +36,11 @@ model calls, no backend, no account — so the core loop works on a plane, in a 
 The game's default answering mode is **not typing**: you pick sentence fragments and carve them into a stele, so
 someone who has never written a prompt can still finish a challenge and learn *why* each fragment works.
 
+Since v1.2 the world also **pushes back**: 20 *murks* — the residue of requests that were once written badly — stand
+where they went wrong and grow quiet only as your answer gets clearer; 12 standing *watchmen* and a *gatekeeper* with a
+visible system prompt trade hints for the right words; you can jump, take a shortcut, follow rumors between clues, and
+in the end rewrite your own very first prompt. Nothing punishes you and nothing expires — progress only accumulates.
+
 > **The game UI is in Traditional Chinese (繁體中文).** The codebase, docs and code comments mix English and
 > Chinese. An English UI is not available yet — see [Roadmap](#roadmap).
 
@@ -53,8 +58,9 @@ someone who has never written a prompt can still finish a challenge and learn *w
 
 <div align="center"><img src="docs/media/title.png" alt="Title card: Promptasy — Learn Prompt Engineering by Playing" width="70%"></div>
 
-> Captured from the current **v1.1** build with a mid-progress save (level 10, two land seals), 1600×900, real headless
-> Chrome over CDP — no mock-ups, no compositing.
+> Captured from the current **v1.2** build with a mid-progress save (level 10, 26 techniques, two land seals), 1600×900,
+> real headless Chrome — no mock-ups, no compositing. The codex opens on *three things today*; the world shot shows the
+> traveller's lantern, shrine beacons, lore steles, a watchman and an archive hall on the scaled-up plateau.
 
 ---
 
@@ -87,6 +93,16 @@ someone who has never written a prompt can still finish a challenge and learn *w
   palette, fog, aurora drift and generative lighting; 12 landmarks visible from far away, 14 lore steles,
   13 inscription whispers, 44 interactable objects, 44 proximity reactions, 24 scribe pages, 12 archive halls,
   20 murks, 11 jumpable platforms and 12 map secrets. All procedural — zero model files.
+- **Encounters that never punish** — 20 murks (12 great murks) soothed with choice-based answers scored by the same
+  engine; 12 watchmen (stationary NPCs) with stuck-hints, directions, lore and technique facts; one gatekeeper whose
+  system prompt you can read and must satisfy. Threat never costs you anything — it only gets quieter.
+- **A vertical, connected world** — jump (Space) onto 11 platforms and across a broken bridge span; mid-ground
+  screens and motifs in every region; one shortcut between neighbouring lands; a map scaled ×1.3 so nothing crowds.
+- **A story that closes** — 24 scribe pages, 24 rumor links, 12 echo replays, 12 archive halls (24 cited "why"
+  notes), a mid-point reveal, and a finale where you rewrite your first prompt and raise the mother stele — carving
+  your own text is explicit, skippable, and never leaves the browser.
+- **Progress you can see** — your level is worn on the cape (33 pips × 3 rings = 99); "three things today" are
+  suggestions, not tasks (no expiry, no streaks, switchable off); the hidden achievement equals the finale threshold.
 - **Real soundtrack** — **13 original tracks** (title + one per region, cross-faded when you cross a bridge) and
   **24 SFX**. If the audio files are missing or blocked, a **Web Audio synth fallback** takes over and the game still
   sounds alive.
@@ -122,9 +138,10 @@ Requires **Node.js 18+**. `npm run test:e2e` additionally needs a system Chrome/
 | <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> | Move | 移動 |
 | <kbd>Shift</kbd> | Run | 奔跑 |
 | <kbd>←</kbd><kbd>→</kbd> / drag | Turn camera | 轉鏡頭 |
-| <kbd>↑</kbd><kbd>↓</kbd> / <kbd>Space</kbd> | Look up at the sky / down | 抬頭看天空 / 低頭 |
+| <kbd>↑</kbd><kbd>↓</kbd> | Look up at the sky / down | 抬頭看天空 / 低頭 |
+| <kbd>Space</kbd> | Jump — onto the 11 platforms, across the broken bridge span | 跳：跳上高台、跳過橋的缺口 |
 | <kbd>-</kbd><kbd>=</kbd> / wheel | Zoom out / in | 鏡頭拉遠 / 拉近 |
-| <kbd>E</kbd> | Interact — shrine, lore stele, inscription, gate, object | 互動：石座 / 石碑 / 刻文 / 閘門 / 器物 |
+| <kbd>E</kbd> | Interact — shrine, murk, watchman, gatekeeper, lore stele, inscription, page, object, bench, echo, gate | 互動：石座 / 濁靈 / 守夜人 / 守門者 / 石碑 / 刻文 / 殘頁 / 器物 / 長凳 / 回聲 / 閘門 |
 | <kbd>C</kbd> | Codex | 技巧圖鑑 |
 | <kbd>O</kbd> | Settings (volume, quality, answering mode, reset) | 設定 |
 | <kbd>?</kbd> | Key list | 操作一覽 |
@@ -404,7 +421,15 @@ and links remain the property of their original vendors.
 - **門檻看你會什麼，不看等級**：橋上的門讀的是你收集到的技法；不夠也可以「先行前往」，而且會誠實記下來。
 - **先上一堂引導課程**：序章「喚醒神諭」有四道要真的做到才過的門檻，再帶三堂核心概念實作課。可跳過、可重看。
 - **即時預檢**：還沒送出，畫面右邊就一盞一盞亮起「你已經做到哪幾項」；卡住時右下角的提示球會給你可以直接填的句子。
-- **看不懂的詞就地解釋**：畫面上的技術名詞滑過去（或用鍵盤聚焦）就開一張小卡，共 24 條白話說明。
+- **看不懂的詞就地解釋**：畫面上的技術名詞滑過去（或用鍵盤聚焦）就開一張小卡，共 24 條白話說明。- **看不懂的詞就地解釋**：畫面上的技術名詞滑過去（或用鍵盤聚焦）就開一張小卡，共 24 條白話說明。
+- **遭遇不懲罰（v1.2）**：路上站著 20 隻濁靈——當年寫壞的請求留下的東西。走近按 E，用選的把話講清楚，牠就一層一層安靜下來；
+  不會扣分、不會失敗、不會追你。12 位守夜人站著等你問路（卡關提示、指路、世界觀、技巧小知識），護欄崗的守門者身上掛著
+  一份看得見的 system prompt，要說出對得上的話才放行。
+- **世界有高低、有捷徑（v1.2）**：空白鍵跳，11 座高台、一段塌掉的橋要跳過去，齒輪工坊到量器坊有一條推得開的吊板。
+- **故事會收尾（v1.2）**：殘頁、傳聞連線、回聲重演、檔案廊小知識，到分歧之廳的中點揭示，最後在斷環旁**把你自己的第一句話
+  重寫一遍**、立起母碑——你的字只留在瀏覽器裡，刻不刻都由你。
+- **進度看得見、不催人（v1.2）**：等級穿在披肩上（一圈 33 格 × 三圈 ＝ 99）；「今日三事」是提議不是任務——做不做都可以，
+  明天換一批，不想看就關掉。
 
 ### 內容與出處（護欄）
 
