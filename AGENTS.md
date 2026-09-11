@@ -7,7 +7,7 @@
 
 Promptasy（前名 PromptArcade）：在瀏覽器裡「邊玩邊學 prompt engineering」的 three.js 探索遊戲。
 離線評分、130 條技能全附官方出處、142 個關卡（130 教學＋12 應用）、12 個區域、11 種題型。
-純靜態、無後端、localStorage 存檔。v1.1 已上線 garyhsieh.com/promptasy；v1.2「濁靈之夜」開發完成、待發版（規模未變）。
+純靜態、無後端、localStorage 存檔。v1.1 已上線 garyhsieh.com/promptasy；v1.2「濁靈之夜」開發完成、已上線（規模未變）。
 
 ## 每個 Phase 的節奏
 

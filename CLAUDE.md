@@ -6,7 +6,7 @@
 
 - **Repo / 品牌**：`promptasy`（Phase 29 由 `promptarcade` 改名；prompt ＋ fantasy）
 - **一句話定位**：Learn Prompt Engineering by Playing.
-- **狀態**：**v1.1 已上線**（[garyhsieh.com/promptasy](https://garyhsieh.com/promptasy)）；**v1.2「濁靈之夜」開發完成、待發版**——12 區／142 關／130 技能（規模未變，v1.2 加的是世界與玩法，見 `docs/design/gameplay-roadmap.md`）。本檔是專案北極星，所有開發決策以此為準。
+- **狀態**：**v1.1 已上線**（[garyhsieh.com/promptasy](https://garyhsieh.com/promptasy)）；**v1.2「濁靈之夜」已上線（2026-09-11）**——12 區／142 關／130 技能（規模未變，v1.2 加的是世界與玩法，見 `docs/design/gameplay-roadmap.md`）。本檔是專案北極星，所有開發決策以此為準。
 
 ---
 
@@ -300,7 +300,7 @@ promptasy/
 > 路線圖是建議不是枷鎖；哪個環節投報率最高就先做哪個。
 >
 > **狀態（2026-09）**：M0–M6 已全部完成並發版 v1.1（curriculum v2：12 區／142 關／130 技能）；
-> **v1.2「濁靈之夜」25 個 phase 全部完成、待發版**——關卡數／區數／技能數一格未動，加的是濁靈、時辰、
+> **v1.2「濁靈之夜」25 個 phase 全部完成、已於 2026-09-11 上線**——關卡數／區數／技能數一格未動，加的是濁靈、時辰、
 > 中觀與跳躍、守夜人與守門者、殘頁與檔案廊、轉折與終局（`docs/design/gameplay-roadmap.md`）。
 > 尚未做的方向見 `docs/history/CHANGELOG.md` 各條「下一步建議」——最大缺口是**行動裝置**（觸控搖桿、720px 以下版面）與英文介面。
 
