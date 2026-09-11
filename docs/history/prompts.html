@@ -400,7 +400,7 @@ Do not use markdown in your response.
 </table></div>
 
 <!-- ============ v1.2「濁靈之夜」 ============ -->
-<h2>Ⅶ · v1.2「濁靈之夜」<small>2026-08-17 ~ 09-08 · 25 個 phase / 5 個里程碑</small></h2>
+<h2>Ⅶ · v1.2「濁靈之夜」<small>2026-08-17 ~ 09-11 · 25 個 phase / 5 個里程碑 ＋ 發版後 QA、上線</small></h2>
 <div class="tblwrap"><table>
 <tr><th>時間</th><th>類型</th><th>你說了什麼</th><th>達成效果</th></tr>
 
@@ -440,6 +440,18 @@ git diff --cached --stat 確認只含本 phase、commit、push dev（release gat
 <tr><td class="when">09-08</td><td><span class="tag p">指令</span></td>
 <td class="q">v1.2 收尾:e2e flaky 清零、低階機效能、對外數字同步</td>
 <td class="fx"><span class="ph">P25b</span><br><b>e2e 裡「等牆鐘」的等待全面改掉</b>(node 側 289 處、頁面側 508 處):等的改成<b>條件成立</b>,或者「牆鐘 <i>和</i> N 個真的畫出來的影格一起等」——這台機器閒著時一幀 174 毫秒、忙起來 372–481 毫秒,<code>sleep(800)</code> 連兩幀都排不到,那正是先前三輪失敗集合互不重疊(＝沒有一條是真迴歸)的原因。刻意留著的那些逐一在旁邊寫明理由(幾乎都是輪詢迴圈自己的取樣間隔)。連跑三輪 e2e,4,930 項全過、零 console error、零重跑。對外數字全部重新量過再寫,沒有一個是引用來的。</td></tr>
+
+<tr><td class="when">09-09</td><td><span class="tag p">指令</span></td>
+<td class="q"><span class="quote">我們要不要派個 subagent 用 playwright 幾個重點玩一下,看有沒有錯誤?</span></td>
+<td class="fx"><span class="ph">發版後 QA</span><br>Playwright 裝在 scratchpad(不進專案),8 次乾淨 session 走 11 個流程、1280×720 與 800×600。<b>console 零錯誤</b>,但抓到 <b>15 條斷言式 e2e 看不見的違和</b>:介紹卡「開始探索」在摺線下 1159px、手印按鈕被切、今日三事不在圖鑑最上面、三條提議兩條一樣、空白鍵三處說法不一、字幕/toast/HUD 互疊、800px 氣泡被切……站長之前實玩抓到的三個(提示卡、鐵砧、長凳)確認沒復發。</td></tr>
+
+<tr><td class="when">09-10</td><td><span class="tag p">指令</span></td>
+<td class="q"><span class="quote">全部,修完後,再驗證一次</span></td>
+<td class="fx"><span class="ph">15 條全修 → 重驗 15/15 PASS</span><br>修法不縮字(Phase 14 的字級是站長回饋)、不半透明:面板改成主按鈕釘底、今日三事搬到最上面、dedupe 看「畫出來會不會一樣」、HUD 加漸層 scrim、近距離字牌淡出。<b>過程中修正代理新寫的 e2e 段落自己踩了五種坑</b>(牆鐘等待、固定 300ms、key() 參數寫反、DOMRect 序列化成 {}、黑幕淡出競態),每一種都先用 Playwright 探針證明產品端是對的才回頭修測試;順帶量出「dt 夾 0.1 × 牆鐘上限」是石座演出逾時的真因,改成數影格。e2e 4,930 → <b>4,990 全綠</b>;同一套腳本重走:15/15 PASS、#14 20/20、零新違和。</td></tr>
+
+<tr><td class="when">09-11</td><td><span class="tag p">指令×4</span></td>
+<td class="q"><span class="quote">更新 README,做最後發版/merge 的檢查</span>;<span class="quote">readme 圖片都有更新嗎?內容也有根據現在的實作更新嗎</span>;<span class="quote">看一下那時候是怎麼部署的</span>;<span class="quote">go</span></td>
+<td class="fx"><span class="ph">v1.2.0 上線</span><br>README:v1.2 release notes、Controls(空白鍵=跳)、Features/繁中補 v1.2、<b>六張截圖全部在 v1.2 重拍</b>(1600×900、Lv.10/26 技巧/兩枚印記、ffmpeg 256 色,每張看過才放;工坊那張第一次抓錯題型、重抓 <code>oracle-workshop-36</code>)。tag 整理成三段式 <code>v1.2.0</code>,GitHub Release 發布。部署:garyhsieh 站把 promptasy 當 submodule,<code>chore(promptasy): bump to v1.2.0</code> push main → Vercel <code>prebuild</code> 建進 <code>public/promptasy</code>;<b>2026-09-11 上線</b>,curl 驗證新 bundle、og、字型、音檔全 200。</td></tr>
 </table></div>
 
 <footer>
